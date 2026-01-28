@@ -1,0 +1,32 @@
+# LangGraph ecosystem (with MCP support)
+langgraph
+langchain
+langchain-core>
+langchain-mcp-adapters  # Native MCP adapter - see https://github.com/langchain-ai/langchain-mcp-adapters
+langchain-openai
+langchain-anthropic
+langchain-google-genai
+
+# API and interfaces
+fastapi
+uvicorn
+websockets
+
+# Configuration and utilities
+pydantic
+pydantic-setting
+python-dotenv
+
+# RAG and embeddings
+chromadb
+langchain-community
+
+# Image handling
+pillow
+
+# CLI output
+rich
+
+# Utilities
+requests
+aiohttp
