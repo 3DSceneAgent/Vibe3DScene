@@ -1,7 +1,7 @@
 # LangGraph ecosystem (with MCP support)
 langgraph
 langchain
-langchain-core>
+langchain-core
 langchain-mcp-adapters  # Native MCP adapter - see https://github.com/langchain-ai/langchain-mcp-adapters
 langchain-openai
 langchain-anthropic
@@ -14,7 +14,7 @@ websockets
 
 # Configuration and utilities
 pydantic
-pydantic-setting
+pydantic-settings
 python-dotenv
 
 # RAG and embeddings
