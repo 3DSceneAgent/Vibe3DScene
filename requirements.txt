@@ -30,3 +30,6 @@ rich
 # Utilities
 requests
 aiohttp
+
+# Async backend 
+trio

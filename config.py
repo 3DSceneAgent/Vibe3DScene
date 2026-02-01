@@ -32,7 +32,7 @@ class Settings(BaseSettings):
         description="Blender MCP server host"
     )
     blender_port: int = Field(
-        default=9876,
+        default=9877,
         description="Blender MCP server port"
     )
     

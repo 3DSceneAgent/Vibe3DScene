@@ -39,7 +39,7 @@ class GeminiProvider(BaseVLMProvider):
     """Google Gemini provider with vision support"""
     
     def get_default_model(self) -> str:
-        return "gemini-2.0-flash-exp"
+        return "gemini-2.5-pro"
     
     def get_chat_model(self) -> Any:
         from langchain_google_genai import ChatGoogleGenerativeAI

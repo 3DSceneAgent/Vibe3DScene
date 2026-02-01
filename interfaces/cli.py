@@ -3,10 +3,15 @@ Command-line interface for the 3D scene agent.
 Interactive REPL with streaming responses and todo tracking.
 """
 import asyncio
+import sys
+import json
+import ast
 from rich.console import Console
 from rich.panel import Panel
 from rich.markdown import Markdown
 from rich.table import Table
+from rich.live import Live
+from rich.text import Text
 from langchain_core.messages import HumanMessage
 
 from agent.graph import create_agent_graph
@@ -43,6 +48,51 @@ def display_todos(todos: list[TodoItem]):
     console.print(table)
 
 
+def parse_agent_response(content: str) -> str:
+    """
+    Parse agent response to extract the core message text.
+    
+    The agent may return responses in various formats:
+    - Plain text
+    - JSON string
+    - Python list representation (from terminal output)
+    
+    Args:
+        content: Raw agent response content
+        
+    Returns:
+        Extracted message text
+    """
+    if not content:
+        return ""
+    
+    # Try to parse as JSON array
+    try:
+        if content.strip().startswith('['):
+            # Try JSON parsing first
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError:
+                # If JSON fails, try to parse as Python literal
+                data = ast.literal_eval(content)
+            
+            # Extract text from list of message objects
+            if isinstance(data, list) and len(data) > 0:
+                messages = []
+                for item in data:
+                    if isinstance(item, dict) and 'text' in item:
+                        messages.append(item['text'])
+                    elif isinstance(item, dict) and 'content' in item:
+                        messages.append(item['content'])
+                if messages:
+                    return '\n'.join(messages)
+    except (json.JSONDecodeError, ValueError, SyntaxError):
+        pass
+    
+    # Return as-is if not a special format
+    return content
+
+
 async def run_cli():
     """
     Run the interactive CLI interface.
@@ -55,7 +105,8 @@ async def run_cli():
         "  /scene - Show current scene info\n"
         "  /todos - Show current todos\n"
         "  /new - Start a new session\n"
-        "  /exit - Exit the agent",
+        "  /exit, /quit, exit, quit, q - Exit the agent\n"
+        "  Ctrl+C - Exit the agent",
         title="Welcome",
         border_style="cyan"
     ))
@@ -85,19 +136,22 @@ async def run_cli():
             if not user_input:
                 continue
             
+            # Handle exit commands (with or without /)
+            if user_input.lower() in ['/exit', '/quit', 'exit', 'quit', 'q']:
+                console.print("\n[yellow]Goodbye![/yellow]")
+                sys.exit(0)
+            
             # Handle commands
             if user_input.startswith("/"):
-                if user_input == "/exit":
-                    console.print("[yellow]Goodbye![/yellow]")
-                    break
-                elif user_input == "/help":
+                if user_input == "/help":
                     console.print(Panel(
                         "Available commands:\n"
                         "  /help - Show this help message\n"
                         "  /scene - Show current scene state\n"
                         "  /todos - Show current todos\n"
                         "  /new - Start a new session\n"
-                        "  /exit - Exit the agent",
+                        "  /exit, /quit, exit, quit, q - Exit the agent\n"
+                        "  Ctrl+C - Exit the agent",
                         title="Help",
                         border_style="blue"
                     ))
@@ -134,6 +188,9 @@ async def run_cli():
             # Stream agent responses
             console.print("\n[bold blue]Agent:[/bold blue]")
             
+            displayed_content = set()  # Track what we've already displayed
+            response_buffer = []  # Buffer for streaming text
+            
             async for event in app.astream(
                 {"messages": [HumanMessage(content=user_input)]},
                 config=config,
@@ -142,10 +199,30 @@ async def run_cli():
                 # Display agent messages
                 if "messages" in event:
                     last_message = event["messages"][-1]
+                    
+                    # Skip echoing the user's input message
+                    if hasattr(last_message, "type"):
+                        if last_message.type == "human":
+                            continue
+                    
+                    # Process agent responses
                     if hasattr(last_message, "content") and last_message.content:
-                        # Only print if it's new content
+                        # Only print if it's new content and not a tool call
                         if not hasattr(last_message, "tool_calls") or not last_message.tool_calls:
-                            console.print(last_message.content)
+                            content = last_message.content
+                            
+                            # Convert content to string for hashing (handle lists, dicts, etc.)
+                            content_str = str(content) if not isinstance(content, str) else content
+                            content_hash = hash(content_str)
+                            
+                            # Only display if we haven't seen this content before
+                            if content_hash not in displayed_content:
+                                displayed_content.add(content_hash)
+                                
+                                # Parse and display the response
+                                parsed_text = parse_agent_response(content_str)
+                                if parsed_text and parsed_text.strip():
+                                    console.print(parsed_text)
                 
                 # Display todos if updated
                 if "todos" in event and event["todos"]:
@@ -153,7 +230,11 @@ async def run_cli():
                     display_todos(event["todos"])
         
         except KeyboardInterrupt:
-            console.print("\n[yellow]Interrupted. Type /exit to quit.[/yellow]")
+            console.print("\n\n[yellow]Goodbye![/yellow]")
+            sys.exit(0)
+        except EOFError:
+            console.print("\n\n[yellow]Goodbye![/yellow]")
+            sys.exit(0)
         except Exception as e:
             console.print(f"\n[red]Error: {str(e)}[/red]")
 
@@ -163,4 +244,8 @@ def main():
     try:
         asyncio.run(run_cli())
     except KeyboardInterrupt:
-        console.print("\n[yellow]Goodbye![/yellow]")
+        console.print("\n\n[yellow]Goodbye![/yellow]")
+        sys.exit(0)
+    except EOFError:
+        console.print("\n\n[yellow]Goodbye![/yellow]")
+        sys.exit(0)

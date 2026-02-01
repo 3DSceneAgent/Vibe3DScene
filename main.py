@@ -26,7 +26,7 @@ Examples:
 
 Requirements:
   - Create a .env file with VLM_API_KEY set
-  - Start the Blender MCP server (localhost:9876)
+  - Start the Blender MCP server (localhost:6274)
   - Optionally: Start 3D asset retrieval API (localhost:8001)
         """
     )

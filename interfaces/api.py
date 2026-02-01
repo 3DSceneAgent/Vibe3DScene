@@ -3,15 +3,22 @@ FastAPI REST server for the 3D scene agent.
 Provides HTTP endpoints and WebSocket support with streaming.
 """
 import asyncio
+import base64
+import json
+import os
+import socket
+import tempfile
+import threading
+import time
 from typing import Dict, Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
-import json
 
 from agent.graph import create_agent_graph
+from memory.scene_memory import SceneMemory
 
 # Create FastAPI app
 app = FastAPI(
@@ -31,6 +38,122 @@ app.add_middleware(
 
 # Global agent instance
 _agent_graph = None
+
+# Blender addon connection (direct socket)
+_blender_connection = None
+_blender_lock = threading.Lock()
+
+
+class BlenderConnection:
+    """Minimal socket client for Blender addon commands."""
+
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+        self.sock = None
+
+    def connect(self) -> bool:
+        if self.sock:
+            return True
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.connect((self.host, self.port))
+            return True
+        except Exception:
+            self.sock = None
+            return False
+
+    def disconnect(self):
+        if self.sock:
+            try:
+                self.sock.close()
+            finally:
+                self.sock = None
+
+    def receive_full_response(self, buffer_size: int = 8192) -> bytes:
+        chunks = []
+        self.sock.settimeout(180.0)
+        while True:
+            chunk = self.sock.recv(buffer_size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            try:
+                data = b"".join(chunks)
+                json.loads(data.decode("utf-8"))
+                return data
+            except json.JSONDecodeError:
+                continue
+        if not chunks:
+            raise Exception("No data received")
+        data = b"".join(chunks)
+        json.loads(data.decode("utf-8"))
+        return data
+
+    def send_command(self, command_type: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        if not self.sock and not self.connect():
+            raise ConnectionError("Not connected to Blender")
+        command = {"type": command_type, "params": params or {}}
+        self.sock.sendall(json.dumps(command).encode("utf-8"))
+        response_data = self.receive_full_response()
+        response = json.loads(response_data.decode("utf-8"))
+        if response.get("status") == "error":
+            raise Exception(response.get("message", "Unknown error from Blender"))
+        return response.get("result", {})
+
+
+def get_blender_connection() -> BlenderConnection:
+    global _blender_connection
+    if _blender_connection is not None:
+        return _blender_connection
+    host = os.getenv("BLENDER_HOST", "localhost")
+    port = int(os.getenv("BLENDER_PORT", "9876"))
+    _blender_connection = BlenderConnection(host=host, port=port)
+    if not _blender_connection.connect():
+        _blender_connection = None
+        raise Exception("Could not connect to Blender addon.")
+    return _blender_connection
+
+
+def send_blender_command_sync(command_type: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    global _blender_connection
+    with _blender_lock:
+        try:
+            blender = get_blender_connection()
+            return blender.send_command(command_type, params)
+        except Exception:
+            if _blender_connection:
+                _blender_connection.disconnect()
+            _blender_connection = None
+            blender = get_blender_connection()
+            return blender.send_command(command_type, params)
+
+
+def serialize_message(message: Any) -> Dict[str, Any]:
+    if isinstance(message, dict):
+        return message
+    if hasattr(message, "type") or hasattr(message, "content"):
+        return {
+            "type": getattr(message, "type", None),
+            "content": getattr(message, "content", None),
+            "additional_kwargs": getattr(message, "additional_kwargs", None),
+            "response_metadata": getattr(message, "response_metadata", None),
+            "name": getattr(message, "name", None),
+            "id": getattr(message, "id", None),
+        }
+    return {"type": "unknown", "content": str(message)}
+
+
+def serialize_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(event, dict):
+        return {"event": event}
+    payload: Dict[str, Any] = {}
+    for key, value in event.items():
+        if key == "messages" and isinstance(value, list):
+            payload[key] = [serialize_message(msg) for msg in value]
+        else:
+            payload[key] = value
+    return payload
 
 
 async def get_agent():
@@ -73,6 +196,8 @@ async def root():
             "chat": "POST /chat",
             "chat_stream": "POST /chat/stream",
             "scene": "GET /scene/{thread_id}",
+            "scene_renders": "GET /scene/{thread_id}/renders",
+            "scene_gltf": "GET /scene/{thread_id}/gltf",
             "todos": "GET /todos/{thread_id}",
             "threads": "GET /threads",
             "websocket": "WS /ws"
@@ -137,7 +262,8 @@ async def chat_stream(request: ChatRequest):
                 stream_mode="values"
             ):
                 # Send event as JSON
-                yield f"data: {json.dumps(event, default=str)}\n\n"
+                payload = serialize_event(event)
+                yield f"data: {json.dumps(payload, default=str)}\n\n"
                 
         except Exception as e:
             error_event = {"error": str(e)}
@@ -161,18 +287,106 @@ async def get_scene(thread_id: str):
         Scene objects and metadata
     """
     try:
-        agent = await get_agent()
-        config = {"configurable": {"thread_id": thread_id}}
-        
-        state = await agent.aget_state(config)
-        
+        scene_info = await asyncio.to_thread(send_blender_command_sync, "get_scene_info")
+        scene_objects = SceneMemory.parse_scene_info(scene_info)
+        objects = scene_info.get("objects", []) if isinstance(scene_info, dict) else []
+        cameras = [obj.get("name") for obj in objects if obj.get("type") == "CAMERA" and obj.get("name")]
         return {
             "thread_id": thread_id,
-            "scene_objects": state.values.get("scene_objects", {}),
-            "persistent_cameras": state.values.get("persistent_cameras", []),
-            "iteration_count": state.values.get("iteration_count", 0)
+            "scene_objects": scene_objects,
+            "persistent_cameras": cameras,
+            "iteration_count": 0
         }
-        
+    except Exception:
+        try:
+            agent = await get_agent()
+            config = {"configurable": {"thread_id": thread_id}}
+            state = await agent.aget_state(config)
+            return {
+                "thread_id": thread_id,
+                "scene_objects": state.values.get("scene_objects", {}),
+                "persistent_cameras": state.values.get("persistent_cameras", []),
+                "iteration_count": state.values.get("iteration_count", 0)
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/scene/{thread_id}/renders")
+async def get_scene_renders(thread_id: str, mode: str = "rgb"):
+    """
+    Render all cameras in the current Blender scene and return base64 PNGs.
+    """
+    try:
+        scene_info = await asyncio.to_thread(send_blender_command_sync, "get_scene_info")
+        objects = scene_info.get("objects", [])
+        cameras = [obj.get("name") for obj in objects if obj.get("type") == "CAMERA"]
+
+        renders = []
+        for camera_name in cameras:
+            if not camera_name:
+                continue
+            temp_path = os.path.join(
+                tempfile.gettempdir(),
+                f"blender_render_{camera_name}_{int(time.time() * 1000)}.png"
+            )
+            result = await asyncio.to_thread(
+                send_blender_command_sync,
+                "render_from_camera",
+                {
+                    "camera_name": camera_name,
+                    "object_names": None,
+                    "mode": mode,
+                    "filepath": temp_path
+                }
+            )
+            filepath = result.get("filepath") or temp_path
+            if not os.path.exists(filepath):
+                continue
+            with open(filepath, "rb") as f:
+                image_b64 = base64.b64encode(f.read()).decode("ascii")
+            try:
+                os.remove(filepath)
+            except OSError:
+                pass
+            renders.append({
+                "camera_name": camera_name,
+                "image_base64": image_b64
+            })
+
+        return {"thread_id": thread_id, "renders": renders}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/scene/{thread_id}/gltf")
+async def get_scene_gltf(thread_id: str):
+    """
+    Export current Blender scene to GLB and return the binary.
+    """
+    try:
+        temp_path = os.path.join(
+            tempfile.gettempdir(),
+            f"scene_{thread_id}_{int(time.time() * 1000)}.glb"
+        )
+        export_code = (
+            "import bpy\n"
+            f"bpy.ops.export_scene.gltf(filepath=r\"{temp_path}\", "
+            "export_format='GLB', export_apply=True)\n"
+        )
+        await asyncio.to_thread(send_blender_command_sync, "execute_code", {"code": export_code})
+
+        if not os.path.exists(temp_path):
+            raise Exception("GLB export failed")
+
+        with open(temp_path, "rb") as f:
+            glb_data = f.read()
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+
+        return Response(content=glb_data, media_type="model/gltf-binary")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -245,7 +459,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     config=config,
                     stream_mode="values"
                 ):
-                    await websocket.send_json(event, default=str)
+                    await websocket.send_json(serialize_event(event), default=str)
             
     except WebSocketDisconnect:
         print(f"WebSocket disconnected: {thread_id}")

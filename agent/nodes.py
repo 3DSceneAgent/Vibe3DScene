@@ -2,6 +2,7 @@
 LangGraph node implementations.
 Nodes follow best practices: return partial state updates only.
 """
+import json
 import re
 from typing import Dict, Any
 from langchain_core.messages import ToolMessage, AIMessage, SystemMessage
@@ -80,6 +81,20 @@ def extract_todo_updates(messages: list) -> list[TodoItem]:
     for msg in messages:
         if isinstance(msg, AIMessage):
             content = msg.content
+            if not isinstance(content, str):
+                if isinstance(content, list):
+                    parts = []
+                    for item in content:
+                        if isinstance(item, dict):
+                            if "text" in item and isinstance(item["text"], str):
+                                parts.append(item["text"])
+                            elif "content" in item and isinstance(item["content"], str):
+                                parts.append(item["content"])
+                        elif isinstance(item, str):
+                            parts.append(item)
+                    content = "\n".join(parts) if parts else json.dumps(content, ensure_ascii=False)
+                else:
+                    content = str(content)
             
             # Look for <todos> blocks in the message
             todo_pattern = r'<todos>(.*?)</todos>'

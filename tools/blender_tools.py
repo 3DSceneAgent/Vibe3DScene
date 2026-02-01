@@ -45,6 +45,8 @@ async def get_blender_tools() -> List[Any]:
             "Install with: pip install langchain-mcp-adapters"
         ) from e
     except Exception as e:
+        import traceback 
+        traceback.print_exc()
         raise Exception(
             f"Failed to connect to Blender MCP server at {settings.blender_mcp_url}. "
             f"Make sure the server is running. Error: {str(e)}"
