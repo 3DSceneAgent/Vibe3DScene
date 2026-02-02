@@ -75,3 +75,13 @@ export function isAssistantMessage(message: unknown): boolean {
   }
   return false
 }
+
+export function applyStreamingDelta(raw: string | undefined, delta: string): {
+  raw: string
+  text: string
+  thinking?: string
+} {
+  const nextRaw = `${raw ?? ''}${delta}`
+  const parsed = parseThinking(nextRaw)
+  return { raw: nextRaw, text: parsed.text, thinking: parsed.thinking }
+}

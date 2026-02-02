@@ -35,6 +35,14 @@ class Settings(BaseSettings):
         default=9877,
         description="Blender MCP server port"
     )
+    blender_mode: str = Field(
+        default="local-client",
+        description="Blender connection mode: local-client or headless"
+    )
+    blender_headless_startup_timeout: int = Field(
+        default=10,
+        description="Seconds to wait for headless Blender startup"
+    )
     
     # 3D Asset Retrieval API
     retrieval_api_host: str = Field(
@@ -70,6 +78,18 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"Invalid VLM provider: {v}. "
                 f"Must be one of: {', '.join(valid_providers)}"
+            )
+        return v_lower
+
+    @field_validator("blender_mode")
+    @classmethod
+    def validate_blender_mode(cls, v: str) -> str:
+        valid_modes = {"local-client", "headless"}
+        v_lower = v.lower()
+        if v_lower not in valid_modes:
+            raise ValueError(
+                f"Invalid Blender mode: {v}. "
+                f"Must be one of: {', '.join(sorted(valid_modes))}"
             )
         return v_lower
     

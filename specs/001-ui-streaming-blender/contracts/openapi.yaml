@@ -1,0 +1,253 @@
+openapi: 3.1.0
+info:
+  title: 3D Scene Agent API
+  version: 1.0.0
+  description: API contracts for chat, streaming, and scene operations.
+servers:
+  - url: http://localhost:8000
+paths:
+  /chat:
+    post:
+      summary: Send a chat message (non-streaming).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: Chat response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+        '500':
+          description: Agent failure.
+  /chat/stream:
+    post:
+      summary: Send a chat message (streaming via SSE).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: Stream of SSE events containing message/todo updates.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: "SSE data events; each data payload is a JSON StreamEvent."
+        '500':
+          description: Streaming failure.
+  /scene/{thread_id}:
+    get:
+      summary: Get the current scene state.
+      parameters:
+        - in: path
+          name: thread_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Scene information.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SceneInfo'
+        '500':
+          description: Scene lookup failure.
+  /scene/{thread_id}/renders:
+    get:
+      summary: Render all cameras and return base64 PNGs.
+      parameters:
+        - in: path
+          name: thread_id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: mode
+          required: false
+          schema:
+            type: string
+            enum: [rgb, depth, normal]
+      responses:
+        '200':
+          description: Render images.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  thread_id:
+                    type: string
+                  renders:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RenderImage'
+        '500':
+          description: Render failure.
+  /scene/{thread_id}/gltf:
+    get:
+      summary: Export the current scene as GLB.
+      parameters:
+        - in: path
+          name: thread_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Binary GLB file.
+          content:
+            model/gltf-binary:
+              schema:
+                type: string
+                format: binary
+        '500':
+          description: Export failure.
+  /todos/{thread_id}:
+    get:
+      summary: Get the current todo list for a thread.
+      parameters:
+        - in: path
+          name: thread_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Todo list.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  thread_id:
+                    type: string
+                  todos:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TodoItem'
+        '500':
+          description: Todo lookup failure.
+  /threads:
+    get:
+      summary: List active threads.
+      responses:
+        '200':
+          description: Thread listing (may be empty).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  threads:
+                    type: array
+                    items:
+                      type: string
+                  message:
+                    type: string
+components:
+  schemas:
+    ChatRequest:
+      type: object
+      required: [message, thread_id]
+      properties:
+        message:
+          type: string
+        thread_id:
+          type: string
+    ChatResponse:
+      type: object
+      required: [response, thread_id]
+      properties:
+        response:
+          type: string
+        thread_id:
+          type: string
+        todos:
+          type: array
+          items:
+            $ref: '#/components/schemas/TodoItem'
+    StreamEvent:
+      type: object
+      properties:
+        messages:
+          type: array
+          items:
+            type: object
+        todos:
+          type: array
+          items:
+            $ref: '#/components/schemas/TodoItem'
+        error:
+          type: string
+    SceneInfo:
+      type: object
+      required: [thread_id, scene_objects]
+      properties:
+        thread_id:
+          type: string
+        scene_objects:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/SceneObject'
+        persistent_cameras:
+          type: array
+          items:
+            type: string
+        iteration_count:
+          type: integer
+    SceneObject:
+      type: object
+      properties:
+        type:
+          type: string
+        location:
+          type: array
+          items:
+            type: number
+        dimensions:
+          type: array
+          items:
+            type: number
+        bounding_box:
+          type: array
+          items:
+            type: array
+            items:
+              type: number
+        visible:
+          type: boolean
+        material_count:
+          type: integer
+    RenderImage:
+      type: object
+      required: [camera_name, image_base64]
+      properties:
+        camera_name:
+          type: string
+        image_base64:
+          type: string
+    TodoItem:
+      type: object
+      required: [id, description, status]
+      properties:
+        id:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+          enum: [pending, in_progress, completed, failed]
+        created_at:
+          type: string
+        completed_at:
+          type: string
+          nullable: true

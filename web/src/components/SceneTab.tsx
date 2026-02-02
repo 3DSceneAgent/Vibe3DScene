@@ -39,7 +39,7 @@ export function SceneTab({
   loading
 }: SceneTabProps) {
   return (
-    <div className="scene-tab">
+    <div className="scene-tab scene-pane">
       <div className="scene-toolbar">
         <div className="toolbar-group">
           <button className="ghost-btn" onClick={onRefreshScene} disabled={loading.scene}>
@@ -70,14 +70,16 @@ export function SceneTab({
         </div>
       </div>
 
-      <div className="scene-grid">
-        <div className="scene-left">
-          <SceneInfoPanel scene={scene} isLoading={loading.scene} onRefresh={onRefreshScene} />
-          <TodosPanel todos={todos} isLoading={loading.todos} onRefresh={onRefreshTodos} />
-        </div>
-        <div className="scene-right">
-          <GltfViewer gltfUrl={gltfUrl} environment={environment} />
-          <RenderGallery renders={renders} isLoading={loading.renders} onRefresh={onFetchRenders} />
+      <div className="scene-scroll-area">
+        <div className="scene-grid">
+          <div className="scene-left">
+            <SceneInfoPanel scene={scene} isLoading={loading.scene} onRefresh={onRefreshScene} />
+            <TodosPanel todos={todos} isLoading={loading.todos} onRefresh={onRefreshTodos} />
+          </div>
+          <div className="scene-right">
+            <GltfViewer gltfUrl={gltfUrl} environment={environment} />
+            <RenderGallery renders={renders} isLoading={loading.renders} onRefresh={onFetchRenders} />
+          </div>
         </div>
       </div>
     </div>

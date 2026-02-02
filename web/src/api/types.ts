@@ -31,4 +31,7 @@ export type StreamEvent = {
   messages?: unknown[]
   todos?: TodoItem[]
   error?: string
+  delta?: string
+  message_id?: string | null
+  event?: 'done'
 }

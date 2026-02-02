@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Message } from '../state/types'
+import { LoadingSpinner } from './LoadingSpinner'
 
 type MessageListProps = {
   messages: Message[]
@@ -24,11 +25,15 @@ export function MessageList({ messages }: MessageListProps) {
 }
 
 function MessageItem({ message }: { message: Message }) {
+  const showSpinner = message.role === 'assistant' && message.status === 'streaming'
   return (
     <div className={`message-row ${message.role}`}>
       <div className={`message-bubble ${message.role}`}>
         {message.thinking && <ThinkingBlock thinking={message.thinking} />}
-        <div className="message-content">{message.content || ' '}</div>
+        <div className="message-content">
+          {message.content || ' '}
+          {showSpinner && <LoadingSpinner />}
+        </div>
       </div>
     </div>
   )

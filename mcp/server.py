@@ -20,10 +20,10 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger("BlenderMCPServer")
 
 # Default configuration
-DEFAULT_CLIENT_HOST = "localhost"   
+DEFAULT_CLIENT_HOST = "localhost"
 DEFAULT_CLIENT_PORT = 9876
-DEFAULT_SERVER_HOST = "localhost"
-DEFAULT_SERVER_PORT = 9877
+DEFAULT_SERVER_HOST = os.getenv("MCP_SERVER_HOST", "localhost")
+DEFAULT_SERVER_PORT = int(os.getenv("MCP_SERVER_PORT", "9877"))
 
 polyhaven_meta_info = json.load(open("assets/polyhaven_meta.json"))
 REQ_HEADERS = {"User-Agent": "blender-mcp-vision"}

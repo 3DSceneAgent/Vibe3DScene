@@ -14,8 +14,10 @@ export function ChatTab({ thread, isStreaming, onSend }: ChatTabProps) {
   }
 
   return (
-    <div className="chat-tab">
-      <MessageList messages={thread.messages} />
+    <div className="chat-tab chat-pane">
+      <div className="chat-scroll-area">
+        <MessageList messages={thread.messages} />
+      </div>
       <ChatComposer disabled={isStreaming} onSend={onSend} />
     </div>
   )

@@ -18,6 +18,13 @@ from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 
 from agent.graph import create_agent_graph
+from blender.session_manager import (
+    allocate_headless_port,
+    build_headless_command_args,
+    get_session_manager,
+    start_headless_process,
+)
+from config import get_settings
 from memory.scene_memory import SceneMemory
 
 # Create FastAPI app
@@ -38,6 +45,7 @@ app.add_middleware(
 
 # Global agent instance
 _agent_graph = None
+_agent_graphs_by_thread: Dict[str, Any] = {}
 
 # Blender addon connection (direct socket)
 _blender_connection = None
@@ -115,8 +123,58 @@ def get_blender_connection() -> BlenderConnection:
     return _blender_connection
 
 
-def send_blender_command_sync(command_type: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def get_blender_connection_for_thread(thread_id: str) -> BlenderConnection:
+    settings = get_settings()
+    if settings.blender_mode == "local-client":
+        return get_blender_connection()
+
+    manager = get_session_manager()
+    session = manager.ensure(thread_id, "headless")
+    host = os.getenv("BLENDER_HEADLESS_HOST", settings.blender_host)
+    base_port = int(os.getenv("BLENDER_HEADLESS_BASE_PORT", "9876"))
+    port_range = int(os.getenv("BLENDER_HEADLESS_PORT_RANGE", "1"))
+    port = allocate_headless_port(thread_id, base_port, port_range)
+    manager.set_endpoint(thread_id, host, port)
+
+    command, args = build_headless_command_args(thread_id, host, port)
+
+    with session.lock:
+        connection = session.connection
+        if not isinstance(connection, BlenderConnection):
+            connection = BlenderConnection(host=host, port=port)
+            session.connection = connection
+        if not connection.connect():
+            start_headless_process(session, command, args)
+            deadline = time.time() + settings.blender_headless_startup_timeout
+            while time.time() < deadline:
+                if connection.connect():
+                    break
+                time.sleep(0.5)
+
+        if not connection.sock:
+            error_message = "Could not connect to headless Blender session."
+            manager.set_error(thread_id, error_message)
+            raise Exception(error_message)
+
+        manager.set_ready(thread_id, connection)
+
+    return connection
+
+
+def send_blender_command_sync(
+    command_type: str,
+    params: Dict[str, Any] | None = None,
+    thread_id: str | None = None
+) -> Dict[str, Any]:
     global _blender_connection
+    settings = get_settings()
+    if settings.blender_mode == "headless" and thread_id:
+        manager = get_session_manager()
+        session = manager.ensure(thread_id, "headless")
+        with session.lock:
+            blender = get_blender_connection_for_thread(thread_id)
+            return blender.send_command(command_type, params)
+
     with _blender_lock:
         try:
             blender = get_blender_connection()
@@ -156,9 +214,45 @@ def serialize_event(event: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-async def get_agent():
-    """Get or create the agent graph (singleton)"""
-    global _agent_graph
+def message_content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                if isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                elif isinstance(item.get("content"), str):
+                    parts.append(item["content"])
+                else:
+                    parts.append(json.dumps(item, ensure_ascii=False, default=str))
+            else:
+                parts.append(str(item))
+        return "".join(parts)
+    if isinstance(content, dict):
+        return json.dumps(content, ensure_ascii=False, default=str)
+    return str(content)
+
+
+def normalize_stream_event(event: Any) -> tuple[str | None, Any]:
+    if isinstance(event, tuple) and len(event) == 2:
+        return event[0], event[1]
+    return None, event
+
+
+async def get_agent(thread_id: str | None = None):
+    """Get or create the agent graph (singleton or per-thread in headless mode)."""
+    global _agent_graph, _agent_graphs_by_thread
+    settings = get_settings()
+    if settings.blender_mode == "headless" and thread_id:
+        if thread_id not in _agent_graphs_by_thread:
+            _agent_graphs_by_thread[thread_id] = await create_agent_graph(session_id=thread_id)
+        return _agent_graphs_by_thread[thread_id]
     if _agent_graph is None:
         _agent_graph = await create_agent_graph()
     return _agent_graph
@@ -217,7 +311,7 @@ async def chat(request: ChatRequest):
         ChatResponse with agent's response and todos
     """
     try:
-        agent = await get_agent()
+        agent = await get_agent(request.thread_id)
         config = {"configurable": {"thread_id": request.thread_id}}
         
         # Run agent
@@ -252,19 +346,48 @@ async def chat_stream(request: ChatRequest):
         StreamingResponse with SSE events
     """
     async def event_generator():
+        saw_message_stream = False
         try:
-            agent = await get_agent()
+            agent = await get_agent(request.thread_id)
             config = {"configurable": {"thread_id": request.thread_id}}
-            
+
             async for event in agent.astream(
                 {"messages": [HumanMessage(content=request.message)]},
                 config=config,
-                stream_mode="values"
+                stream_mode=["messages", "values"]
             ):
-                # Send event as JSON
-                payload = serialize_event(event)
-                yield f"data: {json.dumps(payload, default=str)}\n\n"
-                
+                mode, payload = normalize_stream_event(event)
+                if mode == "messages":
+                    saw_message_stream = True
+                if isinstance(payload, dict) and "todos" in payload and payload["todos"]:
+                    yield f"data: {json.dumps({'todos': payload['todos']}, default=str)}\n\n"
+
+                messages = None
+                if isinstance(payload, dict) and "messages" in payload:
+                    if not saw_message_stream:
+                        messages = payload["messages"]
+                elif mode == "messages":
+                    messages = payload
+
+                if messages:
+                    if not isinstance(messages, list):
+                        messages = [messages]
+                    for message in messages:
+                        serialized = serialize_message(message)
+                        message_type = serialized.get("type")
+                        if message_type in {"human", "tool", "system"}:
+                            continue
+                        if mode == "messages":
+                            delta = message_content_to_text(serialized.get("content"))
+                            if not delta:
+                                continue
+                            event_payload = {"delta": delta, "message_id": serialized.get("id")}
+                            yield f"data: {json.dumps(event_payload, default=str)}\n\n"
+                        else:
+                            payload = {"messages": [serialized]}
+                            yield f"data: {json.dumps(payload, default=str)}\n\n"
+
+            yield f"data: {json.dumps({'event': 'done'})}\n\n"
         except Exception as e:
             error_event = {"error": str(e)}
             yield f"data: {json.dumps(error_event)}\n\n"
@@ -287,7 +410,7 @@ async def get_scene(thread_id: str):
         Scene objects and metadata
     """
     try:
-        scene_info = await asyncio.to_thread(send_blender_command_sync, "get_scene_info")
+        scene_info = await asyncio.to_thread(send_blender_command_sync, "get_scene_info", None, thread_id)
         scene_objects = SceneMemory.parse_scene_info(scene_info)
         objects = scene_info.get("objects", []) if isinstance(scene_info, dict) else []
         cameras = [obj.get("name") for obj in objects if obj.get("type") == "CAMERA" and obj.get("name")]
@@ -297,9 +420,15 @@ async def get_scene(thread_id: str):
             "persistent_cameras": cameras,
             "iteration_count": 0
         }
-    except Exception:
+    except Exception as e:
+        settings = get_settings()
+        if settings.blender_mode == "local-client":
+            raise HTTPException(
+                status_code=503,
+                detail="Blender client not connected. Start the Blender addon or enable headless mode."
+            ) from e
         try:
-            agent = await get_agent()
+            agent = await get_agent(thread_id)
             config = {"configurable": {"thread_id": thread_id}}
             state = await agent.aget_state(config)
             return {
@@ -308,8 +437,8 @@ async def get_scene(thread_id: str):
                 "persistent_cameras": state.values.get("persistent_cameras", []),
                 "iteration_count": state.values.get("iteration_count", 0)
             }
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        except Exception as fallback_error:
+            raise HTTPException(status_code=500, detail=str(fallback_error)) from fallback_error
 
 
 @app.get("/scene/{thread_id}/renders")
@@ -318,7 +447,7 @@ async def get_scene_renders(thread_id: str, mode: str = "rgb"):
     Render all cameras in the current Blender scene and return base64 PNGs.
     """
     try:
-        scene_info = await asyncio.to_thread(send_blender_command_sync, "get_scene_info")
+        scene_info = await asyncio.to_thread(send_blender_command_sync, "get_scene_info", None, thread_id)
         objects = scene_info.get("objects", [])
         cameras = [obj.get("name") for obj in objects if obj.get("type") == "CAMERA"]
 
@@ -338,7 +467,8 @@ async def get_scene_renders(thread_id: str, mode: str = "rgb"):
                     "object_names": None,
                     "mode": mode,
                     "filepath": temp_path
-                }
+                },
+                thread_id
             )
             filepath = result.get("filepath") or temp_path
             if not os.path.exists(filepath):
@@ -374,7 +504,7 @@ async def get_scene_gltf(thread_id: str):
             f"bpy.ops.export_scene.gltf(filepath=r\"{temp_path}\", "
             "export_format='GLB', export_apply=True)\n"
         )
-        await asyncio.to_thread(send_blender_command_sync, "execute_code", {"code": export_code})
+        await asyncio.to_thread(send_blender_command_sync, "execute_code", {"code": export_code}, thread_id)
 
         if not os.path.exists(temp_path):
             raise Exception("GLB export failed")
@@ -403,7 +533,7 @@ async def get_todos(thread_id: str):
         List of todos with their status
     """
     try:
-        agent = await get_agent()
+        agent = await get_agent(thread_id)
         config = {"configurable": {"thread_id": thread_id}}
         
         state = await agent.aget_state(config)
@@ -444,7 +574,7 @@ async def websocket_endpoint(websocket: WebSocket):
     thread_id = "websocket-session"
     
     try:
-        agent = await get_agent()
+        agent = await get_agent(thread_id)
         config = {"configurable": {"thread_id": thread_id}}
         
         while True:
@@ -457,7 +587,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 async for event in agent.astream(
                     {"messages": [HumanMessage(content=message_data["message"])]},
                     config=config,
-                    stream_mode="values"
+                    stream_mode=["messages", "values"]
                 ):
                     await websocket.send_json(serialize_event(event), default=str)
             

@@ -1,6 +1,7 @@
 import type { RenderImage, SceneInfo, TodoItem } from '../api/types'
 
 export type MessageRole = 'user' | 'assistant'
+export type MessageStatus = 'streaming' | 'final' | 'error'
 
 export type Message = {
   id: string
@@ -9,6 +10,7 @@ export type Message = {
   thinking?: string
   createdAt: number
   raw?: string
+  status?: MessageStatus
 }
 
 export type Thread = {

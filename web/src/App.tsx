@@ -7,16 +7,16 @@ import { SettingsPanel } from './components/SettingsPanel'
 import { ThreadList } from './components/ThreadList'
 import { loadSettings, loadThreads, saveSettings, saveThreads } from './state/storage'
 import type { Message, Thread } from './state/types'
-import { extractMessageContent, hashString, isHumanMessage, isToolMessage, parseThinking } from './utils/message'
+import { applyStreamingDelta, extractMessageContent, isHumanMessage, isToolMessage, parseThinking } from './utils/message'
 import './App.css'
 
 function App() {
   const [threads, setThreads] = useState<Thread[]>(() => loadThreads())
   const [activeThreadId, setActiveThreadId] = useState<string | null>(() => loadThreads()[0]?.id ?? null)
-  const [view, setView] = useState<'chat' | 'scene' | 'settings'>('chat')
   const [settings, setSettings] = useState(() => loadSettings())
   const [environment, setEnvironment] = useState<'studio' | 'warm' | 'cool'>('studio')
   const [isStreaming, setIsStreaming] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   const [loading, setLoading] = useState({
     scene: false,
     todos: false,
@@ -46,14 +46,14 @@ function App() {
   }, [settings])
 
   useEffect(() => {
-    if (view !== 'scene' || !activeThread) return
+    if (!activeThread) return
     if (!activeThread.scene && !loading.scene) {
       refreshScene()
     }
     if (activeThread.todos.length === 0 && !loading.todos) {
       refreshTodos()
     }
-  }, [view, activeThreadId])
+  }, [activeThread, loading.scene, loading.todos])
 
   const updateThread = (threadId: string, updater: (thread: Thread) => Thread) => {
     setThreads((prev) => prev.map((thread) => (thread.id === threadId ? updater(thread) : thread)))
@@ -72,7 +72,6 @@ function App() {
     }
     setThreads((prev) => [newThread, ...prev])
     setActiveThreadId(newThread.id)
-    setView('chat')
   }
 
   const deleteThread = (threadId: string) => {
@@ -116,7 +115,8 @@ function App() {
       id: assistantId,
       role: 'assistant',
       content: '',
-      createdAt: now
+      createdAt: now,
+      status: 'streaming'
     }
 
     updateThread(activeThread.id, (thread) => {
@@ -134,8 +134,6 @@ function App() {
     setIsStreaming(true)
     const abortController = new AbortController()
     streamAbortRef.current = abortController
-    const seenHashes = new Set<number>()
-
     try {
       await streamChat({
         baseUrl: settings.backendUrl,
@@ -143,15 +141,17 @@ function App() {
         threadId: activeThread.id,
         signal: abortController.signal,
         onEvent: (event: StreamEvent) => {
-          if (event.error) {
+          const updateAssistant = (updater: (message: Message) => Message) => {
             updateThread(activeThread.id, (thread) => ({
               ...thread,
               messages: thread.messages.map((message) =>
-                message.id === assistantId
-                  ? { ...message, content: `Error: ${event.error}` }
-                  : message
+                message.id === assistantId ? updater(message) : message
               )
             }))
+          }
+
+          if (event.error) {
+            updateAssistant((message) => ({ ...message, content: `Error: ${event.error}`, status: 'error' }))
             return
           }
 
@@ -162,27 +162,32 @@ function App() {
             }))
           }
 
+          if (event.delta) {
+            updateAssistant((message) => {
+              const next = applyStreamingDelta(message.raw, event.delta || '')
+              return {
+                ...message,
+                content: next.text,
+                thinking: next.thinking,
+                raw: next.raw,
+                status: 'streaming'
+              }
+            })
+            return
+          }
+
           if (event.messages && event.messages.length > 0) {
             const lastMessage = event.messages[event.messages.length - 1]
             if (isHumanMessage(lastMessage) || isToolMessage(lastMessage)) return
             const raw = extractMessageContent(lastMessage)
             if (!raw) return
-            const hash = hashString(raw)
-            if (seenHashes.has(hash)) return
-            seenHashes.add(hash)
             const parsed = parseThinking(raw)
-            updateThread(activeThread.id, (thread) => ({
-              ...thread,
-              messages: thread.messages.map((message) =>
-                message.id === assistantId
-                  ? {
-                      ...message,
-                      content: parsed.text,
-                      thinking: parsed.thinking,
-                      raw
-                    }
-                  : message
-              )
+            updateAssistant((message) => ({
+              ...message,
+              content: parsed.text,
+              thinking: parsed.thinking,
+              raw,
+              status: 'streaming'
             }))
           }
         }
@@ -192,11 +197,19 @@ function App() {
         ...thread,
         messages: thread.messages.map((message) =>
           message.id === assistantId
-            ? { ...message, content: `Error: ${String(error)}` }
+            ? { ...message, content: `Error: ${String(error)}`, status: 'error' }
             : message
         )
       }))
     } finally {
+      updateThread(activeThread.id, (thread) => ({
+        ...thread,
+        messages: thread.messages.map((message) =>
+          message.id === assistantId && message.status !== 'error'
+            ? { ...message, status: 'final' }
+            : message
+        )
+      }))
       setIsStreaming(false)
     }
   }
@@ -263,68 +276,55 @@ function App() {
           activeId={activeThreadId}
           onSelect={(id) => {
             setActiveThreadId(id)
-            setView('chat')
           }}
           onDelete={deleteThread}
           onNew={createThread}
         />
         <div className="sidebar-footer">
-          <button className="ghost-btn full-width" onClick={() => setView('settings')}>
+          <button className="ghost-btn full-width" onClick={() => setShowSettings(true)}>
             Settings
           </button>
         </div>
       </aside>
 
       <main className="main">
-        <div className="topbar">
-          <div className="tabs">
-            <button
-              className={`tab ${view === 'chat' ? 'active' : ''}`}
-              onClick={() => setView('chat')}
-            >
-              Chat
-            </button>
-            <button
-              className={`tab ${view === 'scene' ? 'active' : ''}`}
-              onClick={() => setView('scene')}
-            >
-              Scene
-            </button>
-            <button
-              className={`tab ${view === 'settings' ? 'active' : ''}`}
-              onClick={() => setView('settings')}
-            >
-              Settings
-            </button>
+        {showSettings && (
+          <div className="settings-overlay">
+            <div className="settings-card">
+              <div className="settings-header">
+                <div className="panel-title">Settings</div>
+                <button className="text-btn" onClick={() => setShowSettings(false)}>
+                  Close
+                </button>
+              </div>
+              <SettingsPanel settings={settings} onChange={setSettings} />
+            </div>
           </div>
-          {activeThread && view !== 'settings' && (
-            <div className="thread-pill">{activeThread.title}</div>
-          )}
-        </div>
+        )}
 
-        <div className="main-content">
-          {view === 'settings' && <SettingsPanel settings={settings} onChange={setSettings} />}
-          {view === 'chat' && (
+        <div className="workspace">
+          <section className="workspace-scene">
+            {activeThread ? (
+              <SceneTab
+                scene={activeThread.scene ?? null}
+                todos={activeThread.todos}
+                renders={activeThread.renders ?? []}
+                gltfUrl={activeThread.gltfUrl ?? null}
+                environment={environment}
+                onEnvironmentChange={setEnvironment}
+                onRefreshScene={refreshScene}
+                onRefreshTodos={refreshTodos}
+                onFetchRenders={fetchRenders}
+                onFetchGltf={fetchGltf}
+                loading={loading}
+              />
+            ) : (
+              <div className="empty-state">Create a conversation to see scene info.</div>
+            )}
+          </section>
+          <section className="workspace-chat">
             <ChatTab thread={activeThread} isStreaming={isStreaming} onSend={handleSend} />
-          )}
-          {view === 'scene' && activeThread && (
-            <SceneTab
-              scene={activeThread.scene ?? null}
-              todos={activeThread.todos}
-              renders={activeThread.renders ?? []}
-              gltfUrl={activeThread.gltfUrl ?? null}
-              environment={environment}
-              onEnvironmentChange={setEnvironment}
-              onRefreshScene={refreshScene}
-              onRefreshTodos={refreshTodos}
-              onFetchRenders={fetchRenders}
-              onFetchGltf={fetchGltf}
-              loading={loading}
-            />
-          )}
-          {view === 'scene' && !activeThread && (
-            <div className="empty-state">Create a conversation to see scene info.</div>
-          )}
+          </section>
         </div>
       </main>
     </div>

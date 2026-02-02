@@ -17,6 +17,7 @@ class OpenAIProvider(BaseVLMProvider):
             model=self.model,
             api_key=self.api_key,
             temperature=0.7,
+            streaming=True,
         )
 
 
@@ -32,6 +33,7 @@ class AnthropicProvider(BaseVLMProvider):
             model=self.model,
             api_key=self.api_key,
             temperature=0.7,
+            streaming=True,
         )
 
 
@@ -47,6 +49,7 @@ class GeminiProvider(BaseVLMProvider):
             model=self.model,
             google_api_key=self.api_key,
             temperature=0.7,
+            streaming=True,
         )
 
 

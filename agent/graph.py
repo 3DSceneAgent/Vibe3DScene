@@ -15,7 +15,7 @@ from vlm import get_vlm_provider
 from tools import get_blender_tools
 
 
-async def create_agent_graph():
+async def create_agent_graph(session_id: str | None = None):
     """
     Create and compile the LangGraph agent.
     
@@ -39,7 +39,7 @@ async def create_agent_graph():
     model = vlm_provider.get_chat_model()
     
     # Load tools from Blender MCP server
-    tools = await get_blender_tools()
+    tools = await get_blender_tools(session_id=session_id)
     
     # Bind tools to model
     llm_with_tools = model.bind_tools(tools)
@@ -76,7 +76,7 @@ async def create_agent_graph():
     return app
 
 
-def create_agent_graph_sync():
+def create_agent_graph_sync(session_id: str | None = None):
     """Synchronous wrapper for create_agent_graph"""
     import asyncio
-    return asyncio.run(create_agent_graph())
+    return asyncio.run(create_agent_graph(session_id=session_id))

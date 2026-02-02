@@ -50,6 +50,21 @@ export async function streamChat({
       }
     }
   }
+
+  if (buffer.trim()) {
+    const lines = buffer.split('\n').filter((line) => line.startsWith('data:'))
+    if (lines.length > 0) {
+      const data = lines.map((line) => line.replace(/^data:\s?/, '')).join('\n')
+      if (data) {
+        try {
+          const parsed = JSON.parse(data) as StreamEvent
+          onEvent(parsed)
+        } catch (error) {
+          console.error('Failed to parse stream event', error)
+        }
+      }
+    }
+  }
 }
 
 export async function getScene(baseUrl: string, threadId: string): Promise<SceneInfo> {
