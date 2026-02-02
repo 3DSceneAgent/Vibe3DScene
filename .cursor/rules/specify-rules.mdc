@@ -3,6 +3,8 @@
 Auto-generated from all feature plans. Last updated: 2026-02-01
 
 ## Active Technologies
+- Python 3.x (backend), TypeScript 5.9 (frontend) + FastAPI, LangGraph/LangChain, websockets, React 19, Vite 7, Three.js (002-scene-ui-fixes)
+- In-memory agent state, temporary filesystem exports, browser `localStorage` for threads/settings (002-scene-ui-fixes)
 
 - Python 3.x (backend), TypeScript 5.9 (frontend) + FastAPI, LangGraph, LangChain, langchain-mcp-adapters, websockets, React 19, Vite 7, Three.js (001-ui-streaming-blender)
 
@@ -23,6 +25,7 @@ cd src [ONLY COMMANDS FOR ACTIVE TECHNOLOGIES][ONLY COMMANDS FOR ACTIVE TECHNOLO
 Python 3.x (backend), TypeScript 5.9 (frontend): Follow standard conventions
 
 ## Recent Changes
+- 002-scene-ui-fixes: Added Python 3.x (backend), TypeScript 5.9 (frontend) + FastAPI, LangGraph/LangChain, websockets, React 19, Vite 7, Three.js
 
 - 001-ui-streaming-blender: Added Python 3.x (backend), TypeScript 5.9 (frontend) + FastAPI, LangGraph, LangChain, langchain-mcp-adapters, websockets, React 19, Vite 7, Three.js
 

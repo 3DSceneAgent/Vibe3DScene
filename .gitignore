@@ -20,3 +20,5 @@ coverage/
 .env.*
 .vscode/
 .idea/
+
+.pytest_cache

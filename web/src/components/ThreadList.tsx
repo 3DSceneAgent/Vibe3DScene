@@ -6,37 +6,54 @@ type ThreadListProps = {
   onSelect: (threadId: string) => void
   onDelete: (threadId: string) => void
   onNew: () => void
+  collapsed?: boolean
 }
 
-export function ThreadList({ threads, activeId, onSelect, onDelete, onNew }: ThreadListProps) {
+export function ThreadList({
+  threads,
+  activeId,
+  onSelect,
+  onDelete,
+  onNew,
+  collapsed = false
+}: ThreadListProps) {
   return (
-    <div className="thread-list">
-      <button className="primary-btn" onClick={onNew}>
-        New Chat
+    <div className={`thread-list ${collapsed ? 'collapsed' : ''}`}>
+      <button className={`primary-btn ${collapsed ? 'icon-btn' : ''}`} onClick={onNew}>
+        {collapsed ? '+' : 'New Chat'}
       </button>
-      <div className="thread-items">
-        {threads.length === 0 && <div className="muted">No conversations yet</div>}
-        {threads.map((thread) => (
-          <div
-            key={thread.id}
-            className={`thread-item ${thread.id === activeId ? 'active' : ''}`}
-            onClick={() => onSelect(thread.id)}
-          >
-            <div className="thread-title">{thread.title || 'Untitled'}</div>
-            <div className="thread-meta">
-              {thread.messages.length} messages · {new Date(thread.createdAt).toLocaleDateString()}
-            </div>
-            <button
-              className="ghost-btn"
-              onClick={(event) => {
-                event.stopPropagation()
-                onDelete(thread.id)
-              }}
+      <div className={`thread-items ${collapsed ? 'collapsed' : ''}`}>
+        {threads.length === 0 && !collapsed && <div className="muted">No conversations yet</div>}
+        {threads.map((thread) => {
+          const label = thread.title || 'Untitled'
+          const shortLabel = label.trim().charAt(0).toUpperCase() || '?'
+          return (
+            <div
+              key={thread.id}
+              className={`thread-item ${collapsed ? 'compact' : ''} ${thread.id === activeId ? 'active' : ''}`}
+              onClick={() => onSelect(thread.id)}
+              title={collapsed ? label : undefined}
             >
-              Delete
-            </button>
-          </div>
-        ))}
+              <div className="thread-title">{collapsed ? shortLabel : label}</div>
+              {!collapsed && (
+                <>
+                  <div className="thread-meta">
+                    {thread.messages.length} messages · {new Date(thread.createdAt).toLocaleDateString()}
+                  </div>
+                  <button
+                    className="ghost-btn"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      onDelete(thread.id)
+                    }}
+                  >
+                    Delete
+                  </button>
+                </>
+              )}
+            </div>
+          )
+        })}
       </div>
     </div>
   )

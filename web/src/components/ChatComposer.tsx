@@ -23,8 +23,17 @@ export function ChatComposer({ disabled, onSend }: ChatComposerProps) {
         value={input}
         disabled={disabled}
         onChange={(event) => setInput(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key !== 'Enter') return
+          if (event.ctrlKey || event.metaKey || event.shiftKey) {
+            return
+          }
+          event.preventDefault()
+          handleSend()
+        }}
         rows={2}
       />
+      <div className="composer-hint muted">Enter to send <br />Shift + Enter for newline</div>
       <button className="primary-btn" onClick={handleSend} disabled={disabled}>
         Send
       </button>

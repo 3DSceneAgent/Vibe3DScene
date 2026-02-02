@@ -1,13 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { streamChat, getScene, getTodos, getSceneRenders, getSceneGltf } from './api/client'
+import { streamChat, getScene, getSceneRenders, getSceneGltf } from './api/client'
 import type { StreamEvent, TodoItem } from './api/types'
 import { ChatTab } from './components/ChatTab'
 import { SceneTab } from './components/SceneTab'
 import { SettingsPanel } from './components/SettingsPanel'
+import { TopBar } from './components/TopBar'
 import { ThreadList } from './components/ThreadList'
 import { loadSettings, loadThreads, saveSettings, saveThreads } from './state/storage'
 import type { Message, Thread } from './state/types'
-import { applyStreamingDelta, extractMessageContent, isHumanMessage, isToolMessage, parseThinking } from './utils/message'
+import {
+  applyStreamingDeltaWithId,
+  extractMessageContent,
+  isHumanMessage,
+  isToolMessage,
+  parseThinking
+} from './utils/message'
+import { downloadBlob } from './utils/download'
 import './App.css'
 
 function App() {
@@ -17,15 +25,18 @@ function App() {
   const [environment, setEnvironment] = useState<'studio' | 'warm' | 'cool'>('studio')
   const [isStreaming, setIsStreaming] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
   const [loading, setLoading] = useState({
     scene: false,
-    todos: false,
     renders: false,
-    gltf: false
+    gltf: false,
+    download: false
   })
   const streamAbortRef = useRef<AbortController | null>(null)
   const requestedSceneRef = useRef<Set<string>>(new Set())
-  const requestedTodosRef = useRef<Set<string>>(new Set())
+  const previousAssistantContentRef = useRef<string | null>(null)
+  const knownStreamIdsRef = useRef<Set<string>>(new Set())
+  const receivedDeltaRef = useRef(false)
 
   const activeThread = useMemo(
     () => threads.find((thread) => thread.id === activeThreadId) ?? null,
@@ -75,7 +86,6 @@ function App() {
       return prev.filter((thread) => thread.id !== threadId)
     })
     requestedSceneRef.current.delete(threadId)
-    requestedTodosRef.current.delete(threadId)
     if (activeThreadId === threadId) {
       const remaining = threads.filter((thread) => thread.id !== threadId)
       setActiveThreadId(remaining[0]?.id ?? null)
@@ -97,6 +107,15 @@ function App() {
       streamAbortRef.current.abort()
     }
 
+    previousAssistantContentRef.current =
+      activeThread.messages.slice().reverse().find((message) => message.role === 'assistant')?.content ?? null
+    knownStreamIdsRef.current = new Set(
+      activeThread.messages
+        .map((message) => message.streamId)
+        .filter((streamId): streamId is string => typeof streamId === 'string' && streamId.length > 0)
+    )
+    receivedDeltaRef.current = false
+
     const now = Date.now()
     const userMessage: Message = {
       id: `msg-${now}-user`,
@@ -110,6 +129,7 @@ function App() {
       role: 'assistant',
       content: '',
       createdAt: now,
+      streamId: null,
       status: 'streaming'
     }
 
@@ -157,13 +177,23 @@ function App() {
           }
 
           if (event.delta) {
+            receivedDeltaRef.current = true
+            if (event.message_id) {
+              knownStreamIdsRef.current.add(event.message_id)
+            }
             updateAssistant((message) => {
-              const next = applyStreamingDelta(message.raw, event.delta || '')
+              const next = applyStreamingDeltaWithId(
+                message.raw,
+                event.delta || '',
+                message.streamId,
+                event.message_id ?? null
+              )
               return {
                 ...message,
                 content: next.text,
                 thinking: next.thinking,
                 raw: next.raw,
+                streamId: next.messageId,
                 status: 'streaming'
               }
             })
@@ -171,16 +201,42 @@ function App() {
           }
 
           if (event.messages && event.messages.length > 0) {
-            const lastMessage = event.messages[event.messages.length - 1]
-            if (isHumanMessage(lastMessage) || isToolMessage(lastMessage)) return
-            const raw = extractMessageContent(lastMessage)
+            const candidates = event.messages.filter(
+              (message) => !isHumanMessage(message) && !isToolMessage(message)
+            )
+            if (candidates.length === 0) return
+            let selected = candidates[candidates.length - 1]
+            for (let i = candidates.length - 1; i >= 0; i -= 1) {
+              const candidate = candidates[i]
+              const candidateId =
+                typeof candidate === 'object' && candidate !== null && 'id' in candidate
+                  ? (candidate as { id?: string | null }).id ?? null
+                  : null
+              if (candidateId && knownStreamIdsRef.current.has(candidateId)) {
+                continue
+              }
+              selected = candidate
+              break
+            }
+            const raw = extractMessageContent(selected)
             if (!raw) return
             const parsed = parseThinking(raw)
+            const streamId =
+              typeof selected === 'object' && selected !== null && 'id' in selected
+                ? (selected as { id?: string | null }).id ?? null
+                : null
+            if (!receivedDeltaRef.current && previousAssistantContentRef.current === parsed.text) {
+              return
+            }
+            if (streamId) {
+              knownStreamIdsRef.current.add(streamId)
+            }
             updateAssistant((message) => ({
               ...message,
               content: parsed.text,
               thinking: parsed.thinking,
               raw,
+              streamId,
               status: 'streaming'
             }))
           }
@@ -219,17 +275,6 @@ function App() {
     }
   }, [activeThread, settings.backendUrl, updateThread])
 
-  const refreshTodos = useCallback(async () => {
-    if (!activeThread) return
-    setLoading((prev) => ({ ...prev, todos: true }))
-    try {
-      const todos = await getTodos(settings.backendUrl, activeThread.id)
-      updateThread(activeThread.id, (thread) => ({ ...thread, todos }))
-    } finally {
-      setLoading((prev) => ({ ...prev, todos: false }))
-    }
-  }, [activeThread, settings.backendUrl, updateThread])
-
   const fetchRenders = useCallback(async () => {
     if (!activeThread) return
     setLoading((prev) => ({ ...prev, renders: true }))
@@ -258,6 +303,24 @@ function App() {
     }
   }, [activeThread, settings.backendUrl, updateThread])
 
+  const downloadGltf = useCallback(async () => {
+    if (!activeThread) return
+    if (!activeThread.scene) {
+      window.alert('No scene available. Refresh the scene before downloading.')
+      return
+    }
+    setLoading((prev) => ({ ...prev, download: true }))
+    try {
+      const blob = await getSceneGltf(settings.backendUrl, activeThread.id)
+      const filename = `scene-${activeThread.id}.glb`
+      downloadBlob(blob, filename)
+    } catch (error) {
+      window.alert(`Failed to download GLTF: ${String(error)}`)
+    } finally {
+      setLoading((prev) => ({ ...prev, download: false }))
+    }
+  }, [activeThread, settings.backendUrl])
+
   useEffect(() => {
     if (!activeThread) return
     const threadId = activeThread.id
@@ -265,26 +328,30 @@ function App() {
       requestedSceneRef.current.add(threadId)
       refreshScene()
     }
-    if (!requestedTodosRef.current.has(threadId) && !loading.todos && activeThread.todos.length === 0) {
-      requestedTodosRef.current.add(threadId)
-      refreshTodos()
-    }
   }, [
     activeThread?.id,
     activeThread?.scene,
-    activeThread?.todos.length,
     loading.scene,
-    loading.todos,
-    refreshScene,
-    refreshTodos
+    refreshScene
   ])
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
+      <aside className={`sidebar ${isSidebarCollapsed ? 'collapsed' : ''}`}>
         <div className="sidebar-header">
-          <div className="app-title">3D Scene Agent</div>
-          <div className="app-subtitle">Chat & Scene Console</div>
+          {!isSidebarCollapsed && (
+            <div className="sidebar-titles">
+              <div className="app-title">3D Scene Agent</div>
+              <div className="app-subtitle">Chat & Scene Console</div>
+            </div>
+          )}
+          <button
+            className="ghost-btn icon-btn"
+            onClick={() => setIsSidebarCollapsed((prev) => !prev)}
+            aria-label={isSidebarCollapsed ? 'Expand conversation history' : 'Collapse conversation history'}
+          >
+            {isSidebarCollapsed ? '›' : '‹'}
+          </button>
         </div>
         <ThreadList
           threads={threads}
@@ -294,12 +361,8 @@ function App() {
           }}
           onDelete={deleteThread}
           onNew={createThread}
+          collapsed={isSidebarCollapsed}
         />
-        <div className="sidebar-footer">
-          <button className="ghost-btn full-width" onClick={() => setShowSettings(true)}>
-            Settings
-          </button>
-        </div>
       </aside>
 
       <main className="main">
@@ -317,21 +380,34 @@ function App() {
           </div>
         )}
 
+        <TopBar
+          environment={environment}
+          onEnvironmentChange={setEnvironment}
+          onRefreshScene={refreshScene}
+          onFetchRenders={fetchRenders}
+          onLoadGltf={fetchGltf}
+          onDownloadGltf={downloadGltf}
+          onOpenSettings={() => setShowSettings(true)}
+          isSceneLoading={loading.scene}
+          isRendersLoading={loading.renders}
+          isGltfLoading={loading.gltf}
+          isDownloadLoading={loading.download}
+          isDownloadDisabled={!activeThread?.scene}
+          canRunActions={Boolean(activeThread)}
+        />
+
         <div className="workspace">
           <section className="workspace-scene">
             {activeThread ? (
               <SceneTab
                 scene={activeThread.scene ?? null}
-                todos={activeThread.todos}
                 renders={activeThread.renders ?? []}
                 gltfUrl={activeThread.gltfUrl ?? null}
                 environment={environment}
-                onEnvironmentChange={setEnvironment}
-                onRefreshScene={refreshScene}
-                onRefreshTodos={refreshTodos}
-                onFetchRenders={fetchRenders}
-                onFetchGltf={fetchGltf}
-                loading={loading}
+                loading={{
+                  scene: loading.scene,
+                  renders: loading.renders
+                }}
               />
             ) : (
               <div className="empty-state">Create a conversation to see scene info.</div>

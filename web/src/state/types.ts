@@ -10,6 +10,7 @@ export type Message = {
   thinking?: string
   createdAt: number
   raw?: string
+  streamId?: string | null
   status?: MessageStatus
 }
 

@@ -143,6 +143,23 @@ pytest tests/
 pytest tests/integration/
 ```
 
+### Headless Blender Mode (Manual Test)
+
+1. Set `BLENDER_MODE=headless` in `.env`.
+2. (Optional) Configure headless startup:
+   - `BLENDER_HEADLESS_HOST` (default: `localhost`)
+   - `BLENDER_HEADLESS_BASE_PORT` (default: `9876`)
+   - `BLENDER_HEADLESS_PORT_RANGE` (default: `1`)
+   - `BLENDER_HEADLESS_CMD` (e.g., `/Applications/Blender.app/Contents/MacOS/Blender`)
+   - `BLENDER_HEADLESS_ARGS` (supports `{session_id}`, `{host}`, `{port}`)
+3. (Optional) Configure per-session MCP server commands:
+   - `BLENDER_MCP_HOST`, `BLENDER_MCP_BASE_PORT`, `BLENDER_MCP_PORT_RANGE`
+   - `BLENDER_MCP_CMD` (default: `python`)
+   - `BLENDER_MCP_ARGS` (default: `mcp/server.py`, supports `{session_id}`, `{host}`, `{port}`)
+4. Start the API: `python main.py --mode api --port 8000`
+5. Send a `POST /chat` or `POST /chat/stream` request with a new `thread_id`.
+6. Confirm the session is created and reused for subsequent requests with the same `thread_id`.
+
 ## Troubleshooting
 
 **"Failed to connect to Blender MCP server"**

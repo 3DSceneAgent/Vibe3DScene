@@ -85,3 +85,21 @@ export function applyStreamingDelta(raw: string | undefined, delta: string): {
   const parsed = parseThinking(nextRaw)
   return { raw: nextRaw, text: parsed.text, thinking: parsed.thinking }
 }
+
+export function applyStreamingDeltaWithId(
+  raw: string | undefined,
+  delta: string,
+  currentMessageId: string | null | undefined,
+  nextMessageId: string | null | undefined
+): {
+  raw: string
+  text: string
+  thinking?: string
+  messageId: string | null
+} {
+  const incomingId = nextMessageId ?? currentMessageId ?? null
+  const shouldReset = nextMessageId != null && nextMessageId !== currentMessageId
+  const nextRaw = shouldReset ? delta : `${raw ?? ''}${delta}`
+  const parsed = parseThinking(nextRaw)
+  return { raw: nextRaw, text: parsed.text, thinking: parsed.thinking, messageId: incomingId }
+}

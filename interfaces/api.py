@@ -349,9 +349,29 @@ async def chat_stream(request: ChatRequest):
     """
     async def event_generator():
         saw_message_stream = False
+        saw_new_message = False
+        existing_message_ids: set[str] = set()
+        last_assistant_text: str | None = None
         try:
             agent = await get_agent(request.thread_id)
             config = {"configurable": {"thread_id": request.thread_id}}
+            try:
+                state = await agent.aget_state(config)
+                state_messages = []
+                if hasattr(state, "values") and isinstance(state.values, dict):
+                    state_messages = state.values.get("messages", []) or []
+                for message in state_messages:
+                    serialized = serialize_message(message)
+                    message_type = serialized.get("type")
+                    if message_type in {"ai", "assistant"}:
+                        message_id = serialized.get("id")
+                        if isinstance(message_id, str) and message_id:
+                            existing_message_ids.add(message_id)
+                        content_text = message_content_to_text(serialized.get("content"))
+                        if content_text:
+                            last_assistant_text = content_text
+            except Exception:
+                pass
 
             async for event in agent.astream(
                 {"messages": [HumanMessage(content=request.message)]},
@@ -380,11 +400,22 @@ async def chat_stream(request: ChatRequest):
                         message_type = serialized.get("type")
                         if message_type in {"human", "tool", "system"}:
                             continue
+                        message_id = serialized.get("id")
+                        if isinstance(message_id, str) and message_id in existing_message_ids:
+                            continue
+                        delta = message_content_to_text(serialized.get("content"))
+                        if not delta:
+                            continue
+                        if (
+                            not message_id
+                            and not saw_new_message
+                            and last_assistant_text
+                            and delta == last_assistant_text
+                        ):
+                            continue
+                        saw_new_message = True
                         if is_message_stream:
-                            delta = message_content_to_text(serialized.get("content"))
-                            if not delta:
-                                continue
-                            event_payload = {"delta": delta, "message_id": serialized.get("id")}
+                            event_payload = {"delta": delta, "message_id": message_id}
                             yield f"data: {json.dumps(event_payload, default=str)}\n\n"
                         else:
                             payload = {"messages": [serialized]}
@@ -522,7 +553,12 @@ async def get_scene_gltf(thread_id: str):
         except OSError:
             pass
 
-        return Response(content=glb_data, media_type="model/gltf-binary")
+        filename = f"scene-{thread_id}.glb"
+        return Response(
+            content=glb_data,
+            media_type="model/gltf-binary",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

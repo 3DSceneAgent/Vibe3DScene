@@ -1,6 +1,8 @@
 .app-shell {
   min-height: 100vh;
+  height: 100vh;
   display: flex;
+  overflow: hidden;
   background: radial-gradient(circle at 10% 10%, rgba(95, 164, 255, 0.12), transparent 45%),
     radial-gradient(circle at 80% 20%, rgba(240, 180, 122, 0.1), transparent 45%),
     var(--color-bg);
@@ -20,8 +22,21 @@
 
 .sidebar-header {
   display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.sidebar-titles {
+  display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.sidebar.collapsed {
+  width: 72px;
+  padding: 18px 12px;
+  align-items: center;
 }
 
 .app-title {
@@ -43,6 +58,27 @@
   display: flex;
   flex-direction: column;
   position: relative;
+  overflow: hidden;
+}
+
+.top-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 28px;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.top-bar-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .workspace {
@@ -59,6 +95,7 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
 }
 
 .settings-overlay {
@@ -95,6 +132,10 @@
   gap: 12px;
 }
 
+.thread-list.collapsed {
+  align-items: center;
+}
+
 .thread-items {
   display: flex;
   flex-direction: column;
@@ -102,6 +143,12 @@
   max-height: 60vh;
   overflow-y: auto;
   padding-right: 6px;
+}
+
+.thread-items.collapsed {
+  max-height: 65vh;
+  padding-right: 0;
+  align-items: center;
 }
 
 .thread-item {
@@ -114,6 +161,12 @@
   flex-direction: column;
   gap: 8px;
   transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+.thread-item.compact {
+  width: 44px;
+  align-items: center;
+  padding: 10px;
 }
 
 .thread-item.active {
@@ -169,6 +222,20 @@
 
 .ghost-btn.full-width {
   width: 100%;
+}
+
+.icon-btn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.thread-list.collapsed .icon-btn {
+  width: 40px;
+  height: 40px;
 }
 
 .text-btn {
@@ -273,6 +340,12 @@
   align-items: flex-end;
 }
 
+.composer-hint {
+  font-size: 12px;
+  align-self: center;
+  white-space: nowrap;
+}
+
 .composer-input {
   flex: 1;
   border-radius: 12px;
@@ -322,8 +395,7 @@
 .scene-scroll-area {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
-  padding-right: 4px;
+  overflow: hidden;
 }
 
 .scene-toolbar {
@@ -385,6 +457,18 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.scene-object-scroll {
+  max-height: 280px;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.render-scroll {
+  max-height: 360px;
+  overflow-y: auto;
+  padding-right: 6px;
 }
 
 .scene-object-item {

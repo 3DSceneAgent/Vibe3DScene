@@ -23,6 +23,7 @@ npm run dev
 
 - Start the API server: `python main.py --mode api --port 8000`
 - Ensure Blender addon is running (`BLENDER_HOST/BLENDER_PORT`, default `localhost:9876`)
+- For headless mode testing, set `BLENDER_MODE=headless` in `.env` and see the root `README.md` for full setup steps.
 
 Currently, two official plugins are available:
 
