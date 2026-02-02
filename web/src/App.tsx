@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { streamChat, getScene, getTodos, getSceneRenders, getSceneGltf } from './api/client'
 import type { StreamEvent, TodoItem } from './api/types'
 import { ChatTab } from './components/ChatTab'
@@ -24,6 +24,8 @@ function App() {
     gltf: false
   })
   const streamAbortRef = useRef<AbortController | null>(null)
+  const requestedSceneRef = useRef<Set<string>>(new Set())
+  const requestedTodosRef = useRef<Set<string>>(new Set())
 
   const activeThread = useMemo(
     () => threads.find((thread) => thread.id === activeThreadId) ?? null,
@@ -45,19 +47,9 @@ function App() {
     document.documentElement.dataset.theme = settings.theme
   }, [settings])
 
-  useEffect(() => {
-    if (!activeThread) return
-    if (!activeThread.scene && !loading.scene) {
-      refreshScene()
-    }
-    if (activeThread.todos.length === 0 && !loading.todos) {
-      refreshTodos()
-    }
-  }, [activeThread, loading.scene, loading.todos])
-
-  const updateThread = (threadId: string, updater: (thread: Thread) => Thread) => {
+  const updateThread = useCallback((threadId: string, updater: (thread: Thread) => Thread) => {
     setThreads((prev) => prev.map((thread) => (thread.id === threadId ? updater(thread) : thread)))
-  }
+  }, [])
 
   const createThread = () => {
     const newThread: Thread = {
@@ -82,6 +74,8 @@ function App() {
       }
       return prev.filter((thread) => thread.id !== threadId)
     })
+    requestedSceneRef.current.delete(threadId)
+    requestedTodosRef.current.delete(threadId)
     if (activeThreadId === threadId) {
       const remaining = threads.filter((thread) => thread.id !== threadId)
       setActiveThreadId(remaining[0]?.id ?? null)
@@ -214,7 +208,7 @@ function App() {
     }
   }
 
-  const refreshScene = async () => {
+  const refreshScene = useCallback(async () => {
     if (!activeThread) return
     setLoading((prev) => ({ ...prev, scene: true }))
     try {
@@ -223,9 +217,9 @@ function App() {
     } finally {
       setLoading((prev) => ({ ...prev, scene: false }))
     }
-  }
+  }, [activeThread, settings.backendUrl, updateThread])
 
-  const refreshTodos = async () => {
+  const refreshTodos = useCallback(async () => {
     if (!activeThread) return
     setLoading((prev) => ({ ...prev, todos: true }))
     try {
@@ -234,9 +228,9 @@ function App() {
     } finally {
       setLoading((prev) => ({ ...prev, todos: false }))
     }
-  }
+  }, [activeThread, settings.backendUrl, updateThread])
 
-  const fetchRenders = async () => {
+  const fetchRenders = useCallback(async () => {
     if (!activeThread) return
     setLoading((prev) => ({ ...prev, renders: true }))
     try {
@@ -245,9 +239,9 @@ function App() {
     } finally {
       setLoading((prev) => ({ ...prev, renders: false }))
     }
-  }
+  }, [activeThread, settings.backendUrl, updateThread])
 
-  const fetchGltf = async () => {
+  const fetchGltf = useCallback(async () => {
     if (!activeThread) return
     setLoading((prev) => ({ ...prev, gltf: true }))
     try {
@@ -262,7 +256,28 @@ function App() {
     } finally {
       setLoading((prev) => ({ ...prev, gltf: false }))
     }
-  }
+  }, [activeThread, settings.backendUrl, updateThread])
+
+  useEffect(() => {
+    if (!activeThread) return
+    const threadId = activeThread.id
+    if (!requestedSceneRef.current.has(threadId) && !loading.scene && !activeThread.scene) {
+      requestedSceneRef.current.add(threadId)
+      refreshScene()
+    }
+    if (!requestedTodosRef.current.has(threadId) && !loading.todos && activeThread.todos.length === 0) {
+      requestedTodosRef.current.add(threadId)
+      refreshTodos()
+    }
+  }, [
+    activeThread?.id,
+    activeThread?.scene,
+    activeThread?.todos.length,
+    loading.scene,
+    loading.todos,
+    refreshScene,
+    refreshTodos
+  ])
 
   return (
     <div className="app-shell">

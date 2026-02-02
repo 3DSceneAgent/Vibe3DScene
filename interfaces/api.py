@@ -188,6 +188,8 @@ def send_blender_command_sync(
 
 
 def serialize_message(message: Any) -> Dict[str, Any]:
+    if isinstance(message, tuple) and len(message) == 2:
+        message = message[0]
     if isinstance(message, dict):
         return message
     if hasattr(message, "type") or hasattr(message, "content"):
@@ -357,17 +359,18 @@ async def chat_stream(request: ChatRequest):
                 stream_mode=["messages", "values"]
             ):
                 mode, payload = normalize_stream_event(event)
-                if mode == "messages":
+                is_message_stream = mode == "messages" or hasattr(mode, "content") or hasattr(mode, "type")
+                if is_message_stream:
                     saw_message_stream = True
                 if isinstance(payload, dict) and "todos" in payload and payload["todos"]:
                     yield f"data: {json.dumps({'todos': payload['todos']}, default=str)}\n\n"
 
                 messages = None
-                if isinstance(payload, dict) and "messages" in payload:
+                if is_message_stream:
+                    messages = payload if mode == "messages" else [mode]
+                elif isinstance(payload, dict) and "messages" in payload:
                     if not saw_message_stream:
                         messages = payload["messages"]
-                elif mode == "messages":
-                    messages = payload
 
                 if messages:
                     if not isinstance(messages, list):
@@ -377,7 +380,7 @@ async def chat_stream(request: ChatRequest):
                         message_type = serialized.get("type")
                         if message_type in {"human", "tool", "system"}:
                             continue
-                        if mode == "messages":
+                        if is_message_stream:
                             delta = message_content_to_text(serialized.get("content"))
                             if not delta:
                                 continue
@@ -410,6 +413,9 @@ async def get_scene(thread_id: str):
         Scene objects and metadata
     """
     try:
+        settings = get_settings()
+        if settings.blender_mode == "headless":
+            get_session_manager().ensure(thread_id, "headless")
         scene_info = await asyncio.to_thread(send_blender_command_sync, "get_scene_info", None, thread_id)
         scene_objects = SceneMemory.parse_scene_info(scene_info)
         objects = scene_info.get("objects", []) if isinstance(scene_info, dict) else []

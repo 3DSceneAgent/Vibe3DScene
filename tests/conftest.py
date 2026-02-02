@@ -1,13 +1,18 @@
 import os
+import sys
+from pathlib import Path
 import pytest
+
+
+PROJECT_ROOT = str(Path(__file__).resolve().parents[1])
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 
 @pytest.fixture(autouse=True)
 def _set_test_env():
     os.environ.setdefault("VLM_API_KEY", "test-key")
     yield
-import pytest
-
 
 @pytest.fixture(scope="session")
 def api_base_url() -> str:

@@ -231,6 +231,8 @@
 
 .message-content {
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .loading-spinner {
@@ -355,8 +357,19 @@
 
 .scene-grid {
   display: grid;
+  grid-template-columns: 1fr;
+  gap: 20px;
+  min-height: 0;
+}
+
+.scene-top {
+  display: grid;
   grid-template-columns: 320px 1fr;
   gap: 20px;
+  min-height: 0;
+}
+
+.scene-viewer {
   min-height: 0;
 }
 
@@ -543,7 +556,7 @@
     grid-template-columns: 1fr;
   }
 
-  .scene-grid {
+  .scene-top {
     grid-template-columns: 1fr;
   }
 }

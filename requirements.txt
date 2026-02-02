@@ -33,3 +33,6 @@ aiohttp
 
 # Async backend 
 trio
+
+# for testing 
+pytest

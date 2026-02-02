@@ -1,7 +1,9 @@
+import os
 import json
 
+import pytest
+import requests
 from fastapi.testclient import TestClient
-
 from interfaces import api as api_module
 
 
@@ -33,11 +35,7 @@ def test_chat_stream_sse(monkeypatch):
 
     assert payloads[0]["delta"] == "hello"
     assert payloads[1]["delta"] == " world"
-import json
-import os
 
-import pytest
-import requests
 
 
 def test_chat_stream_sse(api_base_url: str) -> None:

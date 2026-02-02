@@ -72,13 +72,17 @@ export function SceneTab({
 
       <div className="scene-scroll-area">
         <div className="scene-grid">
-          <div className="scene-left">
-            <SceneInfoPanel scene={scene} isLoading={loading.scene} onRefresh={onRefreshScene} />
-            <TodosPanel todos={todos} isLoading={loading.todos} onRefresh={onRefreshTodos} />
+          <div className="scene-top">
+            <div className="scene-left">
+              <SceneInfoPanel scene={scene} isLoading={loading.scene} onRefresh={onRefreshScene} />
+              <TodosPanel todos={todos} isLoading={loading.todos} onRefresh={onRefreshTodos} />
+            </div>
+            <div className="scene-right">
+              <RenderGallery renders={renders} isLoading={loading.renders} onRefresh={onFetchRenders} />
+            </div>
           </div>
-          <div className="scene-right">
+          <div className="scene-viewer">
             <GltfViewer gltfUrl={gltfUrl} environment={environment} />
-            <RenderGallery renders={renders} isLoading={loading.renders} onRefresh={onFetchRenders} />
           </div>
         </div>
       </div>
