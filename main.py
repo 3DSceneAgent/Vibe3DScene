@@ -64,11 +64,11 @@ Requirements:
     # Launch the selected mode
     if args.mode == "cli":
         print("Starting CLI interface...")
-        from interfaces.cli import main as cli_main
+        from scene_agent.interfaces.cli import main as cli_main
         cli_main()
     else:
         print(f"Starting API server on {args.host}:{args.port}...")
-        from interfaces.api import run_api
+        from scene_agent.interfaces.api import run_api
         run_api(host=args.host, port=args.port)
 
 

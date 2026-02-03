@@ -2,9 +2,9 @@ import os
 
 from fastapi.testclient import TestClient
 
-from blender import session_manager
-from config import reload_settings
-from interfaces import api as api_module
+from scene_agent.blender import session_manager
+from scene_agent.config import reload_settings
+from scene_agent.interfaces import api as api_module
 
 
 def test_headless_session_created_on_scene_request(monkeypatch):

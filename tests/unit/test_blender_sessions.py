@@ -1,4 +1,4 @@
-from blender.session_manager import SessionManager
+from scene_agent.blender.session_manager import SessionManager
 
 
 def test_session_manager_lifecycle():

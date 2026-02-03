@@ -20,8 +20,8 @@
 
 **Purpose**: Shared configuration and session primitives used across streaming and headless support.
 
-- [x] T003 Add blender mode and headless settings to `config.py`
-- [x] T004 Create session registry primitives in `blender/session_manager.py`
+- [x] T003 Add blender mode and headless settings to `scene_agent/config.py`
+- [x] T004 Create session registry primitives in `scene_agent/blender/session_manager.py`
 
 **Checkpoint**: Foundation ready - user story implementation can now begin.
 
@@ -62,7 +62,7 @@
 
 ### Implementation for User Story 2
 
-- [x] T013 [US2] Stream message deltas via SSE in `interfaces/api.py`
+- [x] T013 [US2] Stream message deltas via SSE in `scene_agent/interfaces/api.py`
 - [x] T014 [US2] Extend stream event typings in `web/src/api/types.ts`
 - [x] T015 [US2] Handle incremental SSE events in `web/src/api/client.ts`
 - [x] T016 [US2] Add message streaming state fields in `web/src/state/types.ts`
@@ -91,10 +91,10 @@
 
 ### Implementation for User Story 3
 
-- [x] T026 [US3] Add headless session manager implementation in `blender/session_manager.py`
-- [x] T027 [US3] Route Blender commands by session ID in `interfaces/api.py`
-- [x] T028 [US3] Add session-aware tool loading in `tools/blender_tools.py`
-- [x] T029 [US3] Use session-aware tools in `agent/graph.py`
+- [x] T026 [US3] Add headless session manager implementation in `scene_agent/blender/session_manager.py`
+- [x] T027 [US3] Route Blender commands by session ID in `scene_agent/interfaces/api.py`
+- [x] T028 [US3] Add session-aware tool loading in `scene_agent/tools/blender_tools.py`
+- [x] T029 [US3] Use session-aware tools in `scene_agent/agent/graph.py`
 - [x] T030 [US3] Document headless mode environment variables in `README.md`
 
 **Checkpoint**: User Story 3 provisions headless sessions on demand and keeps local-client mode intact.

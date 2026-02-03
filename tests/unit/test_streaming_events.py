@@ -1,6 +1,6 @@
 from langchain_core.messages import AIMessage, HumanMessage
 
-from interfaces.api import serialize_event, serialize_message
+from scene_agent.interfaces.api import serialize_event, serialize_message
 
 
 def test_serialize_message_passthrough_dict():
@@ -28,7 +28,7 @@ def test_serialize_event_non_dict():
     assert data == {"event": "ping"}
 from dataclasses import dataclass
 
-from interfaces.api import serialize_event
+from scene_agent.interfaces.api import serialize_event
 
 
 @dataclass

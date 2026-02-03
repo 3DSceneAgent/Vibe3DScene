@@ -35,7 +35,7 @@ trap cleanup SIGINT SIGTERM EXIT
 
 # Start MCP server in background
 echo -e "${GREEN}[1/2] Starting MCP server...${NC}"
-python mcp/server.py > /tmp/mcp_server.log 2>&1 &
+python mcp_server/server.py > /tmp/mcp_server.log 2>&1 &
 MCP_PID=$!
 echo -e "${GREEN}      MCP server started (PID: $MCP_PID)${NC}"
 

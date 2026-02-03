@@ -4,7 +4,7 @@ import json
 import pytest
 import requests
 from fastapi.testclient import TestClient
-from interfaces import api as api_module
+from scene_agent.interfaces import api as api_module
 
 
 class StubAgent:

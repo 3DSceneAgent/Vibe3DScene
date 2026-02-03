@@ -3,8 +3,8 @@ BPY script retrieval for code generation (placeholder).
 Retrieves relevant BPY examples when the agent needs to write code.
 """
 from typing import List, Dict, Any
-from config import get_settings
-from rag.vector_store import VectorStore
+from scene_agent.config import get_settings
+from scene_agent.rag.vector_store import VectorStore
 
 
 class BPYRetriever:

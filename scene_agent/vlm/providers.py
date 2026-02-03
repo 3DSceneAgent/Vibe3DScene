@@ -2,7 +2,7 @@
 VLM provider implementations for OpenAI, Anthropic, and Gemini.
 """
 from typing import Any
-from vlm.base import BaseVLMProvider
+from scene_agent.vlm.base import BaseVLMProvider
 
 
 class OpenAIProvider(BaseVLMProvider):

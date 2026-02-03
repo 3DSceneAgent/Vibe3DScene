@@ -1,6 +1,6 @@
 """VLM provider abstraction layer"""
-from vlm.base import BaseVLMProvider
-from vlm.providers import OpenAIProvider, AnthropicProvider, GeminiProvider, get_vlm_provider
+from scene_agent.vlm.base import BaseVLMProvider
+from scene_agent.vlm.providers import OpenAIProvider, AnthropicProvider, GeminiProvider, get_vlm_provider
 
 __all__ = [
     "BaseVLMProvider",

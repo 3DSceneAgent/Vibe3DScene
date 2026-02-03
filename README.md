@@ -86,13 +86,14 @@ Agent: I'll break this down into steps:
 
 ```
 3DSceneAgent/
-├── agent/           # LangGraph state machine
-├── tools/           # Blender MCP tool integration
-├── memory/          # Scene and camera tracking
-├── rag/             # BPY script retrieval (placeholder)
-├── vlm/             # VLM provider abstraction
-├── interfaces/      # CLI and API
-├── config.py        # Configuration management
+├── scene_agent/
+│   ├── agent/       # LangGraph state machine
+│   ├── tools/       # Blender MCP tool integration
+│   ├── memory/      # Scene and camera tracking
+│   ├── rag/         # BPY script retrieval (placeholder)
+│   ├── vlm/         # VLM provider abstraction
+│   ├── interfaces/  # CLI and API
+│   └── config.py    # Configuration management
 └── main.py          # Entry point
 ```
 
@@ -124,13 +125,13 @@ Agent: I'll break this down into steps:
 
 ### Todo Tracking
 
-The agent automatically creates and tracks todos for complex tasks. See `agent/state.py` for the TodoItem schema.
+The agent automatically creates and tracks todos for complex tasks. See `scene_agent/agent/state.py` for the TodoItem schema.
 
 ### Adding BPY Documentation
 
 To enable RAG:
 1. Add BPY docs to a `docs/` directory
-2. Implement embedding and ingestion in `rag/vector_store.py`
+2. Implement embedding and ingestion in `scene_agent/rag/vector_store.py`
 3. Set `RAG_ENABLED=true` in `.env`
 
 ### Testing
@@ -152,6 +153,7 @@ pytest tests/integration/
    - `BLENDER_HEADLESS_PORT_RANGE` (default: `1`)
    - `BLENDER_HEADLESS_CMD` (e.g., `/Applications/Blender.app/Contents/MacOS/Blender`)
    - `BLENDER_HEADLESS_ARGS` (supports `{session_id}`, `{host}`, `{port}`)
+     - Example: `--background --python scripts/blender_headless_client.py -- --host {host} --port {port}`
 3. (Optional) Configure per-session MCP server commands:
    - `BLENDER_MCP_HOST`, `BLENDER_MCP_BASE_PORT`, `BLENDER_MCP_PORT_RANGE`
    - `BLENDER_MCP_CMD` (default: `python`)

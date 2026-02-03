@@ -14,8 +14,8 @@ from rich.live import Live
 from rich.text import Text
 from langchain_core.messages import HumanMessage
 
-from agent.graph import create_agent_graph
-from agent.state import TodoItem
+from scene_agent.agent.graph import create_agent_graph
+from scene_agent.agent.state import TodoItem
 
 console = Console()
 

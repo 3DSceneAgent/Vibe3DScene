@@ -69,7 +69,7 @@ def main():
         # Start MCP server
         print_colored("[1/2] Starting MCP server...", Colors.GREEN)
         mcp_process = subprocess.Popen(
-            [sys.executable, "mcp/server.py"],
+            [sys.executable, "mcp_server/server.py"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=project_dir

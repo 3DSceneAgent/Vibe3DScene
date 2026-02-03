@@ -6,8 +6,8 @@ import json
 import re
 from typing import Dict, Any
 from langchain_core.messages import ToolMessage, AIMessage, SystemMessage
-from agent.state import AgentState, TodoItem, create_todo, update_todo_status
-from memory.scene_memory import SceneMemory
+from scene_agent.agent.state import AgentState, TodoItem, create_todo, update_todo_status
+from scene_agent.memory.scene_memory import SceneMemory
 
 
 def agent_node(state: AgentState, llm_with_tools) -> Dict[str, Any]:
@@ -23,7 +23,7 @@ def agent_node(state: AgentState, llm_with_tools) -> Dict[str, Any]:
         Partial state update with new messages
     """
     # Build messages including system prompt
-    from agent.prompts import get_full_system_prompt
+    from scene_agent.agent.prompts import get_full_system_prompt
     
     messages = [SystemMessage(content=get_full_system_prompt())]
     messages.extend(state["messages"])

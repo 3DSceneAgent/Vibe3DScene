@@ -74,7 +74,7 @@ description: "Task list for Scene UI Fixes implementation"
 - [x] T011 [P] [US3] Add download helper to trigger browser saves in `web/src/utils/download.ts`
 - [x] T012 [US3] Add Download GLTF button + loading state in `web/src/components/TopBar.tsx`
 - [x] T013 [US3] Implement GLTF download flow using `getSceneGltf` + download helper in `web/src/App.tsx`
-- [x] T014 [P] [US3] Add `Content-Disposition` filename header to GLB export response in `interfaces/api.py`
+- [x] T014 [P] [US3] Add `Content-Disposition` filename header to GLB export response in `scene_agent/interfaces/api.py`
 
 **Checkpoint**: Download action works end-to-end for an existing scene.
 
@@ -173,7 +173,7 @@ Task: "Constrain Camera Renders list height + scrollbar styles in web/src/compon
 
 ```bash
 Task: "Add download helper to trigger browser saves in web/src/utils/download.ts"
-Task: "Add Content-Disposition filename header to GLB export response in interfaces/api.py"
+Task: "Add Content-Disposition filename header to GLB export response in scene_agent/interfaces/api.py"
 ```
 
 ## Parallel Example: User Story 4

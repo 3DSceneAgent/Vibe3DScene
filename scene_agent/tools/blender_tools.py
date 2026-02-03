@@ -5,8 +5,8 @@ Automatically loads tools from the Blender MCP server.
 import asyncio
 import os
 from typing import List, Any
-from config import get_settings
-from blender.session_manager import (
+from scene_agent.config import get_settings
+from scene_agent.blender.session_manager import (
     allocate_headless_port,
     allocate_mcp_port,
     build_headless_command_args,

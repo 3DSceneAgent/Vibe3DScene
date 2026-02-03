@@ -17,15 +17,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 
-from agent.graph import create_agent_graph
-from blender.session_manager import (
+from scene_agent.agent.graph import create_agent_graph
+from scene_agent.blender.session_manager import (
     allocate_headless_port,
     build_headless_command_args,
     get_session_manager,
     start_headless_process,
 )
-from config import get_settings
-from memory.scene_memory import SceneMemory
+from scene_agent.config import get_settings
+from scene_agent.memory.scene_memory import SceneMemory
 
 # Create FastAPI app
 app = FastAPI(

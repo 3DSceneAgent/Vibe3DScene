@@ -8,11 +8,11 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import BaseMessage
 
-from agent.state import AgentState
-from agent.nodes import agent_node, update_memory_node
-from config import get_settings
-from vlm import get_vlm_provider
-from tools import get_blender_tools
+from scene_agent.agent.state import AgentState
+from scene_agent.agent.nodes import agent_node, update_memory_node
+from scene_agent.config import get_settings
+from scene_agent.vlm import get_vlm_provider
+from scene_agent.tools import get_blender_tools
 
 
 async def create_agent_graph(session_id: str | None = None):

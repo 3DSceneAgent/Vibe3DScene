@@ -51,12 +51,14 @@ specs/001-ui-streaming-blender/
 
 ```text
 3DSceneAgent/
-├── agent/               # LangGraph state machine
-├── interfaces/          # CLI + API
-├── memory/              # Scene/camera tracking
+├── scene_agent/
+│   ├── agent/           # LangGraph state machine
+│   ├── blender/         # Blender session manager
+│   ├── interfaces/      # CLI + API
+│   ├── memory/          # Scene/camera tracking
+│   ├── tools/           # Blender tool integration
+│   └── vlm/             # VLM provider abstraction
 ├── mcp/                 # MCP server
-├── tools/               # Blender tool integration
-├── vlm/                 # VLM provider abstraction
 ├── web/                 # React frontend
 └── tests/               # (to be added) unit/integration tests
 ```

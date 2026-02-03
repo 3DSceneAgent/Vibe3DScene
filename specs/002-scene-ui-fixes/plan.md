@@ -51,13 +51,14 @@ specs/002-scene-ui-fixes/
 
 ```text
 3DSceneAgent/
-├── agent/               # LangGraph state machine
-├── blender/             # Blender session manager
-├── interfaces/          # CLI + FastAPI API
-├── memory/              # Scene/camera tracking
+├── scene_agent/
+│   ├── agent/           # LangGraph state machine
+│   ├── blender/         # Blender session manager
+│   ├── interfaces/      # CLI + FastAPI API
+│   ├── memory/          # Scene/camera tracking
+│   ├── tools/           # Blender tool integration
+│   └── vlm/             # VLM provider abstraction
 ├── mcp/                 # MCP server
-├── tools/               # Blender tool integration
-├── vlm/                 # VLM provider abstraction
 ├── web/                 # React frontend
 └── tests/               # unit/integration tests
 ```
