@@ -1,0 +1,152 @@
+openapi: 3.1.0
+info:
+  title: 3D Scene Agent API
+  version: 1.0.0
+  description: API contracts for chat streaming, scene refresh, and auto-fetch signaling.
+servers:
+  - url: http://localhost:8000
+paths:
+  /chat/stream:
+    post:
+      summary: Send a chat message (streaming via SSE).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: Stream of SSE events containing message/todo updates and scene change flags.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: "SSE data events; each data payload is a JSON StreamEvent."
+        '500':
+          description: Streaming failure.
+  /scene/{thread_id}/renders:
+    get:
+      summary: Render all cameras and return base64 PNGs.
+      parameters:
+        - in: path
+          name: thread_id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: mode
+          required: false
+          schema:
+            type: string
+            enum: [rgb, depth, normal]
+      responses:
+        '200':
+          description: Render images.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  thread_id:
+                    type: string
+                  renders:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RenderImage'
+        '500':
+          description: Render failure.
+  /scene/{thread_id}/gltf:
+    get:
+      summary: Export the current scene as GLB.
+      parameters:
+        - in: path
+          name: thread_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Binary GLB file.
+          content:
+            model/gltf-binary:
+              schema:
+                type: string
+                format: binary
+        '500':
+          description: Export failure.
+components:
+  schemas:
+    ChatRequest:
+      type: object
+      required: [message, thread_id]
+      properties:
+        message:
+          type: string
+        thread_id:
+          type: string
+    StreamEvent:
+      type: object
+      properties:
+        delta:
+          type: string
+        message_id:
+          type: string
+          nullable: true
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/MessageEnvelope'
+        todos:
+          type: array
+          items:
+            $ref: '#/components/schemas/TodoItem'
+        scene_has_change:
+          type: boolean
+        event:
+          type: string
+          enum: [done]
+        error:
+          type: string
+    MessageEnvelope:
+      type: object
+      properties:
+        type:
+          type: string
+          description: Message type (ai, assistant, tool, human, system).
+        content:
+          description: Message content (string, list, or JSON payload).
+        additional_kwargs:
+          type: object
+          additionalProperties: true
+        response_metadata:
+          type: object
+          additionalProperties: true
+        name:
+          type: string
+        id:
+          type: string
+    RenderImage:
+      type: object
+      required: [camera_name, image_base64]
+      properties:
+        camera_name:
+          type: string
+        image_base64:
+          type: string
+    TodoItem:
+      type: object
+      required: [id, description, status]
+      properties:
+        id:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+          enum: [pending, in_progress, completed, failed]
+        created_at:
+          type: string
+        completed_at:
+          type: string
+          nullable: true

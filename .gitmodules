@@ -1,0 +1,3 @@
+[submodule "addon"]
+	path = addon
+	url = git@github.com:3DSceneAgent/blender-mcp-vision.git

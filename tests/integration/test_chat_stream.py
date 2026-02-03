@@ -11,6 +11,7 @@ class StubAgent:
     async def astream(self, *_args, **_kwargs):
         yield ("messages", [{"type": "ai", "content": "hello"}])
         yield ("messages", [{"type": "ai", "content": " world"}])
+        yield ("messages", [{"type": "tool", "content": {"status": "ok"}, "name": "blender.test"}])
 
 
 async def fake_get_agent():
@@ -30,11 +31,16 @@ def test_chat_stream_sse(monkeypatch):
             if line.startswith("data:"):
                 data = line.replace("data:", "", 1).strip()
                 payloads.append(json.loads(data))
-            if len(payloads) >= 2:
+            if len(payloads) >= 4:
                 break
 
-    assert payloads[0]["delta"] == "hello"
-    assert payloads[1]["delta"] == " world"
+    deltas = [payload["delta"] for payload in payloads if "delta" in payload]
+    tool_payloads = [
+        payload for payload in payloads if "messages" in payload and payload["messages"][0].get("type") == "tool"
+    ]
+    assert deltas[:2] == ["hello", " world"]
+    assert tool_payloads
+    assert tool_payloads[0].get("scene_has_change") is True
 
 
 

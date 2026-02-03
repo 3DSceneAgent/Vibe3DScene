@@ -1,4 +1,5 @@
 type EnvironmentPreset = 'studio' | 'warm' | 'cool'
+type BackendStatus = 'online' | 'offline' | 'checking'
 
 type TopBarProps = {
   environment: EnvironmentPreset
@@ -7,6 +8,10 @@ type TopBarProps = {
   onFetchRenders: () => void
   onLoadGltf: () => void
   onDownloadGltf: () => void
+  autoRefreshScene: boolean
+  onAutoRefreshChange: (enabled: boolean) => void
+  sceneCollapsed: boolean
+  onSceneToggle: () => void
   onOpenSettings: () => void
   isSceneLoading: boolean
   isRendersLoading: boolean
@@ -14,6 +19,8 @@ type TopBarProps = {
   isDownloadLoading: boolean
   isDownloadDisabled: boolean
   canRunActions: boolean
+  backendStatus: BackendStatus
+  backendUrl: string
 }
 
 export function TopBar({
@@ -23,14 +30,41 @@ export function TopBar({
   onFetchRenders,
   onLoadGltf,
   onDownloadGltf,
+  autoRefreshScene,
+  onAutoRefreshChange,
+  sceneCollapsed,
+  onSceneToggle,
   onOpenSettings,
   isSceneLoading,
   isRendersLoading,
   isGltfLoading,
   isDownloadLoading,
   isDownloadDisabled,
-  canRunActions
+  canRunActions,
+  backendStatus,
+  backendUrl
 }: TopBarProps) {
+  const statusLabel =
+    backendStatus === 'online' ? 'Online' : backendStatus === 'offline' ? 'Offline' : 'Checking'
+
+  if (sceneCollapsed) {
+    return (
+      <div className="top-bar">
+        <div className="top-bar-group">
+          <button className="ghost-btn" onClick={onSceneToggle} disabled={!canRunActions}>
+            Show Scene
+          </button>
+        </div>
+        <div className="top-bar-group">
+          <div className="top-bar-status" title={`Backend: ${backendUrl}`}>
+            <span className={`status-dot ${backendStatus}`} />
+            <span className="status-text">Server {statusLabel}</span>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="top-bar">
       <div className="top-bar-group">
@@ -50,6 +84,18 @@ export function TopBar({
         >
           Download GLTF
         </button>
+        <label className="toggle-switch">
+          <input
+            type="checkbox"
+            checked={autoRefreshScene}
+            onChange={(event) => onAutoRefreshChange(event.target.checked)}
+          />
+          <span className="toggle-slider" />
+          <span className="toggle-label">Auto-fetch</span>
+        </label>
+        <button className="ghost-btn" onClick={onSceneToggle} disabled={!canRunActions}>
+          {sceneCollapsed ? 'Show Scene' : 'Hide Scene'}
+        </button>
       </div>
       <div className="top-bar-group">
         <label className="select-label">
@@ -63,6 +109,10 @@ export function TopBar({
             <option value="cool">Cool</option>
           </select>
         </label>
+        <div className="top-bar-status" title={`Backend: ${backendUrl}`}>
+          <span className={`status-dot ${backendStatus}`} />
+          <span className="status-text">Server {statusLabel}</span>
+        </div>
         <button className="ghost-btn" onClick={onOpenSettings}>
           Settings
         </button>

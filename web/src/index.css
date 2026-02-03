@@ -7,7 +7,7 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
-:root[data-theme='midnight'] {
+:root[data-theme='dark'] {
   --color-bg: #0c0f14;
   --color-surface: #121722;
   --color-surface-elevated: #1a2130;
@@ -17,24 +17,14 @@
   --color-accent: #5fa4ff;
 }
 
-:root[data-theme='slate'] {
-  --color-bg: #10131a;
-  --color-surface: #161b27;
-  --color-surface-elevated: #202a3c;
-  --color-border: rgba(255, 255, 255, 0.1);
-  --color-text: #e9eef7;
-  --color-muted: #a3adbe;
-  --color-accent: #87b5ff;
-}
-
-:root[data-theme='warm'] {
-  --color-bg: #12100f;
-  --color-surface: #1b1715;
-  --color-surface-elevated: #2a221f;
-  --color-border: rgba(255, 255, 255, 0.08);
-  --color-text: #f0e9e3;
-  --color-muted: #b6a59b;
-  --color-accent: #f0b47a;
+:root[data-theme='light'] {
+  --color-bg: #f5f7fb;
+  --color-surface: #ffffff;
+  --color-surface-elevated: #f0f3f8;
+  --color-border: rgba(16, 20, 30, 0.12);
+  --color-text: #1a1f2a;
+  --color-muted: #5c677a;
+  --color-accent: #3578e5;
 }
 
 * {

@@ -1,3 +1,5 @@
+import type { ToolMedia } from '../state/types'
+
 export function parseThinking(raw: string): { text: string; thinking?: string } {
   if (!raw) return { text: '' }
   const thinkingChunks: string[] = []
@@ -66,6 +68,50 @@ export function isToolMessage(message: unknown): boolean {
     if (maybe.type === 'tool' || maybe.role === 'tool') return true
   }
   return false
+}
+
+function collectMediaReferences(value: unknown, results: ToolMedia[] = []): ToolMedia[] {
+  if (typeof value === 'string') {
+    if (value.startsWith('data:image/')) {
+      results.push({ kind: 'data', value })
+    } else if (/^https?:\/\//i.test(value) && /\.(png|jpe?g|gif|webp)$/i.test(value)) {
+      results.push({ kind: 'url', value })
+    }
+    return results
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectMediaReferences(item, results))
+    return results
+  }
+
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+    for (const [key, entry] of entries) {
+      if (typeof entry === 'string' && key.toLowerCase().includes('image') && !entry.startsWith('data:image/')) {
+        if (/^https?:\/\//i.test(entry)) {
+          results.push({ kind: 'url', value: entry })
+        } else if (/^[A-Za-z0-9+/=]+$/.test(entry) && entry.length > 128) {
+          results.push({ kind: 'data', value: `data:image/png;base64,${entry}` })
+        }
+      }
+      collectMediaReferences(entry, results)
+    }
+  }
+  return results
+}
+
+export function extractToolPayload(message: unknown): {
+  name?: string
+  payload: unknown
+  media: ToolMedia[]
+} | null {
+  if (!isToolMessage(message) || typeof message !== 'object' || message === null) return null
+  const maybe = message as { name?: unknown; content?: unknown }
+  const payload = maybe.content ?? message
+  const name = typeof maybe.name === 'string' ? maybe.name : undefined
+  const media = collectMediaReferences(payload)
+  return { name, payload, media }
 }
 
 export function isAssistantMessage(message: unknown): boolean {

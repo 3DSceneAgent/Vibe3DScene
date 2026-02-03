@@ -1,7 +1,12 @@
 import type { RenderImage, SceneInfo, TodoItem } from '../api/types'
 
-export type MessageRole = 'user' | 'assistant'
+export type MessageRole = 'user' | 'assistant' | 'tool'
 export type MessageStatus = 'streaming' | 'final' | 'error'
+
+export type ToolMedia = {
+  kind: 'url' | 'data'
+  value: string
+}
 
 export type Message = {
   id: string
@@ -12,6 +17,10 @@ export type Message = {
   raw?: string
   streamId?: string | null
   status?: MessageStatus
+  toolName?: string
+  toolPayload?: unknown
+  toolMedia?: ToolMedia[]
+  collapsed?: boolean
 }
 
 export type Thread = {
@@ -23,11 +32,14 @@ export type Thread = {
   scene?: SceneInfo | null
   renders?: RenderImage[]
   gltfUrl?: string | null
+  sceneHasChange?: boolean
 }
 
-export type ThemeId = 'midnight' | 'slate' | 'warm'
+export type ThemeId = 'dark' | 'light'
 
 export type Settings = {
   backendUrl: string
   theme: ThemeId
+  autoRefreshScene: boolean
+  sceneTabCollapsed: boolean
 }

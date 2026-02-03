@@ -21,6 +21,12 @@ echo ""
 # Change to project directory
 cd "$PROJECT_DIR"
 
+# Default headless blender command/args if not provided
+: "${BLENDER_HEADLESS_CMD:=blender}"
+: "${BLENDER_HEADLESS_ARGS:=--background --python scripts/blender_headless_client.py -- --host {host} --port {port}}"
+export BLENDER_HEADLESS_CMD
+export BLENDER_HEADLESS_ARGS
+
 # Trap to ensure both processes are killed on exit
 cleanup() {
     echo -e "\n${YELLOW}Stopping services...${NC}"

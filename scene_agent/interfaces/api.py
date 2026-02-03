@@ -247,6 +247,18 @@ def normalize_stream_event(event: Any) -> tuple[str | None, Any]:
     return None, event
 
 
+def message_has_tool_calls(serialized: Dict[str, Any]) -> bool:
+    additional_kwargs = serialized.get("additional_kwargs")
+    if isinstance(additional_kwargs, dict):
+        tool_calls = additional_kwargs.get("tool_calls")
+        return isinstance(tool_calls, list) and len(tool_calls) > 0
+    return False
+
+
+def message_is_tool(serialized: Dict[str, Any]) -> bool:
+    return serialized.get("type") == "tool"
+
+
 async def get_agent(thread_id: str | None = None):
     """Get or create the agent graph (singleton or per-thread in headless mode)."""
     global _agent_graph, _agent_graphs_by_thread
@@ -289,6 +301,7 @@ async def root():
         "message": "3D Scene Agent API",
         "status": "running",
         "endpoints": {
+            "health": "GET /health",
             "chat": "POST /chat",
             "chat_stream": "POST /chat/stream",
             "scene": "GET /scene/{thread_id}",
@@ -299,6 +312,12 @@ async def root():
             "websocket": "WS /ws"
         }
     }
+
+
+@app.get("/health")
+async def healthcheck():
+    """Healthcheck endpoint."""
+    return {"status": "ok", "timestamp": time.time()}
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -352,6 +371,7 @@ async def chat_stream(request: ChatRequest):
         saw_new_message = False
         existing_message_ids: set[str] = set()
         last_assistant_text: str | None = None
+        scene_has_change = False
         try:
             agent = await get_agent(request.thread_id)
             config = {"configurable": {"thread_id": request.thread_id}}
@@ -398,7 +418,13 @@ async def chat_stream(request: ChatRequest):
                     for message in messages:
                         serialized = serialize_message(message)
                         message_type = serialized.get("type")
-                        if message_type in {"human", "tool", "system"}:
+                        if message_has_tool_calls(serialized) or message_is_tool(serialized):
+                            scene_has_change = True
+                        if message_type in {"human", "system"}:
+                            continue
+                        if message_type == "tool":
+                            payload = {"messages": [serialized], "scene_has_change": scene_has_change}
+                            yield f"data: {json.dumps(payload, default=str)}\n\n"
                             continue
                         message_id = serialized.get("id")
                         if isinstance(message_id, str) and message_id in existing_message_ids:
@@ -421,7 +447,7 @@ async def chat_stream(request: ChatRequest):
                             payload = {"messages": [serialized]}
                             yield f"data: {json.dumps(payload, default=str)}\n\n"
 
-            yield f"data: {json.dumps({'event': 'done'})}\n\n"
+            yield f"data: {json.dumps({'event': 'done', 'scene_has_change': scene_has_change})}\n\n"
         except Exception as e:
             error_event = {"error": str(e)}
             yield f"data: {json.dumps(error_event)}\n\n"

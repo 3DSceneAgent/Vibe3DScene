@@ -1,6 +1,11 @@
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from scene_agent.interfaces.api import serialize_event, serialize_message
+from scene_agent.interfaces.api import (
+    message_has_tool_calls,
+    message_is_tool,
+    serialize_event,
+    serialize_message,
+)
 
 
 def test_serialize_message_passthrough_dict():
@@ -48,3 +53,15 @@ def test_serialize_event_handles_messages() -> None:
 def test_serialize_event_wraps_non_dict() -> None:
     payload = serialize_event("event")
     assert payload == {"event": "event"}
+
+
+def test_message_is_tool() -> None:
+    message = ToolMessage(content="ok", name="blender", tool_call_id="tool-1")
+    data = serialize_message(message)
+    assert message_is_tool(data) is True
+
+
+def test_message_has_tool_calls() -> None:
+    message = AIMessage(content="hi", additional_kwargs={"tool_calls": [{"id": "tool-1"}]})
+    data = serialize_message(message)
+    assert message_has_tool_calls(data) is True

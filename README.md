@@ -154,6 +154,7 @@ pytest tests/integration/
    - `BLENDER_HEADLESS_CMD` (e.g., `/Applications/Blender.app/Contents/MacOS/Blender`)
    - `BLENDER_HEADLESS_ARGS` (supports `{session_id}`, `{host}`, `{port}`)
      - Example: `--background --python scripts/blender_headless_client.py -- --host {host} --port {port}`
+   - `scripts/start_services.*` sets defaults to `BLENDER_HEADLESS_CMD=blender` and the example args above when not provided.
 3. (Optional) Configure per-session MCP server commands:
    - `BLENDER_MCP_HOST`, `BLENDER_MCP_BASE_PORT`, `BLENDER_MCP_PORT_RANGE`
    - `BLENDER_MCP_CMD` (default: `python`)
@@ -179,6 +180,7 @@ pytest tests/integration/
 
 - [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)
 - [langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters)
+- [Streaming Response Structure](docs/streaming-response.md)
 - [Blender Python API](https://docs.blender.org/api/current/)
 
 ## License

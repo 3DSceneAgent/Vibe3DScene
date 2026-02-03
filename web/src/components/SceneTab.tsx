@@ -14,6 +14,8 @@ type SceneTabProps = {
     scene: boolean
     renders: boolean
   }
+  collapsed: boolean
+  onToggleCollapse: () => void
 }
 
 export function SceneTab({
@@ -21,11 +23,19 @@ export function SceneTab({
   renders,
   gltfUrl,
   environment,
-  loading
+  loading,
+  collapsed,
+  onToggleCollapse
 }: SceneTabProps) {
   return (
     <div className="scene-tab scene-pane">
-      <div className="scene-grid">
+      <div className="scene-toolbar">
+        <div className="panel-title">Scene</div>
+        {/* <button className="text-btn scene-collapse-toggle" onClick={onToggleCollapse}>
+          {collapsed ? 'Show scene' : 'Hide scene'}
+        </button> */}
+      </div>
+      <div className={`scene-grid ${collapsed ? 'is-collapsed' : ''}`}>
         <div className="scene-top">
           <div className="scene-left">
             <SceneInfoPanel scene={scene} isLoading={loading.scene} />

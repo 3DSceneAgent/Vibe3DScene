@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Message } from '../state/types'
 import { LoadingSpinner } from './LoadingSpinner'
+import { ToolResultBlock } from './ToolResultBlock'
 
 type MessageListProps = {
   messages: Message[]
@@ -25,6 +26,15 @@ export function MessageList({ messages }: MessageListProps) {
 }
 
 function MessageItem({ message }: { message: Message }) {
+  if (message.role === 'tool') {
+    return (
+      <div className="message-row tool">
+        <div className="message-bubble tool">
+          <ToolResultBlock message={message} />
+        </div>
+      </div>
+    )
+  }
   const showSpinner = message.role === 'assistant' && message.status === 'streaming'
   return (
     <div className={`message-row ${message.role}`}>

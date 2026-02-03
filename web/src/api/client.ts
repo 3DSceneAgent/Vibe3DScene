@@ -100,3 +100,11 @@ export async function getSceneGltf(baseUrl: string, threadId: string): Promise<B
   }
   return await response.blob()
 }
+
+export async function getHealth(baseUrl: string, signal?: AbortSignal): Promise<{ status: string }> {
+  const response = await fetch(`${baseUrl}/health`, { signal })
+  if (!response.ok) {
+    throw new Error(`Healthcheck failed (${response.status})`)
+  }
+  return (await response.json()) as { status: string }
+}

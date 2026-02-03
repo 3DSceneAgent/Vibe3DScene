@@ -24,6 +24,10 @@ Both scripts will:
 3. Monitor both processes
 4. Handle graceful shutdown when you press `Ctrl+C`
 
+Both scripts also set default headless Blender environment variables if not provided:
+- `BLENDER_HEADLESS_CMD=blender`
+- `BLENDER_HEADLESS_ARGS=--background --python scripts/blender_headless_client.py -- --host {host} --port {port}`
+
 ## Stopping Services
 
 Simply press `Ctrl+C` in the terminal where the script is running. Both services will be stopped automatically.

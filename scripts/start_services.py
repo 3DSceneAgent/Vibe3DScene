@@ -36,6 +36,13 @@ def main():
     
     # Change to project directory
     os.chdir(project_dir)
+
+    # Default headless blender command/args if not provided
+    os.environ.setdefault("BLENDER_HEADLESS_CMD", "blender")
+    os.environ.setdefault(
+        "BLENDER_HEADLESS_ARGS",
+        "--background --python scripts/blender_headless_client.py -- --host {host} --port {port}",
+    )
     
     # Store process references
     processes = []

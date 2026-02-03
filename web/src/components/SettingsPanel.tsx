@@ -32,25 +32,18 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
         </div>
         <div className="theme-options">
           <button
-            className={`theme-card ${settings.theme === 'midnight' ? 'active' : ''}`}
-            onClick={() => updateTheme('midnight')}
+            className={`theme-card ${settings.theme === 'dark' ? 'active' : ''}`}
+            onClick={() => updateTheme('dark')}
           >
-            <span className="theme-swatch midnight" />
-            Midnight
+            <span className="theme-swatch dark" />
+            Dark
           </button>
           <button
-            className={`theme-card ${settings.theme === 'slate' ? 'active' : ''}`}
-            onClick={() => updateTheme('slate')}
+            className={`theme-card ${settings.theme === 'light' ? 'active' : ''}`}
+            onClick={() => updateTheme('light')}
           >
-            <span className="theme-swatch slate" />
-            Slate
-          </button>
-          <button
-            className={`theme-card ${settings.theme === 'warm' ? 'active' : ''}`}
-            onClick={() => updateTheme('warm')}
-          >
-            <span className="theme-swatch warm" />
-            Warm
+            <span className="theme-swatch light" />
+            Light
           </button>
         </div>
       </div>

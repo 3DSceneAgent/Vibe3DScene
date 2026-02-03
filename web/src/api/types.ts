@@ -34,4 +34,5 @@ export type StreamEvent = {
   delta?: string
   message_id?: string | null
   event?: 'done'
+  scene_has_change?: boolean
 }
