@@ -501,6 +501,8 @@ async def get_scene(thread_id: str):
                 "iteration_count": state.values.get("iteration_count", 0)
             }
         except Exception as fallback_error:
+            import traceback 
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail=str(fallback_error)) from fallback_error
 
 
