@@ -27,6 +27,7 @@ Both scripts will:
 Both scripts also set default headless Blender environment variables if not provided:
 - `BLENDER_HEADLESS_CMD=blender`
 - `BLENDER_HEADLESS_ARGS=--background --python scripts/blender_headless_client.py -- --host {host} --port {port}`
+- `API_WORKERS=1` (controls how many API worker processes are launched)
 
 ## Stopping Services
 

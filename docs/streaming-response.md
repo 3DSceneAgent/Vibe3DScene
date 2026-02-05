@@ -52,6 +52,14 @@ Emitted once per request when the stream completes.
 { "event": "done", "scene_has_change": true }
 ```
 
+### 5) Errors (`error`)
+
+If streaming fails, an error payload is emitted and a terminal `event: done` follows.
+
+```json
+{ "error": "Stream timed out" }
+```
+
 ## Message Envelope Fields
 
 Each entry inside `messages` is serialized with:
@@ -91,3 +99,14 @@ The UI should scan tool payloads for image fields and render them inline.
 - SSE events arrive in the order produced by the LangGraph stream.
 - Tool messages may interleave with assistant text.
 - The `event: done` payload marks end of stream for a request.
+- Error payloads always precede the final `event: done` marker.
+
+## Keepalive Messages
+
+The server may emit keepalive comment lines in the SSE stream:
+
+```
+: keepalive
+```
+
+Clients should ignore these lines; they are used to prevent idle timeouts.

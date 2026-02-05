@@ -120,6 +120,8 @@ Agent: I'll break this down into steps:
 - `RETRIEVAL_API_HOST`: 3D asset retrieval host (default: localhost)
 - `RETRIEVAL_API_PORT`: 3D asset retrieval port (default: 8001)
 - `RAG_ENABLED`: Enable RAG for BPY scripts (default: false)
+- `API_WORKERS`: Number of API worker processes (default: 1)
+- `API_STREAM_TIMEOUT_SECONDS`: Max seconds to allow a single streaming response (default: 120)
 
 ## Development
 

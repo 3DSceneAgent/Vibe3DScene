@@ -29,6 +29,7 @@ export async function streamChat({
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  let sawTerminalEvent = false
 
   while (true) {
     const { value, done } = await reader.read()
@@ -44,6 +45,9 @@ export async function streamChat({
       if (!data) continue
       try {
         const parsed = JSON.parse(data) as StreamEvent
+        if (parsed.event === 'done' || parsed.error) {
+          sawTerminalEvent = true
+        }
         onEvent(parsed)
       } catch (error) {
         console.error('Failed to parse stream event', error)
@@ -58,12 +62,19 @@ export async function streamChat({
       if (data) {
         try {
           const parsed = JSON.parse(data) as StreamEvent
+          if (parsed.event === 'done' || parsed.error) {
+            sawTerminalEvent = true
+          }
           onEvent(parsed)
         } catch (error) {
           console.error('Failed to parse stream event', error)
         }
       }
     }
+  }
+
+  if (!sawTerminalEvent && !signal?.aborted) {
+    onEvent({ error: 'Stream closed unexpectedly.' })
   }
 }
 

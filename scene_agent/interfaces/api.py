@@ -26,6 +26,7 @@ from scene_agent.blender.session_manager import (
 )
 from scene_agent.config import get_settings
 from scene_agent.memory.scene_memory import SceneMemory
+from scene_agent.utils.logging import log_event
 
 # Create FastAPI app
 app = FastAPI(
@@ -294,6 +295,15 @@ async def startup_event():
         print(f"✗ Failed to initialize agent: {e}")
 
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Ensure headless processes are cleaned up on shutdown."""
+    try:
+        get_session_manager().shutdown_all()
+    except Exception as e:
+        log_event("error", "shutdown_cleanup_failed", {"error": str(e)})
+
+
 @app.get("/")
 async def root():
     """Root endpoint"""
@@ -367,11 +377,17 @@ async def chat_stream(request: ChatRequest):
         StreamingResponse with SSE events
     """
     async def event_generator():
+        settings = get_settings()
+        timeout_seconds = max(1, settings.api_stream_timeout_seconds)
+        keepalive_interval = min(15.0, max(5.0, timeout_seconds / 4))
+        deadline = time.time() + timeout_seconds
+        request_id = f"{request.thread_id}:{int(time.time() * 1000)}"
         saw_message_stream = False
         saw_new_message = False
         existing_message_ids: set[str] = set()
         last_assistant_text: str | None = None
         scene_has_change = False
+        done_payload: dict[str, Any] | None = None
         try:
             agent = await get_agent(request.thread_id)
             config = {"configurable": {"thread_id": request.thread_id}}
@@ -393,11 +409,30 @@ async def chat_stream(request: ChatRequest):
             except Exception:
                 pass
 
-            async for event in agent.astream(
+            stream = agent.astream(
                 {"messages": [HumanMessage(content=request.message)]},
                 config=config,
                 stream_mode=["messages", "values"]
-            ):
+            )
+            next_event_task: asyncio.Task | None = None
+            while True:
+                if time.time() >= deadline:
+                    if next_event_task is not None:
+                        next_event_task.cancel()
+                    raise TimeoutError("Stream timed out")
+                if next_event_task is None:
+                    next_event_task = asyncio.create_task(stream.__anext__())
+                done, _pending = await asyncio.wait({next_event_task}, timeout=keepalive_interval)
+                if not done:
+                    yield ": keepalive\n\n"
+                    continue
+                try:
+                    event = next_event_task.result()
+                except StopAsyncIteration:
+                    break
+                finally:
+                    next_event_task = None
+
                 mode, payload = normalize_stream_event(event)
                 is_message_stream = mode == "messages" or hasattr(mode, "content") or hasattr(mode, "type")
                 if is_message_stream:
@@ -447,14 +482,32 @@ async def chat_stream(request: ChatRequest):
                             payload = {"messages": [serialized]}
                             yield f"data: {json.dumps(payload, default=str)}\n\n"
 
-            yield f"data: {json.dumps({'event': 'done', 'scene_has_change': scene_has_change})}\n\n"
+            done_payload = {"event": "done", "scene_has_change": scene_has_change}
         except Exception as e:
+            log_event(
+                "error",
+                "stream_failed",
+                {
+                    "request_id": request_id,
+                    "thread_id": request.thread_id,
+                    "error": str(e),
+                },
+            )
             error_event = {"error": str(e)}
             yield f"data: {json.dumps(error_event)}\n\n"
+            done_payload = {"event": "done", "scene_has_change": scene_has_change}
+        finally:
+            if done_payload is not None:
+                yield f"data: {json.dumps(done_payload)}\n\n"
     
     return StreamingResponse(
         event_generator(),
-        media_type="text/event-stream"
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -668,13 +721,17 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.close()
 
 
-def run_api(host: str = "0.0.0.0", port: int = 8000):
+def run_api(host: str = "0.0.0.0", port: int = 8000, workers: int | None = None):
     """
     Run the FastAPI server.
     
     Args:
         host: Host to bind to
         port: Port to listen on
+        workers: Number of worker processes
     """
     import uvicorn
-    uvicorn.run(app, host=host, port=port)
+    settings = get_settings()
+    worker_count = workers if workers is not None else settings.api_workers
+    worker_count = max(1, worker_count)
+    uvicorn.run("scene_agent.interfaces.api:app", host=host, port=port, workers=worker_count)

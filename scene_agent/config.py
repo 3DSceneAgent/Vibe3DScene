@@ -43,6 +43,16 @@ class Settings(BaseSettings):
         default=10,
         description="Seconds to wait for headless Blender startup"
     )
+
+    # API Runtime
+    api_workers: int = Field(
+        default=1,
+        description="Number of API worker processes to run"
+    )
+    api_stream_timeout_seconds: int = Field(
+        default=120,
+        description="Max seconds to allow a single streaming response"
+    )
     
     # 3D Asset Retrieval API
     retrieval_api_host: str = Field(

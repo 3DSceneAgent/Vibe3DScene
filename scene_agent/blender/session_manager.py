@@ -122,6 +122,37 @@ class SessionManager:
         with self._lock:
             return list(self._sessions.values())
 
+    def shutdown_all(self, timeout: float = 5.0) -> None:
+        sessions = self.list_sessions()
+        for session in sessions:
+            self._terminate_process(session.process, timeout)
+            self._terminate_process(session.mcp_process, timeout)
+            with self._lock:
+                session.status = "closed"
+                session.mark_active()
+                session.process = None
+                session.mcp_process = None
+
+    @staticmethod
+    def _terminate_process(process: Optional[subprocess.Popen], timeout: float) -> None:
+        if process is None:
+            return
+        try:
+            if process.poll() is not None:
+                return
+        except Exception:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+            except Exception:
+                return
+        except Exception:
+            return
+
 
 _session_manager = SessionManager()
 
@@ -168,6 +199,7 @@ def start_headless_process(session: BlenderSession, command: str | None, args: l
     if session.process and session.process.poll() is None:
         return
     try:
+        print(f"Starting headless Blender process: {command} {args}")
         session.process = subprocess.Popen(
             [command, *args],
             stdout=subprocess.DEVNULL,

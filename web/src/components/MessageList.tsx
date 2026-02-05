@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { Message } from '../state/types'
 import { LoadingSpinner } from './LoadingSpinner'
 import { ToolResultBlock } from './ToolResultBlock'
+import { MarkdownMessage } from './MarkdownMessage'
 
 type MessageListProps = {
   messages: Message[]
@@ -41,7 +42,7 @@ function MessageItem({ message }: { message: Message }) {
       <div className={`message-bubble ${message.role}`}>
         {message.thinking && <ThinkingBlock thinking={message.thinking} />}
         <div className="message-content">
-          {message.content || ' '}
+          <MarkdownMessage content={message.content || ' '} />
           {showSpinner && <LoadingSpinner />}
         </div>
       </div>

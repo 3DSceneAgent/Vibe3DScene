@@ -5,6 +5,7 @@ import pytest
 import requests
 from fastapi.testclient import TestClient
 from scene_agent.interfaces import api as api_module
+from .streaming_helpers import collect_sse_payloads, find_payload
 
 
 class StubAgent:
@@ -14,8 +15,18 @@ class StubAgent:
         yield ("messages", [{"type": "tool", "content": {"status": "ok"}, "name": "blender.test"}])
 
 
-async def fake_get_agent():
+async def fake_get_agent(_thread_id=None):
     return StubAgent()
+
+
+class FailingAgent:
+    async def astream(self, *_args, **_kwargs):
+        yield ("messages", [{"type": "ai", "content": "hello"}])
+        raise RuntimeError("stream failed")
+
+
+async def fake_get_failing_agent(_thread_id=None):
+    return FailingAgent()
 
 
 def test_chat_stream_sse(monkeypatch):
@@ -41,6 +52,32 @@ def test_chat_stream_sse(monkeypatch):
     assert deltas[:2] == ["hello", " world"]
     assert tool_payloads
     assert tool_payloads[0].get("scene_has_change") is True
+
+
+def test_chat_stream_emits_done(monkeypatch):
+    monkeypatch.setattr(api_module, "get_agent", fake_get_agent)
+    client = TestClient(api_module.app)
+
+    with client.stream("POST", "/chat/stream", json={"message": "hi", "thread_id": "t2"}) as response:
+        assert response.status_code == 200
+        payloads = collect_sse_payloads(response.iter_lines())
+
+    done_payload = find_payload(payloads, "event")
+    assert done_payload is not None
+    assert done_payload["event"] == "done"
+
+
+def test_chat_stream_emits_error(monkeypatch):
+    monkeypatch.setattr(api_module, "get_agent", fake_get_failing_agent)
+    client = TestClient(api_module.app)
+
+    with client.stream("POST", "/chat/stream", json={"message": "hi", "thread_id": "t3"}) as response:
+        assert response.status_code == 200
+        payloads = collect_sse_payloads(response.iter_lines())
+
+    error_payload = find_payload(payloads, "error")
+    assert error_payload is not None
+    assert "stream failed" in error_payload["error"]
 
 
 

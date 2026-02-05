@@ -12,6 +12,8 @@
   "dependencies": {
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "react-markdown": "^9.1.0",
+    "remark-gfm": "^4.0.0",
     "three": "^0.182.0"
   },
   "devDependencies": {

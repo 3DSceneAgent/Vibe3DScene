@@ -50,6 +50,13 @@ Requirements:
         default=8000,
         help="API server port (default: 8000, only for api mode)"
     )
+
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="API worker processes (default: uses API_WORKERS env var or 1)"
+    )
     
     args = parser.parse_args()
     
@@ -69,7 +76,7 @@ Requirements:
     else:
         print(f"Starting API server on {args.host}:{args.port}...")
         from scene_agent.interfaces.api import run_api
-        run_api(host=args.host, port=args.port)
+        run_api(host=args.host, port=args.port, workers=args.workers)
 
 
 if __name__ == "__main__":

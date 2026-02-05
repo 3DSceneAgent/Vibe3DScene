@@ -43,6 +43,7 @@ def main():
         "BLENDER_HEADLESS_ARGS",
         "--background --python scripts/blender_headless_client.py -- --host {host} --port {port}",
     )
+    os.environ.setdefault("API_WORKERS", "1")
     
     # Store process references
     processes = []
@@ -54,16 +55,24 @@ def main():
         # Terminate all processes
         for proc in processes:
             try:
-                proc.terminate()
-            except:
+                if proc.poll() is not None:
+                    continue
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except Exception:
+                    proc.terminate()
+            except Exception:
                 pass
-        
+
         # Wait for processes to finish
         for proc in processes:
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    proc.kill()
         
         print_colored("All services stopped", Colors.GREEN)
         sys.exit(0)
@@ -79,7 +88,8 @@ def main():
             [sys.executable, "mcp_server/server.py"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            cwd=project_dir
+            cwd=project_dir,
+            start_new_session=True
         )
         processes.append(mcp_process)
         print_colored(f"      MCP server started (PID: {mcp_process.pid})", Colors.GREEN)
@@ -95,8 +105,20 @@ def main():
         # Start API server
         print_colored("[2/2] Starting API server...", Colors.GREEN)
         api_process = subprocess.Popen(
-            [sys.executable, "main.py", "--mode", "api", "--host", "0.0.0.0", "--port", "8000"],
-            cwd=project_dir
+            [
+                sys.executable,
+                "main.py",
+                "--mode",
+                "api",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8000",
+                "--workers",
+                os.environ.get("API_WORKERS", "1"),
+            ],
+            cwd=project_dir,
+            start_new_session=True
         )
         processes.append(api_process)
         print_colored(f"      API server started (PID: {api_process.pid})", Colors.GREEN)

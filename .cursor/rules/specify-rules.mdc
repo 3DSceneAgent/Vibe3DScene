@@ -7,6 +7,8 @@ Auto-generated from all feature plans. Last updated: 2026-02-01
 - In-memory agent state, temporary filesystem exports, browser `localStorage` for threads/settings (002-scene-ui-fixes)
 - Python 3.x (backend), TypeScript 5.9 (frontend) + FastAPI, LangGraph, LangChain, langchain-mcp-adapters, React 19, Vite 7, Three.js (001-scene-auto-fetch)
 - In-memory LangGraph checkpointer, browser `localStorage`, temporary filesystem for renders/exports (001-scene-auto-fetch)
+- Python >=3.10 for backend; TypeScript 5.9 for web + FastAPI, uvicorn, websockets, langgraph/langchain; React 19, Vite (004-fix-headless-blender)
+- N/A (no persistent datastore; in-memory session state) (004-fix-headless-blender)
 
 - Python 3.x (backend), TypeScript 5.9 (frontend) + FastAPI, LangGraph, LangChain, langchain-mcp-adapters, websockets, React 19, Vite 7, Three.js (001-ui-streaming-blender)
 
@@ -27,10 +29,10 @@ cd src [ONLY COMMANDS FOR ACTIVE TECHNOLOGIES][ONLY COMMANDS FOR ACTIVE TECHNOLO
 Python 3.x (backend), TypeScript 5.9 (frontend): Follow standard conventions
 
 ## Recent Changes
+- 004-fix-headless-blender: Added Python >=3.10 for backend; TypeScript 5.9 for web + FastAPI, uvicorn, websockets, langgraph/langchain; React 19, Vite
 - 001-scene-auto-fetch: Added Python 3.x (backend), TypeScript 5.9 (frontend) + FastAPI, LangGraph, LangChain, langchain-mcp-adapters, React 19, Vite 7, Three.js
 - 002-scene-ui-fixes: Added Python 3.x (backend), TypeScript 5.9 (frontend) + FastAPI, LangGraph/LangChain, websockets, React 19, Vite 7, Three.js
 
-- 001-ui-streaming-blender: Added Python 3.x (backend), TypeScript 5.9 (frontend) + FastAPI, LangGraph, LangChain, langchain-mcp-adapters, websockets, React 19, Vite 7, Three.js
 
 <!-- MANUAL ADDITIONS START -->
 <!-- MANUAL ADDITIONS END -->

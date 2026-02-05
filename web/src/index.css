@@ -56,3 +56,54 @@ button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }
+
+.markdown-body {
+  word-break: break-word;
+}
+
+.markdown-body > *:first-child {
+  margin-top: 0;
+}
+
+.markdown-body > *:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  margin: 0.6rem 0 0.4rem;
+  line-height: 1.2;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 1.2rem;
+  margin: 0.4rem 0;
+}
+
+.markdown-body a {
+  color: var(--color-accent);
+}
+
+.markdown-inline-code {
+  padding: 0.05rem 0.3rem;
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.2);
+  font-family: 'SFMono-Regular', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.markdown-code-block {
+  margin: 0.6rem 0;
+  padding: 0.75rem;
+  border-radius: 8px;
+  background: rgba(12, 15, 20, 0.6);
+  color: var(--color-text);
+  overflow-x: auto;
+}
+
+.markdown-code-block code {
+  font-family: 'SFMono-Regular', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: pre;
+}
