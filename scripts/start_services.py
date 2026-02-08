@@ -64,6 +64,7 @@ def main():
             except Exception:
                 pass
 
+        exit_codes = {}
         # Wait for processes to finish
         for proc in processes:
             try:
@@ -73,8 +74,13 @@ def main():
                     os.killpg(proc.pid, signal.SIGKILL)
                 except Exception:
                     proc.kill()
-        
+            finally:
+                exit_codes[proc.pid] = proc.poll()
+
         print_colored("All services stopped", Colors.GREEN)
+        for proc in processes:
+            role = "API" if proc.args and "main.py" in " ".join(map(str, proc.args)) else "MCP"
+            print(f"  {role} exit: {exit_codes.get(proc.pid)}")
         sys.exit(0)
     
     # Register signal handlers

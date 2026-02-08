@@ -5,6 +5,8 @@ import shlex
 import subprocess
 import threading
 import time
+import sys
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Literal, Any, List
 
@@ -27,6 +29,8 @@ class BlenderSession:
     error: Optional[str] = None
     process: Optional[subprocess.Popen] = None
     mcp_process: Optional[subprocess.Popen] = None
+    log_path: Optional[str] = None
+    mcp_log_path: Optional[str] = None
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def mark_active(self) -> None:
@@ -161,19 +165,42 @@ def get_session_manager() -> SessionManager:
     return _session_manager
 
 
-def allocate_headless_port(session_id: str, base_port: int, range_size: int) -> int:
+def allocate_headless_port(
+    session_id: str,
+    base_port: int,
+    range_size: int,
+    used_ports: set[int] | None = None,
+) -> int:
     if range_size <= 1:
         return base_port
-    return base_port + (abs(hash(session_id)) % range_size)
+    if not used_ports:
+        return base_port + (abs(hash(session_id)) % range_size)
+    start = abs(hash(session_id)) % range_size
+    for offset in range(range_size):
+        candidate = base_port + ((start + offset) % range_size)
+        if candidate not in used_ports:
+            return candidate
+    return base_port + start
 
 
-def allocate_mcp_port(session_id: str, base_port: int, range_size: int) -> int:
-    return allocate_headless_port(session_id, base_port, range_size)
+def allocate_mcp_port(
+    session_id: str,
+    base_port: int,
+    range_size: int,
+    used_ports: set[int] | None = None,
+) -> int:
+    return allocate_headless_port(
+        session_id,
+        base_port,
+        range_size,
+        used_ports=used_ports,
+    )
 
 
 def build_headless_command_args(session_id: str, host: str, port: int) -> tuple[str | None, list[str]]:
     command = os.getenv("BLENDER_HEADLESS_CMD")
     if not command:
+        print("BLENDER_HEADLESS_CMD is not set")
         return None, []
     raw_args = os.getenv("BLENDER_HEADLESS_ARGS", "")
     args = [
@@ -184,8 +211,8 @@ def build_headless_command_args(session_id: str, host: str, port: int) -> tuple[
 
 
 def build_mcp_command_args(session_id: str, host: str, port: int) -> tuple[str | None, list[str]]:
-    command = os.getenv("BLENDER_MCP_CMD", "python")
-    raw_args = os.getenv("BLENDER_MCP_ARGS", "mcp/server.py")
+    command = os.getenv("BLENDER_MCP_CMD") or sys.executable
+    raw_args = os.getenv("BLENDER_MCP_ARGS", "mcp_server/server.py")
     args = [
         arg.format(session_id=session_id, host=host, port=port)
         for arg in shlex.split(raw_args)
@@ -193,19 +220,75 @@ def build_mcp_command_args(session_id: str, host: str, port: int) -> tuple[str |
     return command, args
 
 
+def _default_project_root() -> Path | None:
+    root = Path(__file__).resolve().parents[2]
+    if (root / "mcp_server").exists():
+        return root
+    return None
+
+
 def start_headless_process(session: BlenderSession, command: str | None, args: list[str]) -> None:
     if not command:
+        error_msg = "BLENDER_HEADLESS_CMD environment variable not set"
+        print(f"ERROR: {error_msg}")
+        session.status = "error"
+        session.error = error_msg
         return
+        
     if session.process and session.process.poll() is None:
+        print(f"Process already running for {session.session_id} (PID: {session.process.pid})")
         return
+        
     try:
-        print(f"Starting headless Blender process: {command} {args}")
-        session.process = subprocess.Popen(
-            [command, *args],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        full_command = f"{command} {' '.join(args)}"
+        print(f"Starting headless Blender for session: {session.session_id}")
+        print(f"  Command: {full_command}")
+        
+        log_dir = os.getenv("BLENDER_HEADLESS_LOG_DIR", "/tmp/scene_agent_headless_logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, f"headless_{session.session_id}_{int(time.time() * 1000)}.log")
+        session.log_path = log_path
+        
+        with open(log_path, "w") as log_file:
+            log_file.write(f"=== Headless Blender Session: {session.session_id} ===\n")
+            log_file.write(f"Command: {full_command}\n")
+            log_file.write(f"Started: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            log_file.write("=" * 70 + "\n\n")
+            log_file.flush()
+            
+            session.process = subprocess.Popen(
+                [command, *args],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+            )
+        
+        print(f"  Process started (PID: {session.process.pid})")
+        print(f"  Log file: {log_path}")
+        
+        # 验证进程是否立即退出
+        time.sleep(1.0)
+        if session.process.poll() is not None:
+            exit_code = session.process.returncode
+            with open(log_path, 'r') as f:
+                log_content = f.read()
+            
+            error_msg = f"Blender process exited immediately with code {exit_code}"
+            print(f"ERROR: {error_msg}")
+            print(f"Log content:\n{log_content}")
+            
+            session.status = "error"
+            session.error = error_msg
+        else:
+            print(f"  Process confirmed running")
+            
     except Exception as exc:
+        error_msg = f"Failed to start headless Blender: {exc}"
+        print(f"ERROR: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        session.status = "error"
+        session.error = error_msg
+        print("ERROR!!!")
         session.status = "error"
         session.error = f"Failed to start headless Blender: {exc}"
 
@@ -221,12 +304,55 @@ def start_mcp_process(
     if session.mcp_process and session.mcp_process.poll() is None:
         return
     try:
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        full_command = f"{command} {' '.join(args)}"
+        log_dir = os.getenv("BLENDER_MCP_LOG_DIR", "/tmp/scene_agent_mcp_logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, f"mcp_{session.session_id}_{int(time.time() * 1000)}.log")
+        session.mcp_log_path = log_path
+        print(f"Starting MCP server for session: {session.session_id}")
+        print(f"  Command: {full_command}")
+        print(f"  Env: MCP_SERVER_HOST={env.get('MCP_SERVER_HOST')} MCP_SERVER_PORT={env.get('MCP_SERVER_PORT')}")
+        print(f"  Log file: {log_path}")
+        project_root = _default_project_root()
+        cwd = os.getenv("BLENDER_MCP_CWD") or (str(project_root) if project_root else None)
+        
+        log_file = open(log_path, "w", buffering=1)
+        log_file.write(f"=== MCP Server Session: {session.session_id} ===\n")
+        log_file.write(f"Command: {full_command}\n")
+        log_file.write(f"Env: MCP_SERVER_HOST={env.get('MCP_SERVER_HOST')} MCP_SERVER_PORT={env.get('MCP_SERVER_PORT')}\n")
+        log_file.write(f"Started: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        log_file.write("=" * 70 + "\n\n")
+        log_file.flush()
+        
         session.mcp_process = subprocess.Popen(
             [command, *args],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
             env=env,
+            cwd=cwd,
+            close_fds=False,
         )
+        print(f"  MCP PID: {session.mcp_process.pid}")
+        time.sleep(1.5)
+        if session.mcp_process.poll() is not None:
+            exit_code = session.mcp_process.returncode
+            log_file.flush()
+            log_file.close()
+            try:
+                with open(log_path, "r") as read_file:
+                    log_content = read_file.read()
+            except Exception:
+                log_content = "(failed to read log)"
+            session.status = "error"
+            session.error = f"MCP server exited immediately with code {exit_code}"
+            print(f"ERROR: {session.error}")
+            print(f"Log content:\n{log_content}")
+        else:
+            print(f"  MCP process started successfully")
     except Exception as exc:
         session.status = "error"
         session.error = f"Failed to start MCP server: {exc}"
+        print(f"ERROR: {session.error}")
+        import traceback
+        traceback.print_exc()

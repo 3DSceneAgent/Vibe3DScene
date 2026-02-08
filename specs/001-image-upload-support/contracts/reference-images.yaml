@@ -1,0 +1,99 @@
+openapi: 3.0.3
+info:
+  title: 3D Scene Agent Reference Image API
+  version: 1.0.0
+paths:
+  /threads/{thread_id}/reference-images:
+    post:
+      summary: Upload reference images
+      description: Upload up to three reference images for a conversation thread.
+      parameters:
+        - name: thread_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                images:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+                  maxItems: 3
+              required:
+                - images
+      responses:
+        "200":
+          description: Upload accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReferenceImageList"
+        "400":
+          description: Invalid upload or too many files
+        "415":
+          description: Unsupported media type
+    get:
+      summary: List reference images
+      description: List current reference images stored for a thread.
+      parameters:
+        - name: thread_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of reference images
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReferenceImageList"
+        "404":
+          description: Thread not found
+components:
+  schemas:
+    ReferenceImage:
+      type: object
+      properties:
+        id:
+          type: string
+        thread_id:
+          type: string
+        filename:
+          type: string
+        content_type:
+          type: string
+        size_bytes:
+          type: integer
+        sha256:
+          type: string
+        uploaded_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - thread_id
+        - filename
+        - content_type
+        - size_bytes
+        - sha256
+        - uploaded_at
+    ReferenceImageList:
+      type: object
+      properties:
+        thread_id:
+          type: string
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReferenceImage"
+      required:
+        - thread_id
+        - images

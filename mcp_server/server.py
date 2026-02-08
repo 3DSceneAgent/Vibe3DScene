@@ -1,23 +1,43 @@
 # blender_mcpv_server.py
 from mcp.server.fastmcp import FastMCP, Context, Image
-import socket
+from mcp.types import CallToolResult
 import json
 import asyncio
 import logging
 import tempfile
 import time
-from dataclasses import dataclass
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Dict, Any, List, Optional
 import os
-from pathlib import Path
 import base64
 from urllib.parse import urlparse
 import requests
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from scene_agent.blender.connection import BlenderConnection
+from scene_agent.utils.rendering import process_and_save_render
 # Configure logging
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("BlenderMCPServer")
+
+print(
+    "[mcp_server] pid=%s host=%s port=%s blender=%s:%s python=%s"
+    % (
+        os.getpid(),
+        os.getenv("MCP_SERVER_HOST", "localhost"),
+        os.getenv("MCP_SERVER_PORT", "9877"),
+        os.getenv("BLENDER_HOST", "localhost"),
+        os.getenv("BLENDER_PORT", "9876"),
+        sys.executable,
+    ),
+    flush=True,
+)
 
 # Default configuration
 DEFAULT_CLIENT_HOST = "localhost"
@@ -28,147 +48,6 @@ DEFAULT_SERVER_PORT = int(os.getenv("MCP_SERVER_PORT", "9877"))
 polyhaven_meta_info = json.load(open("assets/polyhaven_meta.json"))
 REQ_HEADERS = {"User-Agent": "blender-mcp-vision"}
 
-@dataclass
-class BlenderConnection:
-    host: str
-    port: int
-    sock: socket.socket = None  # Changed from 'socket' to 'sock' to avoid naming conflict
-    
-    def connect(self) -> bool:
-        """Connect to the Blender addon socket server"""
-        if self.sock:
-            return True
-            
-        try:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.connect((self.host, self.port))
-            logger.info(f"Connected to Blender at {self.host}:{self.port}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to connect to Blender: {str(e)}")
-            self.sock = None
-            return False
-    
-    def disconnect(self):
-        """Disconnect from the Blender addon"""
-        if self.sock:
-            try:
-                self.sock.close()
-            except Exception as e:
-                logger.error(f"Error disconnecting from Blender: {str(e)}")
-            finally:
-                self.sock = None
-
-    def receive_full_response(self, sock, buffer_size=8192):
-        """Receive the complete response, potentially in multiple chunks"""
-        chunks = []
-        # Use a consistent timeout value that matches the addon's timeout
-        sock.settimeout(180.0)  # Match the addon's timeout
-        
-        try:
-            while True:
-                try:
-                    chunk = sock.recv(buffer_size)
-                    if not chunk:
-                        # If we get an empty chunk, the connection might be closed
-                        if not chunks:  # If we haven't received anything yet, this is an error
-                            raise Exception("Connection closed before receiving any data")
-                        break
-                    
-                    chunks.append(chunk)
-                    
-                    # Check if we've received a complete JSON object
-                    try:
-                        data = b''.join(chunks)
-                        json.loads(data.decode('utf-8'))
-                        # If we get here, it parsed successfully
-                        logger.info(f"Received complete response ({len(data)} bytes)")
-                        return data
-                    except json.JSONDecodeError:
-                        # Incomplete JSON, continue receiving
-                        continue
-                except socket.timeout:
-                    # If we hit a timeout during receiving, break the loop and try to use what we have
-                    logger.warning("Socket timeout during chunked receive")
-                    break
-                except (ConnectionError, BrokenPipeError, ConnectionResetError) as e:
-                    logger.error(f"Socket connection error during receive: {str(e)}")
-                    raise  # Re-raise to be handled by the caller
-        except socket.timeout:
-            logger.warning("Socket timeout during chunked receive")
-        except Exception as e:
-            logger.error(f"Error during receive: {str(e)}")
-            raise
-            
-        # If we get here, we either timed out or broke out of the loop
-        # Try to use what we have
-        if chunks:
-            data = b''.join(chunks)
-            logger.info(f"Returning data after receive completion ({len(data)} bytes)")
-            try:
-                # Try to parse what we have
-                json.loads(data.decode('utf-8'))
-                return data
-            except json.JSONDecodeError:
-                # If we can't parse it, it's incomplete
-                raise Exception("Incomplete JSON response received")
-        else:
-            raise Exception("No data received")
-
-    def send_command(self, command_type: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Send a command to Blender and return the response"""
-        if not self.sock and not self.connect():
-            raise ConnectionError("Not connected to Blender")
-        
-        command = {
-            "type": command_type,
-            "params": params or {}
-        }
-        
-        try:
-            # Log the command being sent
-            logger.info(f"Sending command: {command_type} with params: {params}")
-            
-            # Send the command
-            self.sock.sendall(json.dumps(command).encode('utf-8'))
-            logger.info(f"Command sent, waiting for response...")
-            
-            # Set a timeout for receiving - use the same timeout as in receive_full_response
-            self.sock.settimeout(180.0)  # Match the addon's timeout
-            
-            # Receive the response using the improved receive_full_response method
-            response_data = self.receive_full_response(self.sock)
-            logger.info(f"Received {len(response_data)} bytes of data")
-            
-            response = json.loads(response_data.decode('utf-8'))
-            logger.info(f"Response parsed, status: {response.get('status', 'unknown')}")
-            
-            if response.get("status") == "error":
-                logger.error(f"Blender error: {response.get('message')}")
-                raise Exception(response.get("message", "Unknown error from Blender"))
-            
-            return response.get("result", {})
-        except socket.timeout:
-            logger.error("Socket timeout while waiting for response from Blender")
-            # Don't try to reconnect here - let the get_blender_connection handle reconnection
-            # Just invalidate the current socket so it will be recreated next time
-            self.sock = None
-            raise Exception("Timeout waiting for Blender response - try simplifying your request")
-        except (ConnectionError, BrokenPipeError, ConnectionResetError) as e:
-            logger.error(f"Socket connection error: {str(e)}")
-            self.sock = None
-            raise Exception(f"Connection to Blender lost: {str(e)}")
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON response from Blender: {str(e)}")
-            # Try to log what was received
-            if 'response_data' in locals() and response_data:
-                logger.error(f"Raw response (first 200 bytes): {response_data[:200]}")
-            raise Exception(f"Invalid response from Blender: {str(e)}")
-        except Exception as e:
-            logger.error(f"Error communicating with Blender: {str(e)}")
-            # Don't try to reconnect here - let the get_blender_connection handle reconnection
-            self.sock = None
-            raise Exception(f"Communication error with Blender: {str(e)}")
 
 @asynccontextmanager
 async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
@@ -247,7 +126,7 @@ def get_blender_connection():
     if _blender_connection is None:
         host = os.getenv("BLENDER_HOST", DEFAULT_CLIENT_HOST)
         port = int(os.getenv("BLENDER_PORT", DEFAULT_CLIENT_PORT))
-        _blender_connection = BlenderConnection(host=host, port=port)
+        _blender_connection = BlenderConnection(host=host, port=port, logger=logger)
         if not _blender_connection.connect():
             logger.error("Failed to connect to Blender")
             _blender_connection = None
@@ -838,7 +717,7 @@ def render_from_objects(
     focal_length: str = "normal",
     azimuth: float = 45,
     elevation: float = 30
-) -> Image:
+) -> CallToolResult:
     """
     Render image by auto-creating camera focused on specified objects.
     Uses EEVEE renderer for fast results.
@@ -850,8 +729,7 @@ def render_from_objects(
     - azimuth: Horizontal angle in degrees (0-360)
     - elevation: Vertical angle in degrees (0-90)
     
-    Returns the rendered image. In annotated mode, objects are highlighted with red
-    bounding boxes and labeled with their names.
+    Returns a markdown image link to the rendered image.
     """
     try:
         blender = get_blender_connection()
@@ -877,13 +755,34 @@ def render_from_objects(
         if not os.path.exists(filepath):
             raise Exception(f"Rendered file not found: {filepath}")
         
-        with open(filepath, 'rb') as f:
-            image_bytes = f.read()
+        # Get thread_id from context (if available) or use fallback
+        thread_id = "unknown"
+        if hasattr(ctx, 'request_context') and ctx.request_context:
+            if hasattr(ctx.request_context, 'get'):
+                thread_id = ctx.request_context.get("thread_id", "unknown")
+            elif isinstance(ctx.request_context, dict):
+                thread_id = ctx.request_context.get("thread_id", "unknown")
+        camera_name = result.get("camera", "auto")
         
-        # Note: File is kept on disk for user inspection
-        logger.info(f"Rendered image saved to {filepath}")
+        # Process and save the image, get URL
+        image_url = process_and_save_render(filepath, thread_id, camera_name, logger=logger)
         
-        return Image(data=image_bytes, format="png")
+        # Clean up temp file
+        try:
+            os.remove(filepath)
+        except:
+            pass
+        
+        logger.info(f"Render available at: {image_url}")
+        
+        # Return markdown image link
+        objects_str = ", ".join(object_names)
+        markdown_image = f"![Render of {objects_str}]({image_url})"
+        
+        return CallToolResult(
+            content=[{"type": "text", "text": markdown_image}],
+            isError=False
+        )
         
     except Exception as e:
         logger.error(f"Error rendering from objects: {str(e)}")
@@ -895,7 +794,7 @@ def render_from_camera(
     camera_name: str,
     object_names: Optional[list[str]] = None,
     mode: str = "rgb"
-) -> Image:
+) -> CallToolResult:
     """
     Render from an existing camera in the scene.
     Uses EEVEE renderer for fast results.
@@ -905,7 +804,7 @@ def render_from_camera(
     - object_names: Optional list of objects to highlight in annotated mode
     - mode: "rgb" for standard render, or "annotated" to add 2D bboxes and object IDs
     
-    Returns the rendered image.
+    Returns a markdown image link to the rendered image.
     """
     try:
         blender = get_blender_connection()
@@ -929,12 +828,32 @@ def render_from_camera(
         if not os.path.exists(filepath):
             raise Exception(f"Rendered file not found: {filepath}")
         
-        with open(filepath, 'rb') as f:
-            image_bytes = f.read()
+        # Get thread_id from context (if available) or use fallback
+        thread_id = "unknown"
+        if hasattr(ctx, 'request_context') and ctx.request_context:
+            if hasattr(ctx.request_context, 'get'):
+                thread_id = ctx.request_context.get("thread_id", "unknown")
+            elif isinstance(ctx.request_context, dict):
+                thread_id = ctx.request_context.get("thread_id", "unknown")
         
-        logger.info(f"Rendered image saved to {filepath}")
+        # Process and save the image, get URL
+        image_url = process_and_save_render(filepath, thread_id, camera_name, logger=logger)
         
-        return Image(data=image_bytes, format="png")
+        # Clean up temp file
+        try:
+            os.remove(filepath)
+        except:
+            pass
+        
+        logger.info(f"Render available at: {image_url}")
+        
+        # Return markdown image link
+        markdown_image = f"![Render from {camera_name}]({image_url})"
+        
+        return CallToolResult(
+            content=[{"type": "text", "text": markdown_image}],
+            isError=False
+        )
         
     except Exception as e:
         logger.error(f"Error rendering from camera: {str(e)}")

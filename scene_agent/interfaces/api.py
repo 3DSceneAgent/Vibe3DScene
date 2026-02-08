@@ -6,16 +6,17 @@ import asyncio
 import base64
 import json
 import os
-import socket
 import tempfile
 import threading
 import time
 from typing import Dict, Any
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import StreamingResponse, Response
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
+from fastapi.responses import StreamingResponse, Response, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
+from scene_agent.blender.connection import BlenderConnection
 
 from scene_agent.agent.graph import create_agent_graph
 from scene_agent.blender.session_manager import (
@@ -26,7 +27,19 @@ from scene_agent.blender.session_manager import (
 )
 from scene_agent.config import get_settings
 from scene_agent.memory.scene_memory import SceneMemory
+from scene_agent.memory.reference_image_memory import (
+    ReferenceImage,
+    get_reference_image_memory,
+)
+from scene_agent.utils.diagnostics import (
+    build_diagnostic_record,
+    elapsed_ms,
+    new_request_id,
+    start_timer,
+    within_target,
+)
 from scene_agent.utils.logging import log_event
+from scene_agent.utils.rendering import RENDERS_DIR
 
 # Create FastAPI app
 app = FastAPI(
@@ -44,6 +57,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Image storage configuration
+# Mount static files for renders
+app.mount("/renders", StaticFiles(directory=str(RENDERS_DIR)), name="renders")
+
 # Global agent instance
 _agent_graph = None
 _agent_graphs_by_thread: Dict[str, Any] = {}
@@ -51,64 +68,6 @@ _agent_graphs_by_thread: Dict[str, Any] = {}
 # Blender addon connection (direct socket)
 _blender_connection = None
 _blender_lock = threading.Lock()
-
-
-class BlenderConnection:
-    """Minimal socket client for Blender addon commands."""
-
-    def __init__(self, host: str, port: int):
-        self.host = host
-        self.port = port
-        self.sock = None
-
-    def connect(self) -> bool:
-        if self.sock:
-            return True
-        try:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.connect((self.host, self.port))
-            return True
-        except Exception:
-            self.sock = None
-            return False
-
-    def disconnect(self):
-        if self.sock:
-            try:
-                self.sock.close()
-            finally:
-                self.sock = None
-
-    def receive_full_response(self, buffer_size: int = 8192) -> bytes:
-        chunks = []
-        self.sock.settimeout(180.0)
-        while True:
-            chunk = self.sock.recv(buffer_size)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            try:
-                data = b"".join(chunks)
-                json.loads(data.decode("utf-8"))
-                return data
-            except json.JSONDecodeError:
-                continue
-        if not chunks:
-            raise Exception("No data received")
-        data = b"".join(chunks)
-        json.loads(data.decode("utf-8"))
-        return data
-
-    def send_command(self, command_type: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
-        if not self.sock and not self.connect():
-            raise ConnectionError("Not connected to Blender")
-        command = {"type": command_type, "params": params or {}}
-        self.sock.sendall(json.dumps(command).encode("utf-8"))
-        response_data = self.receive_full_response()
-        response = json.loads(response_data.decode("utf-8"))
-        if response.get("status") == "error":
-            raise Exception(response.get("message", "Unknown error from Blender"))
-        return response.get("result", {})
 
 
 def get_blender_connection() -> BlenderConnection:
@@ -133,24 +92,71 @@ def get_blender_connection_for_thread(thread_id: str) -> BlenderConnection:
     session = manager.ensure(thread_id, "headless")
     host = os.getenv("BLENDER_HEADLESS_HOST", settings.blender_host)
     base_port = int(os.getenv("BLENDER_HEADLESS_BASE_PORT", "9876"))
-    port_range = int(os.getenv("BLENDER_HEADLESS_PORT_RANGE", "1"))
-    port = allocate_headless_port(thread_id, base_port, port_range)
-    manager.set_endpoint(thread_id, host, port)
+    port_range = int(os.getenv("BLENDER_HEADLESS_PORT_RANGE", "16"))
+    if session.port is None:
+        used_ports = {item.port for item in manager.list_sessions() if item.port}
+        port = allocate_headless_port(
+            thread_id,
+            base_port,
+            port_range,
+            used_ports=used_ports,
+        )
+        manager.set_endpoint(thread_id, host, port)
+    else:
+        port = session.port
 
     command, args = build_headless_command_args(thread_id, host, port)
+    print("Building headless command and args...")
+    print(f"Command: {command}")
+    print(f"Args: {args}")
 
     with session.lock:
+        print("Lock acquired.")
         connection = session.connection
         if not isinstance(connection, BlenderConnection):
+            print("Creating new connection for the thread...")
             connection = BlenderConnection(host=host, port=port)
             session.connection = connection
         if not connection.connect():
+            print("Starting headless process...")
             start_headless_process(session, command, args)
+            
+            # 等待进程启动并监控
             deadline = time.time() + settings.blender_headless_startup_timeout
+            last_check = time.time()
+            connected = False
+            
             while time.time() < deadline:
+                # 定期检查进程状态
+                if time.time() - last_check > 2.0:
+                    if session.process:
+                        if session.process.poll() is not None:
+                            error_msg = f"Blender process exited with code {session.process.returncode}"
+                            if session.log_path and os.path.exists(session.log_path):
+                                with open(session.log_path, 'r') as f:
+                                    log_content = f.read()
+                                error_msg += f"\n\nProcess Log:\n{log_content[-2000:]}"
+                            manager.set_error(thread_id, error_msg)
+                            raise Exception(error_msg)
+                        print(f"  Process still running (PID: {session.process.pid}), waiting for connection...")
+                    last_check = time.time()
+                
                 if connection.connect():
+                    print(f"Successfully connected to Blender on {host}:{port}")
+                    connected = True
                     break
                 time.sleep(0.5)
+            
+            if not connected:
+                error_msg = f"Connection timeout after {settings.blender_headless_startup_timeout}s"
+                if session.log_path and os.path.exists(session.log_path):
+                    with open(session.log_path, 'r') as f:
+                        log_content = f.read()
+                    error_msg += f"\n\nProcess Log:\n{log_content[-2000:]}"
+                manager.set_error(thread_id, error_msg)
+                raise Exception(error_msg)
+        else:
+            print("Connection already established.")
 
         if not connection.sock:
             error_message = "Could not connect to headless Blender session."
@@ -158,6 +164,7 @@ def get_blender_connection_for_thread(thread_id: str) -> BlenderConnection:
             raise Exception(error_message)
 
         manager.set_ready(thread_id, connection)
+        print(f"Session ready for thread: {thread_id}")
 
     return connection
 
@@ -170,11 +177,10 @@ def send_blender_command_sync(
     global _blender_connection
     settings = get_settings()
     if settings.blender_mode == "headless" and thread_id:
-        manager = get_session_manager()
-        session = manager.ensure(thread_id, "headless")
-        with session.lock:
-            blender = get_blender_connection_for_thread(thread_id)
-            return blender.send_command(command_type, params)
+        # 移除外层锁，避免与 get_blender_connection_for_thread() 内部的锁嵌套导致死锁
+        # get_blender_connection_for_thread() 内部已经有 session.lock 保护
+        blender = get_blender_connection_for_thread(thread_id)
+        return blender.send_command(command_type, params)
 
     with _blender_lock:
         try:
@@ -228,12 +234,22 @@ def message_content_to_text(content: Any) -> str:
             if isinstance(item, str):
                 parts.append(item)
             elif isinstance(item, dict):
-                if isinstance(item.get("text"), str):
+                # Check if it's an image_url object
+                if "image_url" in item and isinstance(item["image_url"], dict):
+                    url = item["image_url"].get("url", "")
+                    # Convert image_url to markdown if it's not a data URL
+                    if url and not url.startswith("data:"):
+                        parts.append(f"![image]({url})")
+                    # Skip data URLs to avoid including base64 in text
+                    continue
+                elif isinstance(item.get("text"), str):
                     parts.append(item["text"])
                 elif isinstance(item.get("content"), str):
                     parts.append(item["content"])
                 else:
-                    parts.append(json.dumps(item, ensure_ascii=False, default=str))
+                    # Don't serialize large base64 data
+                    if "base64" not in str(item):
+                        parts.append(json.dumps(item, ensure_ascii=False, default=str))
             else:
                 parts.append(str(item))
         return "".join(parts)
@@ -285,10 +301,63 @@ class ChatResponse(BaseModel):
     todos: list[Dict[str, Any]] = []
 
 
+class ReferenceImageResponse(BaseModel):
+    id: str
+    thread_id: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    sha256: str
+    uploaded_at: str
+
+
+class ReferenceImageListResponse(BaseModel):
+    thread_id: str
+    images: list[ReferenceImageResponse]
+
+
+def serialize_reference_image(image: ReferenceImage) -> ReferenceImageResponse:
+    return ReferenceImageResponse(
+        id=image.id,
+        thread_id=image.thread_id,
+        filename=image.filename,
+        content_type=image.content_type,
+        size_bytes=image.size_bytes,
+        sha256=image.sha256,
+        uploaded_at=image.uploaded_at,
+    )
+
+
+def build_headless_diagnostics(
+    *,
+    session,
+    request_id: str,
+    elapsed_ms_value: int,
+    status: str,
+    target_ms: int,
+) -> dict[str, Any]:
+    record = build_diagnostic_record(
+        request_id=request_id,
+        thread_id=session.session_id,
+        session_id=session.session_id,
+        process_id=session.process.pid if session.process else None,
+        log_path=session.log_path,
+        elapsed_ms_value=elapsed_ms_value,
+        status=status,
+    )
+    payload = record.__dict__.copy()
+    payload["within_target"] = within_target(elapsed_ms_value, target_ms)
+    return payload
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize agent on startup"""
     try:
+        settings = get_settings()
+        if settings.blender_mode == "headless":
+            log_event("info", "startup_skip_agent_init", {"mode": settings.blender_mode})
+            return
         await get_agent()
         print("✓ Agent initialized successfully")
     except Exception as e:
@@ -317,6 +386,7 @@ async def root():
             "scene": "GET /scene/{thread_id}",
             "scene_renders": "GET /scene/{thread_id}/renders",
             "scene_gltf": "GET /scene/{thread_id}/gltf",
+            "reference_images": "GET/POST /threads/{thread_id}/reference-images",
             "todos": "GET /todos/{thread_id}",
             "threads": "GET /threads",
             "websocket": "WS /ws"
@@ -347,7 +417,7 @@ async def chat(request: ChatRequest):
         
         # Run agent
         result = await agent.ainvoke(
-            {"messages": [HumanMessage(content=request.message)]},
+            {"messages": [HumanMessage(content=request.message)], "thread_id": request.thread_id},
             config=config
         )
         
@@ -377,6 +447,7 @@ async def chat_stream(request: ChatRequest):
         StreamingResponse with SSE events
     """
     async def event_generator():
+        import time 
         settings = get_settings()
         timeout_seconds = max(1, settings.api_stream_timeout_seconds)
         keepalive_interval = min(15.0, max(5.0, timeout_seconds / 4))
@@ -410,7 +481,7 @@ async def chat_stream(request: ChatRequest):
                 pass
 
             stream = agent.astream(
-                {"messages": [HumanMessage(content=request.message)]},
+                {"messages": [HumanMessage(content=request.message)], "thread_id": request.thread_id},
                 config=config,
                 stream_mode=["messages", "values"]
             )
@@ -525,8 +596,55 @@ async def get_scene(thread_id: str):
     try:
         settings = get_settings()
         if settings.blender_mode == "headless":
-            get_session_manager().ensure(thread_id, "headless")
-        scene_info = await asyncio.to_thread(send_blender_command_sync, "get_scene_info", None, thread_id)
+            manager = get_session_manager()
+            session = manager.ensure(thread_id, "headless")
+            request_id = new_request_id(thread_id)
+            start_time = start_timer()
+            try:
+                scene_info = await asyncio.wait_for(
+                    asyncio.to_thread(send_blender_command_sync, "get_scene_info", None, thread_id),
+                    timeout=settings.headless_request_timeout_seconds,
+                )
+            except asyncio.TimeoutError as exc:
+                elapsed_value = elapsed_ms(start_time)
+                diagnostics = build_headless_diagnostics(
+                    session=session,
+                    request_id=request_id,
+                    elapsed_ms_value=elapsed_value,
+                    status="timeout",
+                    target_ms=settings.headless_request_timeout_seconds * 1000,
+                )
+                log_event("error", "headless_scene_timeout", diagnostics)
+                raise HTTPException(
+                    status_code=504,
+                    detail={"error": "Headless scene request timed out.", **diagnostics},
+                ) from exc
+            except Exception as exc:
+                elapsed_value = elapsed_ms(start_time)
+                diagnostics = build_headless_diagnostics(
+                    session=session,
+                    request_id=request_id,
+                    elapsed_ms_value=elapsed_value,
+                    status="error",
+                    target_ms=settings.headless_request_timeout_seconds * 1000,
+                )
+                log_event("error", "headless_scene_failed", {**diagnostics, "error": str(exc)})
+                raise HTTPException(
+                    status_code=500,
+                    detail={"error": str(exc), **diagnostics},
+                ) from exc
+            else:
+                elapsed_value = elapsed_ms(start_time)
+                diagnostics = build_headless_diagnostics(
+                    session=session,
+                    request_id=request_id,
+                    elapsed_ms_value=elapsed_value,
+                    status="ok",
+                    target_ms=settings.headless_request_timeout_seconds * 1000,
+                )
+                log_event("info", "headless_scene_ok", diagnostics)
+        else:
+            scene_info = await asyncio.to_thread(send_blender_command_sync, "get_scene_info", None, thread_id)
         scene_objects = SceneMemory.parse_scene_info(scene_info)
         objects = scene_info.get("objects", []) if isinstance(scene_info, dict) else []
         cameras = [obj.get("name") for obj in objects if obj.get("type") == "CAMERA" and obj.get("name")]
@@ -537,26 +655,15 @@ async def get_scene(thread_id: str):
             "iteration_count": 0
         }
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
         settings = get_settings()
         if settings.blender_mode == "local-client":
             raise HTTPException(
                 status_code=503,
                 detail="Blender client not connected. Start the Blender addon or enable headless mode."
             ) from e
-        try:
-            agent = await get_agent(thread_id)
-            config = {"configurable": {"thread_id": thread_id}}
-            state = await agent.aget_state(config)
-            return {
-                "thread_id": thread_id,
-                "scene_objects": state.values.get("scene_objects", {}),
-                "persistent_cameras": state.values.get("persistent_cameras", []),
-                "iteration_count": state.values.get("iteration_count", 0)
-            }
-        except Exception as fallback_error:
-            import traceback 
-            traceback.print_exc()
-            raise HTTPException(status_code=500, detail=str(fallback_error)) from fallback_error
+        raise
 
 
 @app.get("/scene/{thread_id}/renders")
@@ -565,11 +672,53 @@ async def get_scene_renders(thread_id: str, mode: str = "rgb"):
     Render all cameras in the current Blender scene and return base64 PNGs.
     """
     try:
-        scene_info = await asyncio.to_thread(send_blender_command_sync, "get_scene_info", None, thread_id)
+        settings = get_settings()
+        diagnostics = None
+        if settings.blender_mode == "headless":
+            manager = get_session_manager()
+            session = manager.ensure(thread_id, "headless")
+            request_id = new_request_id(thread_id)
+            start_time = start_timer()
+            try:
+                scene_info = await asyncio.wait_for(
+                    asyncio.to_thread(send_blender_command_sync, "get_scene_info", None, thread_id),
+                    timeout=settings.headless_request_timeout_seconds,
+                )
+            except asyncio.TimeoutError as exc:
+                elapsed_value = elapsed_ms(start_time)
+                diagnostics = build_headless_diagnostics(
+                    session=session,
+                    request_id=request_id,
+                    elapsed_ms_value=elapsed_value,
+                    status="timeout",
+                    target_ms=settings.headless_request_timeout_seconds * 1000,
+                )
+                log_event("error", "headless_renders_scene_timeout", diagnostics)
+                raise HTTPException(
+                    status_code=504,
+                    detail={"error": "Headless render request timed out.", **diagnostics},
+                ) from exc
+            except Exception as exc:
+                elapsed_value = elapsed_ms(start_time)
+                diagnostics = build_headless_diagnostics(
+                    session=session,
+                    request_id=request_id,
+                    elapsed_ms_value=elapsed_value,
+                    status="error",
+                    target_ms=settings.headless_request_timeout_seconds * 1000,
+                )
+                log_event("error", "headless_renders_scene_failed", {**diagnostics, "error": str(exc)})
+                raise HTTPException(
+                    status_code=500,
+                    detail={"error": str(exc), **diagnostics},
+                ) from exc
+        else:
+            scene_info = await asyncio.to_thread(send_blender_command_sync, "get_scene_info", None, thread_id)
         objects = scene_info.get("objects", [])
         cameras = [obj.get("name") for obj in objects if obj.get("type") == "CAMERA"]
 
         renders = []
+        start_time = start_timer()
         for camera_name in cameras:
             if not camera_name:
                 continue
@@ -577,7 +726,7 @@ async def get_scene_renders(thread_id: str, mode: str = "rgb"):
                 tempfile.gettempdir(),
                 f"blender_render_{camera_name}_{int(time.time() * 1000)}.png"
             )
-            result = await asyncio.to_thread(
+            render_call = asyncio.to_thread(
                 send_blender_command_sync,
                 "render_from_camera",
                 {
@@ -588,6 +737,25 @@ async def get_scene_renders(thread_id: str, mode: str = "rgb"):
                 },
                 thread_id
             )
+            if settings.blender_mode == "headless":
+                remaining = settings.headless_request_timeout_seconds - (elapsed_ms(start_time) / 1000)
+                if remaining <= 0:
+                    elapsed_value = elapsed_ms(start_time)
+                    diagnostics = build_headless_diagnostics(
+                        session=session,
+                        request_id=request_id,
+                        elapsed_ms_value=elapsed_value,
+                        status="timeout",
+                        target_ms=settings.headless_request_timeout_seconds * 1000,
+                    )
+                    log_event("error", "headless_renders_timeout", diagnostics)
+                    raise HTTPException(
+                        status_code=504,
+                        detail={"error": "Headless render request timed out.", **diagnostics},
+                    )
+                result = await asyncio.wait_for(render_call, timeout=remaining)
+            else:
+                result = await render_call
             filepath = result.get("filepath") or temp_path
             if not os.path.exists(filepath):
                 continue
@@ -602,8 +770,22 @@ async def get_scene_renders(thread_id: str, mode: str = "rgb"):
                 "image_base64": image_b64
             })
 
-        return {"thread_id": thread_id, "renders": renders}
+        if settings.blender_mode == "headless":
+            elapsed_value = elapsed_ms(start_time)
+            diagnostics = build_headless_diagnostics(
+                session=session,
+                request_id=request_id,
+                elapsed_ms_value=elapsed_value,
+                status="ok",
+                target_ms=settings.headless_request_timeout_seconds * 1000,
+            )
+            log_event("info", "headless_renders_ok", diagnostics)
+        return {"thread_id": thread_id, "renders": renders, "diagnostics": diagnostics}
     except Exception as e:
+        import traceback
+        traceback.print_exc()
+        if isinstance(e, HTTPException):
+            raise
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -613,6 +795,7 @@ async def get_scene_gltf(thread_id: str):
     Export current Blender scene to GLB and return the binary.
     """
     try:
+        settings = get_settings()
         temp_path = os.path.join(
             tempfile.gettempdir(),
             f"scene_{thread_id}_{int(time.time() * 1000)}.glb"
@@ -622,10 +805,113 @@ async def get_scene_gltf(thread_id: str):
             f"bpy.ops.export_scene.gltf(filepath=r\"{temp_path}\", "
             "export_format='GLB', export_apply=True)\n"
         )
-        await asyncio.to_thread(send_blender_command_sync, "execute_code", {"code": export_code}, thread_id)
+        if settings.blender_mode == "headless":
+            manager = get_session_manager()
+            session = manager.ensure(thread_id, "headless")
+            request_id = new_request_id(thread_id)
+            start_time = start_timer()
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        send_blender_command_sync,
+                        "execute_code",
+                        {"code": export_code},
+                        thread_id,
+                    ),
+                    timeout=settings.headless_request_timeout_seconds,
+                )
+            except asyncio.TimeoutError as exc:
+                elapsed_value = elapsed_ms(start_time)
+                diagnostics = build_headless_diagnostics(
+                    session=session,
+                    request_id=request_id,
+                    elapsed_ms_value=elapsed_value,
+                    status="timeout",
+                    target_ms=settings.headless_request_timeout_seconds * 1000,
+                )
+                log_event("error", "headless_gltf_timeout", diagnostics)
+                raise HTTPException(
+                    status_code=504,
+                    detail={"error": "Headless GLTF export timed out.", **diagnostics},
+                ) from exc
+            except Exception as exc:
+                elapsed_value = elapsed_ms(start_time)
+                diagnostics = build_headless_diagnostics(
+                    session=session,
+                    request_id=request_id,
+                    elapsed_ms_value=elapsed_value,
+                    status="error",
+                    target_ms=settings.headless_request_timeout_seconds * 1000,
+                )
+                log_event("error", "headless_gltf_failed", {**diagnostics, "error": str(exc)})
+                raise HTTPException(
+                    status_code=500,
+                    detail={"error": str(exc), **diagnostics},
+                ) from exc
+            else:
+                elapsed_value = elapsed_ms(start_time)
+                diagnostics = build_headless_diagnostics(
+                    session=session,
+                    request_id=request_id,
+                    elapsed_ms_value=elapsed_value,
+                    status="ok",
+                    target_ms=settings.headless_request_timeout_seconds * 1000,
+                )
+                log_event("info", "headless_gltf_ok", diagnostics)
+        else:
+            await asyncio.to_thread(send_blender_command_sync, "execute_code", {"code": export_code}, thread_id)
 
+        # Wait for file to be written with retries
+        max_retries = 10
+        retry_delay = 0.2
+        temp_dir = tempfile.gettempdir()
+        log_event("info", "gltf_export_waiting", {
+            "thread_id": thread_id,
+            "temp_path": temp_path,
+            "temp_dir": temp_dir,
+            "max_retries": max_retries
+        })
+        
+        for attempt in range(max_retries):
+            if os.path.exists(temp_path):
+                file_size = os.path.getsize(temp_path)
+                if file_size > 0:
+                    log_event("info", "gltf_export_file_ready", {
+                        "thread_id": thread_id,
+                        "attempt": attempt + 1,
+                        "file_size": file_size
+                    })
+                    break
+                else:
+                    log_event("warning", "gltf_export_file_empty", {
+                        "thread_id": thread_id,
+                        "attempt": attempt + 1
+                    })
+            else:
+                log_event("debug", "gltf_export_file_not_found", {
+                    "thread_id": thread_id,
+                    "attempt": attempt + 1
+                })
+            
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+        
         if not os.path.exists(temp_path):
-            raise Exception("GLB export failed")
+            log_event("error", "gltf_export_failed_not_found", {
+                "thread_id": thread_id,
+                "temp_path": temp_path,
+                "temp_dir": temp_dir,
+                "temp_dir_exists": os.path.exists(temp_dir),
+                "temp_dir_writable": os.access(temp_dir, os.W_OK) if os.path.exists(temp_dir) else False
+            })
+            raise Exception("GLB export failed: file not found")
+        
+        if os.path.getsize(temp_path) == 0:
+            log_event("error", "gltf_export_failed_empty", {
+                "thread_id": thread_id,
+                "temp_path": temp_path
+            })
+            raise Exception("GLB export failed: file is empty")
 
         with open(temp_path, "rb") as f:
             glb_data = f.read()
@@ -641,7 +927,155 @@ async def get_scene_gltf(thread_id: str):
             headers={"Content-Disposition": f'attachment; filename="{filename}"'}
         )
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/scene/{thread_id}/blend")
+async def get_scene_blend(thread_id: str):
+    """
+    Export current Blender scene to .blend file and return the binary.
+    """
+    try:
+        settings = get_settings()
+        temp_path = os.path.join(
+            tempfile.gettempdir(),
+            f"scene_{thread_id}_{int(time.time() * 1000)}.blend"
+        )
+        export_code = (
+            "import bpy\n"
+            f"bpy.ops.wm.save_as_mainfile(filepath=r\"{temp_path}\", copy=True)\n"
+        )
+        if settings.blender_mode == "headless":
+            manager = get_session_manager()
+            session = manager.ensure(thread_id, "headless")
+            request_id = new_request_id(thread_id)
+            start_time = start_timer()
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        send_blender_command_sync,
+                        "execute_code",
+                        {"code": export_code},
+                        thread_id,
+                    ),
+                    timeout=settings.headless_request_timeout_seconds,
+                )
+            except asyncio.TimeoutError as exc:
+                elapsed_value = elapsed_ms(start_time)
+                diagnostics = build_headless_diagnostics(
+                    session=session,
+                    request_id=request_id,
+                    elapsed_ms_value=elapsed_value,
+                    status="timeout",
+                    target_ms=settings.headless_request_timeout_seconds * 1000,
+                )
+                log_event("error", "headless_blend_timeout", diagnostics)
+                raise HTTPException(
+                    status_code=504,
+                    detail={"error": "Headless BLEND export timed out.", **diagnostics},
+                ) from exc
+            except Exception as exc:
+                elapsed_value = elapsed_ms(start_time)
+                diagnostics = build_headless_diagnostics(
+                    session=session,
+                    request_id=request_id,
+                    elapsed_ms_value=elapsed_value,
+                    status="error",
+                    target_ms=settings.headless_request_timeout_seconds * 1000,
+                )
+                log_event("error", "headless_blend_failed", {**diagnostics, "error": str(exc)})
+                raise HTTPException(
+                    status_code=500,
+                    detail={"error": str(exc), **diagnostics},
+                ) from exc
+            else:
+                elapsed_value = elapsed_ms(start_time)
+                diagnostics = build_headless_diagnostics(
+                    session=session,
+                    request_id=request_id,
+                    elapsed_ms_value=elapsed_value,
+                    status="ok",
+                    target_ms=settings.headless_request_timeout_seconds * 1000,
+                )
+                log_event("info", "headless_blend_ok", diagnostics)
+        else:
+            await asyncio.to_thread(send_blender_command_sync, "execute_code", {"code": export_code}, thread_id)
+
+        # Wait for file to be written with retries
+        max_retries = 10
+        retry_delay = 0.2
+        for attempt in range(max_retries):
+            if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                break
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+        
+        if not os.path.exists(temp_path):
+            raise Exception("BLEND export failed: file not found")
+        
+        if os.path.getsize(temp_path) == 0:
+            raise Exception("BLEND export failed: file is empty")
+
+        with open(temp_path, "rb") as f:
+            blend_data = f.read()
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+
+        filename = f"scene-{thread_id}.blend"
+        return Response(
+            content=blend_data,
+            media_type="application/x-blender",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/threads/{thread_id}/reference-images", response_model=ReferenceImageListResponse)
+async def upload_reference_images(thread_id: str, images: list[UploadFile] = File(...)):
+    """
+    Upload reference images for a thread.
+    """
+    settings = get_settings()
+    if not images:
+        raise HTTPException(status_code=400, detail="No images provided.")
+    if len(images) > settings.reference_image_max_count:
+        raise HTTPException(status_code=400, detail="Too many images uploaded.")
+
+    uploads: list[tuple[str, str, bytes]] = []
+    for image in images:
+        payload = await image.read()
+        uploads.append((image.filename or "reference.png", image.content_type or "image/unknown", payload))
+
+    memory = get_reference_image_memory()
+    try:
+        stored = memory.add_images(thread_id=thread_id, uploads=uploads)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return ReferenceImageListResponse(
+        thread_id=thread_id,
+        images=[serialize_reference_image(image) for image in stored],
+    )
+
+
+@app.get("/threads/{thread_id}/reference-images", response_model=ReferenceImageListResponse)
+async def list_reference_images(thread_id: str):
+    """
+    List reference images for a thread.
+    """
+    memory = get_reference_image_memory()
+    images = memory.list_images(thread_id)
+    return ReferenceImageListResponse(
+        thread_id=thread_id,
+        images=[serialize_reference_image(image) for image in images],
+    )
 
 
 @app.get("/todos/{thread_id}")
@@ -708,7 +1142,7 @@ async def websocket_endpoint(websocket: WebSocket):
             if "message" in message_data:
                 # Stream response back to client
                 async for event in agent.astream(
-                    {"messages": [HumanMessage(content=message_data["message"])]},
+                    {"messages": [HumanMessage(content=message_data["message"])], "thread_id": thread_id},
                     config=config,
                     stream_mode=["messages", "values"]
                 ):

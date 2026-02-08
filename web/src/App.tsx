@@ -1,12 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { streamChat, getScene, getSceneRenders, getSceneGltf, getHealth } from './api/client'
-import type { StreamEvent, TodoItem } from './api/types'
+import {
+  streamChat,
+  getScene,
+  getSceneRenders,
+  getSceneGltf,
+  getSceneBlend,
+  getHealth,
+  uploadReferenceImages,
+  listReferenceImages
+} from './api/client'
+import type { ReferenceImage, StreamEvent, TodoItem } from './api/types'
 import { ChatTab } from './components/ChatTab'
 import { SceneTab } from './components/SceneTab'
 import { SettingsPanel } from './components/SettingsPanel'
 import { TopBar } from './components/TopBar'
 import { ThreadList } from './components/ThreadList'
-import { loadSettings, loadThreads, saveSettings, saveThreads } from './state/storage'
+import { loadSettings, loadThreads, loadSettingsAsync, loadThreadsAsync, saveSettings, saveThreads } from './state/storage'
 import type { Message, Thread } from './state/types'
 import {
   applyStreamingDeltaWithId,
@@ -20,6 +29,7 @@ import { downloadBlob } from './utils/download'
 import './App.css'
 
 function App() {
+  const REQUEST_TIMEOUT_MS = 35000
   const [threads, setThreads] = useState<Thread[]>(() => loadThreads())
   const [activeThreadId, setActiveThreadId] = useState<string | null>(() => loadThreads()[0]?.id ?? null)
   const [settings, setSettings] = useState(() => loadSettings())
@@ -36,6 +46,9 @@ function App() {
   })
   const streamAbortRef = useRef<AbortController | null>(null)
   const healthAbortRef = useRef<AbortController | null>(null)
+  const sceneAbortRef = useRef<AbortController | null>(null)
+  const rendersAbortRef = useRef<AbortController | null>(null)
+  const gltfAbortRef = useRef<AbortController | null>(null)
   const requestedSceneRef = useRef<Set<string>>(new Set())
   const previousAssistantContentRef = useRef<string | null>(null)
   const knownStreamIdsRef = useRef<Set<string>>(new Set())
@@ -43,11 +56,38 @@ function App() {
   const receivedDeltaRef = useRef(false)
   const sceneChangeRef = useRef<Record<string, boolean>>({})
   const settingsRef = useRef(settings)
+  const loadedReferenceImagesRef = useRef<Set<string>>(new Set())
+  const currentStreamRef = useRef<{ threadId: string; assistantId: string } | null>(null)
+  const messageIdMapRef = useRef<Map<string, string>>(new Map())
 
   const activeThread = useMemo(
     () => threads.find((thread) => thread.id === activeThreadId) ?? null,
     [threads, activeThreadId]
   )
+
+  // Load data from IndexedDB on mount
+  useEffect(() => {
+    let mounted = true
+    const loadData = async () => {
+      const [loadedThreads, loadedSettings] = await Promise.all([
+        loadThreadsAsync(),
+        loadSettingsAsync()
+      ])
+      if (mounted) {
+        if (loadedThreads.length > 0) {
+          setThreads(loadedThreads)
+          if (!activeThreadId) {
+            setActiveThreadId(loadedThreads[0].id)
+          }
+        }
+        setSettings(loadedSettings)
+      }
+    }
+    loadData()
+    return () => {
+      mounted = false
+    }
+  }, [])
 
   useEffect(() => {
     if (!activeThreadId && threads.length > 0) {
@@ -121,7 +161,8 @@ function App() {
       scene: null,
       renders: [],
       gltfUrl: null,
-      sceneHasChange: false
+      sceneHasChange: false,
+      referenceImages: []
     }
     setThreads((prev) => [newThread, ...prev])
     setActiveThreadId(newThread.id)
@@ -133,9 +174,17 @@ function App() {
       if (target?.gltfUrl) {
         URL.revokeObjectURL(target.gltfUrl)
       }
+      if (target?.referenceImages) {
+        target.referenceImages.forEach((image) => {
+          if (image.previewUrl) {
+            URL.revokeObjectURL(image.previewUrl)
+          }
+        })
+      }
       return prev.filter((thread) => thread.id !== threadId)
     })
     requestedSceneRef.current.delete(threadId)
+    loadedReferenceImagesRef.current.delete(threadId)
     delete sceneChangeRef.current[threadId]
     if (activeThreadId === threadId) {
       const remaining = threads.filter((thread) => thread.id !== threadId)
@@ -149,15 +198,80 @@ function App() {
     return Array.from(map.values())
   }
 
+  const mergeReferenceImages = (
+    existing: ReferenceImage[],
+    incoming: ReferenceImage[]
+  ): ReferenceImage[] => {
+    const map = new Map(existing.map((image) => [image.id, image]))
+    incoming.forEach((image) => {
+      const previous = map.get(image.id)
+      map.set(image.id, previous ? { ...image, previewUrl: previous.previewUrl } : image)
+    })
+    return Array.from(map.values())
+  }
+
   const toggleSceneTab = useCallback(() => {
     setSettings((prev) => ({ ...prev, sceneTabCollapsed: !prev.sceneTabCollapsed }))
   }, [])
 
-  const handleSend = async (text: string) => {
+  const handleStop = useCallback(() => {
+    if (streamAbortRef.current) {
+      streamAbortRef.current.abort()
+    }
+    
+    if (currentStreamRef.current) {
+      const { threadId, assistantId } = currentStreamRef.current
+      updateThread(threadId, (thread) => ({
+        ...thread,
+        messages: thread.messages.map((message) =>
+          message.id === assistantId && message.status === 'streaming'
+            ? { ...message, status: 'final' }
+            : message
+        )
+      }))
+      currentStreamRef.current = null
+    }
+    
+    setIsStreaming(false)
+  }, [updateThread])
+
+  const handleSend = async (text: string, files: File[] = []) => {
     if (!activeThread) {
-      return
+      return false
     }
     const threadId = activeThread.id
+
+    if (files.length > 0) {
+      if (!settings.backendUrl) {
+        return false
+      }
+      try {
+        const uploaded = await uploadReferenceImages(settings.backendUrl, threadId, files)
+        const nextImages = uploaded.map((image, index) => ({
+          ...image,
+          previewUrl: files[index] ? URL.createObjectURL(files[index]) : undefined
+        }))
+        updateThread(threadId, (thread) => ({
+          ...thread,
+          referenceImages: mergeReferenceImages(thread.referenceImages ?? [], nextImages)
+        }))
+      } catch (error) {
+        updateThread(threadId, (thread) => ({
+          ...thread,
+          messages: [
+            ...thread.messages,
+            {
+              id: `msg-${Date.now()}-upload-error`,
+              role: 'assistant',
+              content: `Error: ${(error as Error).message}`,
+              createdAt: Date.now(),
+              status: 'error'
+            }
+          ]
+        }))
+        return false
+      }
+    }
 
     if (streamAbortRef.current) {
       streamAbortRef.current.abort()
@@ -210,190 +324,248 @@ function App() {
     setIsStreaming(true)
     const abortController = new AbortController()
     streamAbortRef.current = abortController
-    try {
-      await streamChat({
-        baseUrl: settings.backendUrl,
-        message: text,
-        threadId,
-        signal: abortController.signal,
-        onEvent: (event: StreamEvent) => {
-          const updateAssistant = (updater: (message: Message) => Message) => {
-            updateThread(threadId, (thread) => ({
-              ...thread,
-              messages: thread.messages.map((message) =>
-                message.id === assistantId ? updater(message) : message
-              )
-            }))
-          }
-          const updateSceneChange = (nextValue: boolean, isFinal: boolean) => {
-            const current = sceneChangeRef.current[threadId] ?? false
-            const next = isFinal ? nextValue : nextValue || current
-            sceneChangeRef.current[threadId] = next
-            updateThread(threadId, (thread) => ({
-              ...thread,
-              sceneHasChange: next
-            }))
-            return next
-          }
-
-          if (event.error) {
-            updateAssistant((message) => ({ ...message, content: `Error: ${event.error}`, status: 'error' }))
-            return
-          }
-
-          if (event.todos && event.todos.length > 0) {
-            updateThread(threadId, (thread) => ({
-              ...thread,
-              todos: mergeTodos(thread.todos, event.todos || [])
-            }))
-          }
-
-          if (typeof event.scene_has_change === 'boolean') {
-            const nextSceneChange = updateSceneChange(event.scene_has_change, event.event === 'done')
-            if (event.event === 'done') {
-              if (settingsRef.current.autoRefreshScene && nextSceneChange) {
-                void fetchRenders(threadId)
-                void fetchGltf(threadId)
-              }
-              sceneChangeRef.current[threadId] = false
-              updateThread(threadId, (thread) => ({
-                ...thread,
-                sceneHasChange: false
-              }))
-            }
-          }
-
-          if (event.delta) {
-            receivedDeltaRef.current = true
-            if (event.message_id) {
-              knownStreamIdsRef.current.add(event.message_id)
-            }
-            updateAssistant((message) => {
-              const next = applyStreamingDeltaWithId(
-                message.raw,
-                event.delta || '',
-                message.streamId,
-                event.message_id ?? null
-              )
-              return {
-                ...message,
-                content: next.text,
-                thinking: next.thinking,
-                raw: next.raw,
-                streamId: next.messageId,
-                status: 'streaming'
-              }
-            })
-            return
-          }
-
-          if (event.messages && event.messages.length > 0) {
-            const toolEntries = event.messages
-              .filter((message) => isToolMessage(message))
-              .map((message) => {
-                const toolId =
-                  typeof message === 'object' && message !== null && 'id' in message
-                    ? (message as { id?: string | null }).id ?? null
-                    : null
-                if (toolId && knownToolIdsRef.current.has(toolId)) {
-                  return null
-                }
-                if (toolId) {
-                  knownToolIdsRef.current.add(toolId)
-                }
-                const extracted = extractToolPayload(message)
-                const payload = extracted?.payload ?? message
-                const content = extractMessageContent(payload)
-                return {
-                  id: toolId ?? `tool-${Date.now()}-${Math.random()}`,
-                  role: 'tool',
-                  content,
-                  createdAt: Date.now(),
-                  toolName: extracted?.name,
-                  toolPayload: payload,
-                  toolMedia: extracted?.media ?? [],
-                  status: 'final'
-                } satisfies Message
-              })
-              .filter((entry): entry is Message => Boolean(entry))
-            if (toolEntries.length > 0) {
-              updateThread(threadId, (thread) => ({
-                ...thread,
-                messages: [...thread.messages, ...toolEntries]
-              }))
-            }
-
-            const candidates = event.messages.filter(
-              (message) => !isHumanMessage(message) && !isToolMessage(message)
-            )
-            if (candidates.length === 0) return
-            let selected = candidates[candidates.length - 1]
-            for (let i = candidates.length - 1; i >= 0; i -= 1) {
-              const candidate = candidates[i]
-              const candidateId =
-                typeof candidate === 'object' && candidate !== null && 'id' in candidate
-                  ? (candidate as { id?: string | null }).id ?? null
-                  : null
-              if (candidateId && knownStreamIdsRef.current.has(candidateId)) {
-                continue
-              }
-              selected = candidate
-              break
-            }
-            const raw = extractMessageContent(selected)
-            if (!raw) return
-            const parsed = parseThinking(raw)
-            const streamId =
-              typeof selected === 'object' && selected !== null && 'id' in selected
-                ? (selected as { id?: string | null }).id ?? null
-                : null
-            if (!receivedDeltaRef.current && previousAssistantContentRef.current === parsed.text) {
-              return
-            }
-            if (streamId) {
-              knownStreamIdsRef.current.add(streamId)
-            }
-            updateAssistant((message) => ({
-              ...message,
-              content: parsed.text,
-              thinking: parsed.thinking,
-              raw,
-              streamId,
-              status: 'streaming'
-            }))
-          }
+    currentStreamRef.current = { threadId, assistantId }
+    messageIdMapRef.current.clear()
+    messageIdMapRef.current.set('initial', assistantId)
+    const handleStreamEvent = (event: StreamEvent) => {
+      const getOrCreateAssistantMessage = (messageId: string | null): string => {
+        if (!messageId) {
+          return assistantId
         }
-      })
-    } catch (error) {
-      updateThread(threadId, (thread) => ({
-        ...thread,
-        messages: thread.messages.map((message) =>
-          message.id === assistantId
-            ? { ...message, content: `Error: ${String(error)}`, status: 'error' }
-            : message
+        const existingId = messageIdMapRef.current.get(messageId)
+        if (existingId) {
+          return existingId
+        }
+        const newAssistantId = `msg-${Date.now()}-${Math.random()}-assistant`
+        messageIdMapRef.current.set(messageId, newAssistantId)
+        const newMessage: Message = {
+          id: newAssistantId,
+          role: 'assistant',
+          content: '',
+          createdAt: Date.now(),
+          streamId: messageId,
+          status: 'streaming'
+        }
+        updateThread(threadId, (thread) => ({
+          ...thread,
+          messages: [...thread.messages, newMessage]
+        }))
+        return newAssistantId
+      }
+
+      const updateAssistantById = (msgId: string, updater: (message: Message) => Message) => {
+        updateThread(threadId, (thread) => ({
+          ...thread,
+          messages: thread.messages.map((message) =>
+            message.id === msgId ? updater(message) : message
+          )
+        }))
+      }
+
+      const updateSceneChange = (nextValue: boolean, isFinal: boolean) => {
+        const current = sceneChangeRef.current[threadId] ?? false
+        const next = isFinal ? nextValue : nextValue || current
+        sceneChangeRef.current[threadId] = next
+        updateThread(threadId, (thread) => ({
+          ...thread,
+          sceneHasChange: next
+        }))
+        return next
+      }
+
+      if (event.error) {
+        updateAssistantById(assistantId, (message) => ({ ...message, content: `Error: ${event.error}`, status: 'error' }))
+        return
+      }
+
+      if (event.todos && event.todos.length > 0) {
+        updateThread(threadId, (thread) => ({
+          ...thread,
+          todos: mergeTodos(thread.todos, event.todos || [])
+        }))
+      }
+
+      if (typeof event.scene_has_change === 'boolean') {
+        const nextSceneChange = updateSceneChange(event.scene_has_change, event.event === 'done')
+        if (event.event === 'done') {
+          if (settingsRef.current.autoRefreshScene && nextSceneChange) {
+            void fetchRenders(threadId)
+            void fetchGltf(threadId)
+          }
+          sceneChangeRef.current[threadId] = false
+          updateThread(threadId, (thread) => ({
+            ...thread,
+            sceneHasChange: false
+          }))
+        }
+      }
+
+      if (event.delta) {
+        receivedDeltaRef.current = true
+        if (event.message_id) {
+          knownStreamIdsRef.current.add(event.message_id)
+        }
+        const targetAssistantId = getOrCreateAssistantMessage(event.message_id ?? null)
+        updateAssistantById(targetAssistantId, (message) => {
+          const next = applyStreamingDeltaWithId(
+            message.raw,
+            event.delta || '',
+            message.streamId,
+            event.message_id ?? null
+          )
+          return {
+            ...message,
+            content: next.text,
+            thinking: next.thinking,
+            raw: next.raw,
+            streamId: next.messageId,
+            status: 'streaming'
+          }
+        })
+        return
+      }
+
+      if (event.messages && event.messages.length > 0) {
+        const toolEntries = event.messages
+          .filter((message) => isToolMessage(message))
+          .map((message) => {
+            const toolId =
+              typeof message === 'object' && message !== null && 'id' in message
+                ? (message as { id?: string | null }).id ?? null
+                : null
+            if (toolId && knownToolIdsRef.current.has(toolId)) {
+              return null
+            }
+            if (toolId) {
+              knownToolIdsRef.current.add(toolId)
+            }
+            const extracted = extractToolPayload(message)
+            const payload = extracted?.payload ?? message
+            const content = extractMessageContent(payload)
+            const toolEntry: Message = {
+              id: toolId ?? `tool-${Date.now()}-${Math.random()}`,
+              role: 'tool',
+              content,
+              createdAt: Date.now(),
+              toolName: extracted?.name,
+              toolPayload: payload,
+              toolMedia: extracted?.media ?? [],
+              status: 'final'
+            }
+            return toolEntry
+          })
+          .filter((entry): entry is Message => entry !== null)
+        if (toolEntries.length > 0) {
+          updateThread(threadId, (thread) => ({
+            ...thread,
+            messages: [...thread.messages, ...toolEntries]
+          }))
+        }
+
+        const candidates = event.messages.filter(
+          (message) => !isHumanMessage(message) && !isToolMessage(message)
         )
-      }))
-    } finally {
-      updateThread(threadId, (thread) => ({
-        ...thread,
-        messages: thread.messages.map((message) =>
-          message.id === assistantId && message.status !== 'error'
-            ? { ...message, status: 'final' }
-            : message
-        )
-      }))
-      setIsStreaming(false)
+        if (candidates.length === 0) return
+        let selected = candidates[candidates.length - 1]
+        for (let i = candidates.length - 1; i >= 0; i -= 1) {
+          const candidate = candidates[i]
+          const candidateId =
+            typeof candidate === 'object' && candidate !== null && 'id' in candidate
+              ? (candidate as { id?: string | null }).id ?? null
+              : null
+          if (candidateId && knownStreamIdsRef.current.has(candidateId)) {
+            continue
+          }
+          selected = candidate
+          break
+        }
+        const raw = extractMessageContent(selected)
+        if (!raw) return
+        const parsed = parseThinking(raw)
+        const streamId =
+          typeof selected === 'object' && selected !== null && 'id' in selected
+            ? (selected as { id?: string | null }).id ?? null
+            : null
+        if (!receivedDeltaRef.current && previousAssistantContentRef.current === parsed.text) {
+          return
+        }
+        if (streamId) {
+          knownStreamIdsRef.current.add(streamId)
+        }
+        const targetAssistantId = getOrCreateAssistantMessage(streamId)
+        updateAssistantById(targetAssistantId, (message) => ({
+          ...message,
+          content: parsed.text,
+          thinking: parsed.thinking,
+          raw,
+          streamId,
+          status: 'streaming'
+        }))
+      }
     }
+
+    const streamPromise = streamChat({
+      baseUrl: settings.backendUrl,
+      message: text,
+      threadId,
+      signal: abortController.signal,
+      onEvent: handleStreamEvent
+    })
+    streamPromise
+      .catch((error) => {
+        updateThread(threadId, (thread) => {
+          const lastAssistantIndex = thread.messages.findLastIndex(
+            (m) => m.role === 'assistant' && m.status === 'streaming'
+          )
+          if (lastAssistantIndex === -1) {
+            return thread
+          }
+          return {
+            ...thread,
+            messages: thread.messages.map((message, index) =>
+              index === lastAssistantIndex
+                ? { ...message, content: `Error: ${String(error)}`, status: 'error' }
+                : message
+            )
+          }
+        })
+      })
+      .finally(() => {
+        updateThread(threadId, (thread) => ({
+          ...thread,
+          messages: thread.messages.map((message) =>
+            message.status === 'streaming'
+              ? { ...message, status: 'final' }
+              : message
+          )
+        }))
+        setIsStreaming(false)
+        currentStreamRef.current = null
+        messageIdMapRef.current.clear()
+      })
+    return true
   }
 
   const refreshScene = useCallback(async (threadId?: string) => {
     const targetId = threadId ?? activeThread?.id
     if (!targetId) return
+    if (sceneAbortRef.current) {
+      sceneAbortRef.current.abort()
+    }
+    const controller = new AbortController()
+    sceneAbortRef.current = controller
+    const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
     setLoading((prev) => ({ ...prev, scene: true }))
     try {
-      const scene = await getScene(settings.backendUrl, targetId)
+      const scene = await getScene(settings.backendUrl, targetId, controller.signal)
       updateThread(targetId, (thread) => ({ ...thread, scene }))
+    } catch (error) {
+      console.error('Failed to refresh scene', error)
     } finally {
+      window.clearTimeout(timeoutId)
+      if (sceneAbortRef.current === controller) {
+        sceneAbortRef.current = null
+      }
       setLoading((prev) => ({ ...prev, scene: false }))
     }
   }, [activeThread, settings.backendUrl, updateThread])
@@ -401,11 +573,23 @@ function App() {
   const fetchRenders = useCallback(async (threadId?: string) => {
     const targetId = threadId ?? activeThread?.id
     if (!targetId) return
+    if (rendersAbortRef.current) {
+      rendersAbortRef.current.abort()
+    }
+    const controller = new AbortController()
+    rendersAbortRef.current = controller
+    const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
     setLoading((prev) => ({ ...prev, renders: true }))
     try {
-      const renders = await getSceneRenders(settings.backendUrl, targetId)
+      const renders = await getSceneRenders(settings.backendUrl, targetId, controller.signal)
       updateThread(targetId, (thread) => ({ ...thread, renders }))
+    } catch (error) {
+      console.error('Failed to fetch renders', error)
     } finally {
+      window.clearTimeout(timeoutId)
+      if (rendersAbortRef.current === controller) {
+        rendersAbortRef.current = null
+      }
       setLoading((prev) => ({ ...prev, renders: false }))
     }
   }, [activeThread, settings.backendUrl, updateThread])
@@ -413,9 +597,15 @@ function App() {
   const fetchGltf = useCallback(async (threadId?: string) => {
     const targetId = threadId ?? activeThread?.id
     if (!targetId) return
+    if (gltfAbortRef.current) {
+      gltfAbortRef.current.abort()
+    }
+    const controller = new AbortController()
+    gltfAbortRef.current = controller
+    const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
     setLoading((prev) => ({ ...prev, gltf: true }))
     try {
-      const blob = await getSceneGltf(settings.backendUrl, targetId)
+      const blob = await getSceneGltf(settings.backendUrl, targetId, controller.signal)
       const nextUrl = URL.createObjectURL(blob)
       updateThread(targetId, (thread) => {
         if (thread.gltfUrl) {
@@ -423,10 +613,32 @@ function App() {
         }
         return { ...thread, gltfUrl: nextUrl }
       })
+    } catch (error) {
+      console.error('Failed to load GLTF', error)
     } finally {
+      window.clearTimeout(timeoutId)
+      if (gltfAbortRef.current === controller) {
+        gltfAbortRef.current = null
+      }
       setLoading((prev) => ({ ...prev, gltf: false }))
     }
   }, [activeThread, settings.backendUrl, updateThread])
+
+  const refreshReferenceImages = useCallback(
+    async (threadId: string) => {
+      if (!settings.backendUrl) return
+      try {
+        const images = await listReferenceImages(settings.backendUrl, threadId)
+        updateThread(threadId, (thread) => ({
+          ...thread,
+          referenceImages: mergeReferenceImages(thread.referenceImages ?? [], images)
+        }))
+      } catch {
+        // No-op: reference images are optional
+      }
+    },
+    [settings.backendUrl, updateThread]
+  )
 
   const downloadGltf = useCallback(async () => {
     if (!activeThread) return
@@ -446,6 +658,24 @@ function App() {
     }
   }, [activeThread, settings.backendUrl])
 
+  const downloadBlend = useCallback(async () => {
+    if (!activeThread) return
+    if (!activeThread.scene) {
+      window.alert('No scene available. Refresh the scene before downloading.')
+      return
+    }
+    setLoading((prev) => ({ ...prev, download: true }))
+    try {
+      const blob = await getSceneBlend(settings.backendUrl, activeThread.id)
+      const filename = `scene-${activeThread.id}.blend`
+      downloadBlob(blob, filename)
+    } catch (error) {
+      window.alert(`Failed to download BLEND: ${String(error)}`)
+    } finally {
+      setLoading((prev) => ({ ...prev, download: false }))
+    }
+  }, [activeThread, settings.backendUrl])
+
   useEffect(() => {
     if (!activeThread) return
     const threadId = activeThread.id
@@ -459,6 +689,15 @@ function App() {
     loading.scene,
     refreshScene
   ])
+
+  useEffect(() => {
+    if (!activeThread) return
+    const threadId = activeThread.id
+    if (!loadedReferenceImagesRef.current.has(threadId)) {
+      loadedReferenceImagesRef.current.add(threadId)
+      void refreshReferenceImages(threadId)
+    }
+  }, [activeThread?.id, refreshReferenceImages])
 
   return (
     <div className="app-shell">
@@ -512,6 +751,7 @@ function App() {
           onFetchRenders={fetchRenders}
           onLoadGltf={fetchGltf}
           onDownloadGltf={downloadGltf}
+          onDownloadBlend={downloadBlend}
           autoRefreshScene={settings.autoRefreshScene}
           onAutoRefreshChange={(enabled) => setSettings((prev) => ({ ...prev, autoRefreshScene: enabled }))}
           sceneCollapsed={settings.sceneTabCollapsed}
@@ -547,7 +787,12 @@ function App() {
             )}
           </section>
           <section className="workspace-chat">
-            <ChatTab thread={activeThread} isStreaming={isStreaming} onSend={handleSend} />
+            <ChatTab
+              thread={activeThread}
+              isStreaming={isStreaming}
+              onSend={handleSend}
+              onStop={handleStop}
+            />
           </section>
         </div>
       </main>

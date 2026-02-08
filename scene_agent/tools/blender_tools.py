@@ -4,6 +4,8 @@ Automatically loads tools from the Blender MCP server.
 """
 import asyncio
 import os
+import socket
+import time
 from typing import List, Any
 from scene_agent.config import get_settings
 from scene_agent.blender.session_manager import (
@@ -38,9 +40,18 @@ async def get_blender_tools(session_id: str | None = None) -> List[Any]:
         session = manager.ensure(session_id, "headless")
         host = os.getenv("BLENDER_HEADLESS_HOST", settings.blender_host)
         base_port = int(os.getenv("BLENDER_HEADLESS_BASE_PORT", "9876"))
-        port_range = int(os.getenv("BLENDER_HEADLESS_PORT_RANGE", "1"))
-        port = allocate_headless_port(session_id, base_port, port_range)
-        manager.set_endpoint(session_id, host, port)
+        port_range = int(os.getenv("BLENDER_HEADLESS_PORT_RANGE", "16"))
+        if session.port is None:
+            used_ports = {item.port for item in manager.list_sessions() if item.port}
+            port = allocate_headless_port(
+                session_id,
+                base_port,
+                port_range,
+                used_ports=used_ports,
+            )
+            manager.set_endpoint(session_id, host, port)
+        else:
+            port = session.port
 
         command, args = build_headless_command_args(session_id, host, port)
         with session.lock:
@@ -48,9 +59,18 @@ async def get_blender_tools(session_id: str | None = None) -> List[Any]:
 
         mcp_host = os.getenv("BLENDER_MCP_HOST", "localhost")
         mcp_base_port = int(os.getenv("BLENDER_MCP_BASE_PORT", "9877"))
-        mcp_range = int(os.getenv("BLENDER_MCP_PORT_RANGE", "1"))
-        mcp_port = allocate_mcp_port(session_id, mcp_base_port, mcp_range)
-        manager.set_mcp_endpoint(session_id, mcp_host, mcp_port)
+        mcp_range = int(os.getenv("BLENDER_MCP_PORT_RANGE", "16"))
+        if session.mcp_port is None:
+            used_mcp_ports = {item.mcp_port for item in manager.list_sessions() if item.mcp_port}
+            mcp_port = allocate_mcp_port(
+                session_id,
+                mcp_base_port,
+                mcp_range,
+                used_ports=used_mcp_ports,
+            )
+            manager.set_mcp_endpoint(session_id, mcp_host, mcp_port)
+        else:
+            mcp_port = session.mcp_port
 
         mcp_command, mcp_args = build_mcp_command_args(session_id, mcp_host, mcp_port)
         env = os.environ.copy()
@@ -64,6 +84,33 @@ async def get_blender_tools(session_id: str | None = None) -> List[Any]:
         )
         with session.lock:
             start_mcp_process(session, mcp_command, mcp_args, env)
+
+        startup_timeout = float(os.getenv("BLENDER_MCP_STARTUP_TIMEOUT", "10"))
+        deadline = time.time() + startup_timeout
+        while time.time() < deadline:
+            if session.mcp_process and session.mcp_process.poll() is not None:
+                log_path = session.mcp_log_path
+                log_detail = ""
+                if log_path and os.path.exists(log_path):
+                    try:
+                        with open(log_path, "r") as log_file:
+                            log_detail = log_file.read()
+                    except OSError:
+                        log_detail = ""
+                raise Exception(
+                    "MCP server exited before becoming ready. "
+                    f"Log: {log_path or 'n/a'}\n{log_detail}"
+                )
+            try:
+                await asyncio.to_thread(_probe_tcp, mcp_host, mcp_port)
+                break
+            except OSError:
+                await asyncio.sleep(0.2)
+        else:
+            raise Exception(
+                f"MCP server at {mcp_host}:{mcp_port} did not become ready within "
+                f"{startup_timeout}s. Check {session.mcp_log_path or 'MCP logs'}."
+            )
 
         mcp_url = f"http://{mcp_host}:{mcp_port}/mcp"
     
@@ -93,7 +140,7 @@ async def get_blender_tools(session_id: str | None = None) -> List[Any]:
         import traceback 
         traceback.print_exc()
         raise Exception(
-            f"Failed to connect to Blender MCP server at {settings.blender_mcp_url}. "
+            f"Failed to connect to Blender MCP server at {mcp_url}. "
             f"Make sure the server is running. Error: {str(e)}"
         ) from e
 
@@ -107,3 +154,8 @@ def get_blender_tools_sync() -> List[Any]:
         List of tools from Blender MCP server
     """
     return asyncio.run(get_blender_tools())
+
+
+def _probe_tcp(host: str, port: int) -> None:
+    with socket.create_connection((host, port), timeout=0.5):
+        return

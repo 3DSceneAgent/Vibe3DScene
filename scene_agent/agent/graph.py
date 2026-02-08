@@ -6,13 +6,26 @@ from typing import Literal
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
-from langchain_core.messages import BaseMessage
+
 
 from scene_agent.agent.state import AgentState
-from scene_agent.agent.nodes import agent_node, update_memory_node
+from scene_agent.agent.nodes import agent_node, update_memory_node, verify_node
 from scene_agent.config import get_settings
 from scene_agent.vlm import get_vlm_provider
 from scene_agent.tools import get_blender_tools
+
+
+def _route_after_update(state: AgentState) -> Literal["verify", "agent"]:
+    render_path = state.get("last_render_path")
+    if not render_path:
+        return "agent"
+    if state.get("last_verified_path") == render_path:
+        return "agent"
+    decision = state.get("agent_decision") or {}
+    should_verify = decision.get("should_verify")
+    if isinstance(should_verify, bool) and should_verify:
+        return "verify"
+    return "agent"
 
 
 async def create_agent_graph(session_id: str | None = None):
@@ -55,6 +68,7 @@ async def create_agent_graph(session_id: str | None = None):
     builder.add_node("agent", call_model)
     builder.add_node("tools", ToolNode(tools))
     builder.add_node("update_memory", update_memory_node)
+    builder.add_node("verify", verify_node)
     
     # Connect nodes
     builder.add_edge(START, "agent")
@@ -65,9 +79,13 @@ async def create_agent_graph(session_id: str | None = None):
         tools_condition,  # Built-in routing function
     )
     
-    # After tools, update memory then back to agent
+    # After tools, update memory then verify if needed
     builder.add_edge("tools", "update_memory")
-    builder.add_edge("update_memory", "agent")
+    builder.add_conditional_edges(
+        "update_memory",
+        _route_after_update,
+    )
+    builder.add_edge("verify", "agent")
     
     # Compile with checkpointing
     memory = MemorySaver()

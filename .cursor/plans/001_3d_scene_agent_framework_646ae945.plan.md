@@ -1,3 +1,10 @@
+---
+name: ""
+overview: ""
+todos: []
+isProject: false
+---
+
 # 3D Scene Agent Framework Implementation
 
 ## Architecture Overview
@@ -13,6 +20,7 @@ The agent uses a **LangGraph state machine** following best practices with prope
 - ToolNode for automatic tool execution following LLM calls
 - Proper message handling with LangChain message types
 - **Simplified architecture**: Perception and rendering are tools, not separate nodes
+
 ```mermaid
 graph TD
     START[START] --> Agent
@@ -24,6 +32,7 @@ graph TD
     Reflect -->|Continue| Agent
     Reflect -->|Done| END[END]
 ```
+
 
 
 **Key Insight**: `get_scene_info`, `render_from_camera`, and other perception/rendering operations are **tools** that the agent chooses when to call, not hardcoded nodes in the graph.
@@ -146,7 +155,7 @@ def merge_todos(existing: list[TodoItem], new: list[TodoItem]) -> list[TodoItem]
 
 ### 3. Tool Integration with Native MCP Support ([tools/blender_tools.py](tools/blender_tools.py))
 
-**LangGraph Best Practice: Use `langchain-mcp-adapters`**
+**LangGraph Best Practice: Use `langchain-mcp-adapters**`
 
 Based on the [official langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters), connect to the Blender MCP server:
 
@@ -199,6 +208,7 @@ Following [langchain-mcp-adapters examples](https://github.com/langchain-ai/lang
 **Node Implementations:**
 
 1. **Agent Node** - VLM reasoning with all tools bound
+
 ```python
 def agent_node(state: AgentState) -> dict:
     """VLM with bound tools - decides when to perceive, render, manipulate"""
@@ -207,13 +217,15 @@ def agent_node(state: AgentState) -> dict:
     return {"messages": [response]}
 ```
 
-2. **ToolNode** - Automatic tool execution (built-in)
+1. **ToolNode** - Automatic tool execution (built-in)
+
 ```python
 from langgraph.prebuilt import ToolNode
 tool_node = ToolNode(tools)  # Executes any tool the agent calls
 ```
 
-3. **Update Memory Node** - Parse tool results and update scene state
+1. **Update Memory Node** - Parse tool results and update scene state
+
 ```python
 def update_memory_node(state: AgentState) -> dict:
     """Parse messages to extract scene updates from tool results"""
@@ -238,7 +250,6 @@ def update_memory_node(state: AgentState) -> dict:
     
     return result
 ```
-
 
 **Routing Functions:**
 

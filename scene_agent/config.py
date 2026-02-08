@@ -26,18 +26,27 @@ class Settings(BaseSettings):
         description="Optional model override (uses provider default if not set)"
     )
     
-    # Blender MCP Server
+    # Blender addon socket (local-client/headless)
     blender_host: str = Field(
         default="localhost",
-        description="Blender MCP server host"
+        description="Blender addon socket host"
     )
     blender_port: int = Field(
-        default=9877,
-        description="Blender MCP server port"
+        default=9876,
+        description="Blender addon socket port"
     )
     blender_mode: str = Field(
         default="local-client",
         description="Blender connection mode: local-client or headless"
+    )
+    # MCP Server
+    mcp_server_host: str = Field(
+        default="localhost",
+        description="MCP server host"
+    )
+    mcp_server_port: int = Field(
+        default=9877,
+        description="MCP server port"
     )
     blender_headless_startup_timeout: int = Field(
         default=10,
@@ -52,6 +61,24 @@ class Settings(BaseSettings):
     api_stream_timeout_seconds: int = Field(
         default=120,
         description="Max seconds to allow a single streaming response"
+    )
+    headless_request_timeout_seconds: int = Field(
+        default=15,
+        description="Max seconds to allow a single headless scene/render request"
+    )
+
+    # Reference Image Uploads
+    reference_image_max_count: int = Field(
+        default=3,
+        description="Maximum number of reference images per conversation"
+    )
+    reference_image_max_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        description="Maximum size (bytes) per reference image upload"
+    )
+    reference_image_storage_dir: str = Field(
+        default="/tmp/scene_agent_reference_images",
+        description="Filesystem directory for short-term reference image storage"
     )
     
     # 3D Asset Retrieval API
@@ -106,7 +133,7 @@ class Settings(BaseSettings):
     @property
     def blender_mcp_url(self) -> str:
         """Get the full Blender MCP server URL"""
-        return f"http://{self.blender_host}:{self.blender_port}/mcp"
+        return f"http://{self.mcp_server_host}:{self.mcp_server_port}/mcp"
     
     @property
     def retrieval_api_url(self) -> str:

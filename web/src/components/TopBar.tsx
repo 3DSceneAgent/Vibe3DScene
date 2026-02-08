@@ -1,3 +1,5 @@
+import { useState, useRef, useEffect } from 'react'
+
 type EnvironmentPreset = 'studio' | 'warm' | 'cool'
 type BackendStatus = 'online' | 'offline' | 'checking'
 
@@ -8,6 +10,7 @@ type TopBarProps = {
   onFetchRenders: () => void
   onLoadGltf: () => void
   onDownloadGltf: () => void
+  onDownloadBlend: () => void
   autoRefreshScene: boolean
   onAutoRefreshChange: (enabled: boolean) => void
   sceneCollapsed: boolean
@@ -23,6 +26,72 @@ type TopBarProps = {
   backendUrl: string
 }
 
+function DownloadDropdown({
+  onDownloadGltf,
+  onDownloadBlend,
+  isDownloadLoading,
+  isDownloadDisabled,
+  canRunActions
+}: {
+  onDownloadGltf: () => void
+  onDownloadBlend: () => void
+  isDownloadLoading: boolean
+  isDownloadDisabled: boolean
+  canRunActions: boolean
+}) {
+  const [isOpen, setIsOpen] = useState(false)
+  const dropdownRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  const handleDownload = (format: 'gltf' | 'blend') => {
+    setIsOpen(false)
+    if (format === 'gltf') {
+      onDownloadGltf()
+    } else {
+      onDownloadBlend()
+    }
+  }
+
+  return (
+    <div className="dropdown" ref={dropdownRef}>
+      <button
+        className="ghost-btn dropdown-trigger"
+        onClick={() => setIsOpen(!isOpen)}
+        disabled={isDownloadLoading || isDownloadDisabled || !canRunActions}
+      >
+        Download Scene {isOpen ? '▲' : '▼'}
+      </button>
+      {isOpen && (
+        <div className="dropdown-menu">
+          <button
+            className="dropdown-item"
+            onClick={() => handleDownload('gltf')}
+            disabled={isDownloadLoading || isDownloadDisabled || !canRunActions}
+          >
+            Download as GLTF (.glb)
+          </button>
+          <button
+            className="dropdown-item"
+            onClick={() => handleDownload('blend')}
+            disabled={isDownloadLoading || isDownloadDisabled || !canRunActions}
+          >
+            Download as BLEND (.blend)
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function TopBar({
   environment,
   onEnvironmentChange,
@@ -30,6 +99,7 @@ export function TopBar({
   onFetchRenders,
   onLoadGltf,
   onDownloadGltf,
+  onDownloadBlend,
   autoRefreshScene,
   onAutoRefreshChange,
   sceneCollapsed,
@@ -68,22 +138,22 @@ export function TopBar({
   return (
     <div className="top-bar">
       <div className="top-bar-group">
-        <button className="ghost-btn" onClick={onRefreshScene} disabled={isSceneLoading || !canRunActions}>
+        <button className="ghost-btn" onClick={() => onRefreshScene()} disabled={isSceneLoading || !canRunActions}>
           Refresh Scene
         </button>
-        <button className="ghost-btn" onClick={onFetchRenders} disabled={isRendersLoading || !canRunActions}>
+        <button className="ghost-btn" onClick={() => onFetchRenders()} disabled={isRendersLoading || !canRunActions}>
           Fetch Renders
         </button>
-        <button className="primary-btn" onClick={onLoadGltf} disabled={isGltfLoading || !canRunActions}>
+        <button className="primary-btn" onClick={() => onLoadGltf()} disabled={isGltfLoading || !canRunActions}>
           Load 3D Scene
         </button>
-        <button
-          className="ghost-btn"
-          onClick={onDownloadGltf}
-          disabled={isDownloadLoading || isDownloadDisabled || !canRunActions}
-        >
-          Download GLTF
-        </button>
+        <DownloadDropdown
+          onDownloadGltf={onDownloadGltf}
+          onDownloadBlend={onDownloadBlend}
+          isDownloadLoading={isDownloadLoading}
+          isDownloadDisabled={isDownloadDisabled}
+          canRunActions={canRunActions}
+        />
         <label className="toggle-switch">
           <input
             type="checkbox"

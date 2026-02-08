@@ -1,7 +1,15 @@
 import type { Settings, Thread } from './types'
+import {
+  isIndexedDBSupported,
+  loadThreadsFromIndexedDB,
+  saveThreadsToIndexedDB,
+  loadSettingsFromIndexedDB,
+  saveSettingsToIndexedDB
+} from './indexeddb'
 
 const THREADS_KEY = 'sceneAgentThreads'
 const SETTINGS_KEY = 'sceneAgentSettings'
+const MAX_MESSAGES_PER_THREAD = 100
 
 export const defaultSettings: Settings = {
   backendUrl: 'http://localhost:8000',
@@ -11,8 +19,25 @@ export const defaultSettings: Settings = {
 }
 
 const legacyDarkThemes = new Set(['midnight', 'slate', 'warm'])
+const useIndexedDB = isIndexedDBSupported()
 
-export function loadThreads(): Thread[] {
+function sanitizeThreads(threads: Thread[]): Thread[] {
+  return threads.map((thread) => {
+    // Limit messages per thread to avoid storage overflow
+    const messages = thread.messages.slice(-MAX_MESSAGES_PER_THREAD)
+    
+    return {
+      ...thread,
+      messages,
+      renders: [],
+      gltfUrl: null,
+      sceneHasChange: false,
+      referenceImages: thread.referenceImages?.map(({ previewUrl, ...image }) => image) ?? []
+    }
+  })
+}
+
+function loadThreadsFromLocalStorage(): Thread[] {
   try {
     const raw = localStorage.getItem(THREADS_KEY)
     if (!raw) return []
@@ -23,17 +48,81 @@ export function loadThreads(): Thread[] {
   }
 }
 
-export function saveThreads(threads: Thread[]) {
-  const sanitized = threads.map((thread) => ({
-    ...thread,
-    renders: [],
-    gltfUrl: null,
-    sceneHasChange: false
-  }))
-  localStorage.setItem(THREADS_KEY, JSON.stringify(sanitized))
+function saveThreadsToLocalStorage(threads: Thread[]): boolean {
+  try {
+    const sanitized = sanitizeThreads(threads)
+    localStorage.setItem(THREADS_KEY, JSON.stringify(sanitized))
+    return true
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'QuotaExceededError') {
+      console.error('LocalStorage quota exceeded. Attempting to clean up...')
+      try {
+        // Try to save only the most recent threads
+        const recentThreads = sanitized.slice(-5)
+        localStorage.setItem(THREADS_KEY, JSON.stringify(recentThreads))
+        console.warn('Saved only the 5 most recent threads due to storage constraints')
+        return true
+      } catch {
+        console.error('Failed to save even after cleanup')
+        return false
+      }
+    }
+    console.error('Failed to save threads to localStorage:', error)
+    return false
+  }
 }
 
-export function loadSettings(): Settings {
+export function loadThreads(): Thread[] {
+  if (useIndexedDB) {
+    // IndexedDB is async, but we need to provide a sync API for initial load
+    // So we return empty and trigger async load separately
+    return []
+  }
+  return loadThreadsFromLocalStorage()
+}
+
+export async function loadThreadsAsync(): Promise<Thread[]> {
+  if (useIndexedDB) {
+    try {
+      const threads = await loadThreadsFromIndexedDB()
+      if (threads.length > 0) {
+        return threads
+      }
+      // Try to migrate from localStorage if IndexedDB is empty
+      const localThreads = loadThreadsFromLocalStorage()
+      if (localThreads.length > 0) {
+        console.log('Migrating threads from localStorage to IndexedDB...')
+        await saveThreadsToIndexedDB(sanitizeThreads(localThreads))
+        // Clear localStorage after successful migration
+        try {
+          localStorage.removeItem(THREADS_KEY)
+        } catch {
+          // Ignore errors when clearing localStorage
+        }
+        return localThreads
+      }
+      return []
+    } catch (error) {
+      console.error('Failed to load from IndexedDB, falling back to localStorage:', error)
+      return loadThreadsFromLocalStorage()
+    }
+  }
+  return loadThreadsFromLocalStorage()
+}
+
+export function saveThreads(threads: Thread[]) {
+  if (useIndexedDB) {
+    const sanitized = sanitizeThreads(threads)
+    saveThreadsToIndexedDB(sanitized).catch((error) => {
+      console.error('Failed to save to IndexedDB, falling back to localStorage:', error)
+      saveThreadsToLocalStorage(threads)
+    })
+  } else {
+    saveThreadsToLocalStorage(threads)
+  }
+}
+
+function loadSettingsFromLocalStorage(): Settings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY)
     if (!raw) return defaultSettings
@@ -53,6 +142,59 @@ export function loadSettings(): Settings {
   }
 }
 
+function saveSettingsToLocalStorage(settings: Settings): boolean {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
+    return true
+  } catch (error) {
+    console.error('Failed to save settings to localStorage:', error)
+    return false
+  }
+}
+
+export function loadSettings(): Settings {
+  if (useIndexedDB) {
+    // Return default settings initially, async load will update later
+    return defaultSettings
+  }
+  return loadSettingsFromLocalStorage()
+}
+
+export async function loadSettingsAsync(): Promise<Settings> {
+  if (useIndexedDB) {
+    try {
+      const settings = await loadSettingsFromIndexedDB()
+      if (settings) {
+        return settings
+      }
+      // Try to migrate from localStorage if IndexedDB is empty
+      const localSettings = loadSettingsFromLocalStorage()
+      if (localSettings !== defaultSettings) {
+        console.log('Migrating settings from localStorage to IndexedDB...')
+        await saveSettingsToIndexedDB(localSettings)
+        // Clear localStorage after successful migration
+        try {
+          localStorage.removeItem(SETTINGS_KEY)
+        } catch {
+          // Ignore errors when clearing localStorage
+        }
+      }
+      return localSettings
+    } catch (error) {
+      console.error('Failed to load settings from IndexedDB, falling back to localStorage:', error)
+      return loadSettingsFromLocalStorage()
+    }
+  }
+  return loadSettingsFromLocalStorage()
+}
+
 export function saveSettings(settings: Settings) {
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
+  if (useIndexedDB) {
+    saveSettingsToIndexedDB(settings).catch((error) => {
+      console.error('Failed to save settings to IndexedDB, falling back to localStorage:', error)
+      saveSettingsToLocalStorage(settings)
+    })
+  } else {
+    saveSettingsToLocalStorage(settings)
+  }
 }

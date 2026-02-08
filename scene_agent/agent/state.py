@@ -18,6 +18,27 @@ class TodoItem(TypedDict):
     completed_at: str | None
 
 
+class ReferenceImageInfo(TypedDict):
+    id: str
+    thread_id: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    sha256: str
+    stored_path: str
+    uploaded_at: str
+
+
+class DiagnosticInfo(TypedDict):
+    request_id: str
+    thread_id: str
+    session_id: str | None
+    process_id: int | None
+    log_path: str | None
+    elapsed_ms: int
+    status: str
+
+
 def merge_todos(existing: list[TodoItem], new: list[TodoItem]) -> list[TodoItem]:
     """
     Merge todos by id, updating existing ones with same id.
@@ -35,6 +56,16 @@ def merge_todos(existing: list[TodoItem], new: list[TodoItem]) -> list[TodoItem]
     return list(todo_dict.values())
 
 
+def merge_reference_images(
+    existing: list[ReferenceImageInfo],
+    new: list[ReferenceImageInfo]
+) -> list[ReferenceImageInfo]:
+    image_map = {image["id"]: image for image in existing}
+    for image in new:
+        image_map[image["id"]] = image
+    return list(image_map.values())
+
+
 def merge_dicts(existing: dict, new: dict) -> dict:
     """Merge two dictionaries, with new values overwriting existing ones"""
     return {**existing, **new}
@@ -50,6 +81,13 @@ class AgentState(TypedDict):
         persistent_cameras: List of camera names that should be tracked
         camera_renderings: Dict of {camera_name: [rendering_data]}
         todos: List of todo items for task tracking
+        reference_images: List of reference image metadata for verification
+        diagnostics: Diagnostic metadata keyed by request id
+        thread_id: Conversation/session identifier
+        last_render_path: Latest render file path from tools
+        last_verified_path: Latest render path verified by VLM
+        last_render_signature: Signature for last render sent to VLM
+        agent_decision: Structured decision payload from agent responses
         current_task: Description of current user request
         iteration_count: Number of agent iterations
         last_error: Last error message if any
@@ -68,6 +106,21 @@ class AgentState(TypedDict):
     
     # Todo tracking - merge by id for task management
     todos: Annotated[list[TodoItem], merge_todos]
+
+    # Reference images - merge by id
+    reference_images: Annotated[list[ReferenceImageInfo], merge_reference_images]
+
+    # Diagnostics - merge by key
+    diagnostics: Annotated[dict, merge_dicts]
+
+    # Session identifier
+    thread_id: str
+
+    # Verification tracking
+    last_render_path: str | None
+    last_verified_path: str | None
+    last_render_signature: str | None
+    agent_decision: dict
     
     # Simple fields (last write wins)
     current_task: str

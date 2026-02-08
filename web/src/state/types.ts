@@ -1,4 +1,4 @@
-import type { RenderImage, SceneInfo, TodoItem } from '../api/types'
+import type { ReferenceImage, RenderImage, SceneInfo, TodoItem } from '../api/types'
 
 export type MessageRole = 'user' | 'assistant' | 'tool'
 export type MessageStatus = 'streaming' | 'final' | 'error'
@@ -33,6 +33,7 @@ export type Thread = {
   renders?: RenderImage[]
   gltfUrl?: string | null
   sceneHasChange?: boolean
+  referenceImages?: ReferenceImage[]
 }
 
 export type ThemeId = 'dark' | 'light'

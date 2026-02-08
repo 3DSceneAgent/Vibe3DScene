@@ -1,4 +1,4 @@
-import type { RenderImage, SceneInfo, StreamEvent, TodoItem } from './types'
+import type { ReferenceImage, RenderImage, SceneInfo, StreamEvent, TodoItem } from './types'
 
 type StreamChatArgs = {
   baseUrl: string
@@ -78,8 +78,12 @@ export async function streamChat({
   }
 }
 
-export async function getScene(baseUrl: string, threadId: string): Promise<SceneInfo> {
-  const response = await fetch(`${baseUrl}/scene/${threadId}`)
+export async function getScene(
+  baseUrl: string,
+  threadId: string,
+  signal?: AbortSignal
+): Promise<SceneInfo> {
+  const response = await fetch(`${baseUrl}/scene/${threadId}`, { signal })
   if (!response.ok) {
     throw new Error(`Failed to load scene (${response.status})`)
   }
@@ -95,8 +99,12 @@ export async function getTodos(baseUrl: string, threadId: string): Promise<TodoI
   return data.todos ?? []
 }
 
-export async function getSceneRenders(baseUrl: string, threadId: string): Promise<RenderImage[]> {
-  const response = await fetch(`${baseUrl}/scene/${threadId}/renders`)
+export async function getSceneRenders(
+  baseUrl: string,
+  threadId: string,
+  signal?: AbortSignal
+): Promise<RenderImage[]> {
+  const response = await fetch(`${baseUrl}/scene/${threadId}/renders`, { signal })
   if (!response.ok) {
     throw new Error(`Failed to load renders (${response.status})`)
   }
@@ -104,12 +112,55 @@ export async function getSceneRenders(baseUrl: string, threadId: string): Promis
   return data.renders ?? []
 }
 
-export async function getSceneGltf(baseUrl: string, threadId: string): Promise<Blob> {
-  const response = await fetch(`${baseUrl}/scene/${threadId}/gltf`)
+export async function getSceneGltf(
+  baseUrl: string,
+  threadId: string,
+  signal?: AbortSignal
+): Promise<Blob> {
+  const response = await fetch(`${baseUrl}/scene/${threadId}/gltf`, { signal })
   if (!response.ok) {
     throw new Error(`Failed to load glTF (${response.status})`)
   }
   return await response.blob()
+}
+
+export async function getSceneBlend(
+  baseUrl: string,
+  threadId: string,
+  signal?: AbortSignal
+): Promise<Blob> {
+  const response = await fetch(`${baseUrl}/scene/${threadId}/blend`, { signal })
+  if (!response.ok) {
+    throw new Error(`Failed to load .blend file (${response.status})`)
+  }
+  return await response.blob()
+}
+
+export async function uploadReferenceImages(
+  baseUrl: string,
+  threadId: string,
+  files: File[]
+): Promise<ReferenceImage[]> {
+  const formData = new FormData()
+  files.forEach((file) => formData.append('images', file))
+  const response = await fetch(`${baseUrl}/threads/${threadId}/reference-images`, {
+    method: 'POST',
+    body: formData
+  })
+  if (!response.ok) {
+    throw new Error(`Failed to upload reference images (${response.status})`)
+  }
+  const data = (await response.json()) as { images?: ReferenceImage[] }
+  return data.images ?? []
+}
+
+export async function listReferenceImages(baseUrl: string, threadId: string): Promise<ReferenceImage[]> {
+  const response = await fetch(`${baseUrl}/threads/${threadId}/reference-images`)
+  if (!response.ok) {
+    throw new Error(`Failed to load reference images (${response.status})`)
+  }
+  const data = (await response.json()) as { images?: ReferenceImage[] }
+  return data.images ?? []
 }
 
 export async function getHealth(baseUrl: string, signal?: AbortSignal): Promise<{ status: string }> {

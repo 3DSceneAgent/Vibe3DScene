@@ -22,29 +22,67 @@ echo ""
 cd "$PROJECT_DIR"
 
 # Default headless blender command/args if not provided
-: "${BLENDER_HEADLESS_CMD:=blender}"
-: "${BLENDER_HEADLESS_ARGS:=--background --python scripts/blender_headless_client.py -- --host \{host\} --port \{port\}}"
-: "${API_WORKERS:=1}"
-export BLENDER_HEADLESS_CMD
-export BLENDER_HEADLESS_ARGS
-export API_WORKERS
-echo $BLENDER_HEADLESS_ARGS
+if [ -z "$BLENDER_HEADLESS_CMD" ]; then
+    export BLENDER_HEADLESS_CMD="blender"
+fi
+
+if [ -z "$BLENDER_HEADLESS_ARGS" ]; then
+    # Use placeholder that won't be interpreted by shell
+    export BLENDER_HEADLESS_ARGS='--background --python scripts/blender_headless_client.py -- --host {host} --port {port}'
+fi
+
+if [ -z "$BLENDER_HEADLESS_LOG_DIR" ]; then
+    export BLENDER_HEADLESS_LOG_DIR="/tmp/scene_agent_headless_logs"
+fi
+
+if [ -z "$API_WORKERS" ]; then
+    export API_WORKERS="1"
+fi
+
+# 验证关键环境变量
+echo -e "${CYAN}Environment variables:${NC}"
+echo "  BLENDER_HEADLESS_CMD=$BLENDER_HEADLESS_CMD"
+echo "  BLENDER_HEADLESS_ARGS=$BLENDER_HEADLESS_ARGS"
+echo "  BLENDER_HEADLESS_LOG_DIR=$BLENDER_HEADLESS_LOG_DIR"
 
 # Trap to ensure both processes are killed on exit
 cleanup() {
     set +e
+    trap - SIGINT SIGTERM EXIT
     echo -e "\n${YELLOW}Stopping services...${NC}"
+
+    for pid in "${API_PID:-}" "${MCP_PID:-}"; do
+        if [ -n "$pid" ]; then
+            pkill -TERM -P "$pid" 2>/dev/null || true
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done
+
+    for pid in "${API_PID:-}" "${MCP_PID:-}"; do
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            for _ in {1..50}; do
+                kill -0 "$pid" 2>/dev/null || break
+                sleep 0.1
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+        fi
+    done
+
+    api_exit="n/a"
+    mcp_exit="n/a"
     if [ -n "${API_PID:-}" ]; then
-        pkill -TERM -P "$API_PID" 2>/dev/null || true
-        kill -TERM "$API_PID" 2>/dev/null || true
+        wait "$API_PID" 2>/dev/null
+        api_exit=$?
     fi
     if [ -n "${MCP_PID:-}" ]; then
-        pkill -TERM -P "$MCP_PID" 2>/dev/null || true
-        kill -TERM "$MCP_PID" 2>/dev/null || true
+        wait "$MCP_PID" 2>/dev/null
+        mcp_exit=$?
     fi
-    pkill -TERM -P $$ 2>/dev/null || true
-    wait
     echo -e "${GREEN}All services stopped${NC}"
+    echo -e "  MCP exit: ${mcp_exit}"
+    echo -e "  API exit: ${api_exit}"
     exit 0
 }
 

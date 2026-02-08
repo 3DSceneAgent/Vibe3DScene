@@ -1,190 +1,157 @@
 # 3D Scene Agent
 
-LangGraph-based agent for 3D scene manipulation in Blender using natural language.
+LangGraph-based backend that builds 3D scenes in Blender using natural language
+and optional reference images. It integrates with Blender through MCP and
+supports streaming responses over API and CLI.
 
-## Features
+## Overview and Architecture
 
-- 🤖 **VLM-Powered**: Uses GPT-4o, Claude, or Gemini for scene understanding
-- 🔧 **MCP Integration**: Native integration with Blender via Model Context Protocol
-- 📋 **Task Tracking**: Automatic todo creation and progress tracking for complex tasks
-- 🎨 **Asset Libraries**: Search and import from PolyHaven, 3D retrieval database, or generate with TRELLIS2
-- 💾 **State Persistence**: Checkpointing for session resumption
-- 🔄 **Streaming**: Real-time responses in both CLI and API modes
+The system combines a LangGraph agent with MCP-based Blender control and a
+FastAPI service layer.
 
-## Quick Start
-
-### 1. Setup Environment
-
-```bash
-# Copy environment template
-cp .env.example .env
-
-# Edit .env and add your API key
-# VLM_PROVIDER=openai
-# VLM_API_KEY=your_key_here
+```
+User / CLI / Web UI
+        |
+        v
+   FastAPI API
+        |
+        v
+ LangGraph Agent
+        |
+        v
+   MCP Client
+        |
+        v
+   MCP Server
+        |
+        v
+Blender Addon (Socket)
+        |
+        v
+Renders, Scene State, Assets
 ```
 
-### 2. Install Dependencies
+## Demo
 
+TBD.
+
+## Installation
+
+1. Create a virtual environment and install Python dependencies:
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+2. Install Blender (required for local-client or headless mode).
+3. For the web UI, install Node.js and npm (optional):
+   ```bash
+   cd web
+   npm install
+   ```
+
+## Quickstart
+
+### Environment Variable Setup
+
+1. Copy an environment template:
+   ```bash
+   cp .env.example.dev .env
+   ```
+2. Set required values:
+   - `VLM_PROVIDER`
+   - `VLM_API_KEY`
+   - `BLENDER_MODE` (`local-client` or `headless`)
+
+### Start Services with `scripts/start_services.sh`
+
+This script starts the MCP server and the API server:
 ```bash
-pip install -r requirements.txt
+bash scripts/start_services.sh
 ```
 
-### 3. Start Blender MCP Server
+### Local-client Mode
 
-Make sure your Blender MCP server is running on `localhost:9876` (see `reference/server.py`)
+1. Set `BLENDER_MODE=local-client`.
+2. Install and enable the Blender addon from `addon/`.
+3. Start the Blender addon socket server.
+4. Start the MCP server:
+   ```bash
+   python mcp_server/server.py
+   ```
+5. Start the API server:
+   ```bash
+   python main.py --mode api --port 8000
+   ```
 
-### 4. Run the Agent
+### Headless Mode
 
-**CLI Mode:**
+1. Set `BLENDER_MODE=headless`.
+2. Provide headless startup configuration:
+   - `BLENDER_HEADLESS_CMD`
+   - `BLENDER_HEADLESS_ARGS`
+3. Start the API server:
+   ```bash
+   python main.py --mode api --port 8000
+   ```
+4. Send a request with a new `thread_id` to initialize a headless session.
+
+## Usage
+
+### CLI Usage
+
 ```bash
 python main.py --mode cli
 ```
 
-**API Mode:**
+### API Usage
+
+Common endpoints:
+- `POST /chat`
+- `POST /chat/stream`
+- `GET /scene/{thread_id}`
+- `GET /scene/{thread_id}/renders`
+- `GET /threads/{thread_id}/reference-images`
+- `POST /threads/{thread_id}/reference-images`
+- `GET /todos/{thread_id}`
+- `WS /ws`
+
+Example request:
 ```bash
-python main.py --mode api --port 8000
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Create a studio lighting setup", "thread_id": "demo"}'
 ```
 
-## Usage Examples
+## Web UI
 
-### CLI Interface
+1. Start the API server.
+2. Run the web UI:
+   ```bash
+   cd web
+   npm run dev
+   ```
+3. Open the UI and set the backend URL in the settings panel.
 
-```
-You: Create a modern living room with a sofa and coffee table
-
-Agent: I'll break this down into steps:
-📋 Task Progress:
-⏳ Pending - Search for sofa model
-⏳ Pending - Import and position sofa
-⏳ Pending - Search for coffee table
-⏳ Pending - Position table in front of sofa
-⏳ Pending - Set up lighting
-
-[Agent proceeds to execute each step...]
-```
-
-### API Endpoints
-
-- `POST /chat` - Send a message and get response
-- `POST /chat/stream` - Streaming response via SSE
-- `GET /scene/{thread_id}` - Get current scene state
-- `GET /todos/{thread_id}` - Get task progress
-- `WS /ws` - WebSocket for real-time communication
-
-## Architecture
-
-### Key Components
-
-- **State Management**: TypedDict with Annotated reducers (following LangGraph best practices)
-- **Agent Graph**: Standard agent-tools loop where agent decides when to perceive/render
-- **MCP Tools**: Auto-discovered from Blender server via `langchain-mcp-adapters`
-- **Memory**: Scene object tracking and camera rendering history
-- **RAG**: Placeholder for BPY script retrieval (to be implemented)
-
-### Project Structure
+## Codebase Structure
 
 ```
 3DSceneAgent/
-├── scene_agent/
-│   ├── agent/       # LangGraph state machine
-│   ├── tools/       # Blender MCP tool integration
-│   ├── memory/      # Scene and camera tracking
-│   ├── rag/         # BPY script retrieval (placeholder)
-│   ├── vlm/         # VLM provider abstraction
-│   ├── interfaces/  # CLI and API
-│   └── config.py    # Configuration management
-└── main.py          # Entry point
+├── addon/               # Blender addon
+├── docs/                # Documentation
+├── mcp_server/          # MCP server implementation
+├── scene_agent/         # Agent, API, memory, config
+├── scripts/             # Service and headless helpers
+├── tests/               # Test suites
+└── web/                 # Web UI
 ```
 
-## Configuration
+## Acknowledgement
 
-### Environment Variables
-
-- `VLM_PROVIDER`: `openai`, `anthropic`, or `gemini` (default: openai)
-- `VLM_API_KEY`: API key for the VLM provider (required)
-- `VLM_MODEL`: Optional model override
-- `BLENDER_HOST`: Blender MCP server host (default: localhost)
-- `BLENDER_PORT`: Blender MCP server port (default: 9876)
-- `BLENDER_MODE`: Blender connection mode: `local-client` or `headless` (default: local-client)
-- `BLENDER_HEADLESS_HOST`: Host for headless Blender socket server (default: localhost)
-- `BLENDER_HEADLESS_BASE_PORT`: Base port for headless Blender socket server (default: 9876)
-- `BLENDER_HEADLESS_PORT_RANGE`: Port range for headless Blender sessions (default: 1)
-- `BLENDER_HEADLESS_CMD`: Command to start headless Blender (optional)
-- `BLENDER_HEADLESS_ARGS`: Arguments for headless Blender command (supports `{session_id}`, `{host}`, `{port}`)
-- `BLENDER_MCP_HOST`: Host for per-session MCP server (default: localhost)
-- `BLENDER_MCP_BASE_PORT`: Base port for per-session MCP server (default: 9877)
-- `BLENDER_MCP_PORT_RANGE`: Port range for per-session MCP servers (default: 1)
-- `BLENDER_MCP_CMD`: Command to start MCP server (default: `python`)
-- `BLENDER_MCP_ARGS`: Args for MCP server command (default: `mcp/server.py`, supports `{session_id}`, `{host}`, `{port}`)
-- `RETRIEVAL_API_HOST`: 3D asset retrieval host (default: localhost)
-- `RETRIEVAL_API_PORT`: 3D asset retrieval port (default: 8001)
-- `RAG_ENABLED`: Enable RAG for BPY scripts (default: false)
-- `API_WORKERS`: Number of API worker processes (default: 1)
-- `API_STREAM_TIMEOUT_SECONDS`: Max seconds to allow a single streaming response (default: 120)
-
-## Development
-
-### Todo Tracking
-
-The agent automatically creates and tracks todos for complex tasks. See `scene_agent/agent/state.py` for the TodoItem schema.
-
-### Adding BPY Documentation
-
-To enable RAG:
-1. Add BPY docs to a `docs/` directory
-2. Implement embedding and ingestion in `scene_agent/rag/vector_store.py`
-3. Set `RAG_ENABLED=true` in `.env`
-
-### Testing
-
-```bash
-# Unit tests
-pytest tests/
-
-# Integration tests (requires Blender running)
-pytest tests/integration/
-```
-
-### Headless Blender Mode (Manual Test)
-
-1. Set `BLENDER_MODE=headless` in `.env`.
-2. (Optional) Configure headless startup:
-   - `BLENDER_HEADLESS_HOST` (default: `localhost`)
-   - `BLENDER_HEADLESS_BASE_PORT` (default: `9876`)
-   - `BLENDER_HEADLESS_PORT_RANGE` (default: `1`)
-   - `BLENDER_HEADLESS_CMD` (e.g., `/Applications/Blender.app/Contents/MacOS/Blender`)
-   - `BLENDER_HEADLESS_ARGS` (supports `{session_id}`, `{host}`, `{port}`)
-     - Example: `--background --python scripts/blender_headless_client.py -- --host {host} --port {port}`
-   - `scripts/start_services.*` sets defaults to `BLENDER_HEADLESS_CMD=blender` and the example args above when not provided.
-3. (Optional) Configure per-session MCP server commands:
-   - `BLENDER_MCP_HOST`, `BLENDER_MCP_BASE_PORT`, `BLENDER_MCP_PORT_RANGE`
-   - `BLENDER_MCP_CMD` (default: `python`)
-   - `BLENDER_MCP_ARGS` (default: `mcp/server.py`, supports `{session_id}`, `{host}`, `{port}`)
-4. Start the API: `python main.py --mode api --port 8000`
-5. Send a `POST /chat` or `POST /chat/stream` request with a new `thread_id`.
-6. Confirm the session is created and reused for subsequent requests with the same `thread_id`.
-
-## Troubleshooting
-
-**"Failed to connect to Blender MCP server"**
-- Make sure Blender MCP server is running on port 9876
-- Check BLENDER_HOST and BLENDER_PORT in .env
-
-**"VLM API key not set"**
-- Create a .env file with VLM_API_KEY
-- See .env.example for reference
-
-**"langchain-mcp-adapters not installed"**
-- Run: `pip install -r requirements.txt`
-
-## References
-
-- [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)
-- [langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters)
-- [Streaming Response Structure](docs/streaming-response.md)
-- [Blender Python API](https://docs.blender.org/api/current/)
-
-## License
-
-MIT
+This project builds on:
+- LangGraph
+- Model Context Protocol (MCP)
+- Blender and the Blender Python API
+- langchain-mcp-adapters
+- PolyHaven assets
+- TRELLIS2

@@ -3,6 +3,7 @@ import type { Message } from '../state/types'
 import { LoadingSpinner } from './LoadingSpinner'
 import { ToolResultBlock } from './ToolResultBlock'
 import { MarkdownMessage } from './MarkdownMessage'
+import { parseTodos } from '../utils/message'
 
 type MessageListProps = {
   messages: Message[]
@@ -18,7 +19,7 @@ export function MessageList({ messages }: MessageListProps) {
 
   return (
     <div className="message-list" ref={containerRef}>
-      {messages.length === 0 && <div className="muted">Start the conversation…</div>}
+      {messages.length === 0 && <div className="muted">Let's build something!</div>}
       {messages.map((message) => (
         <MessageItem key={message.id} message={message} />
       ))}
@@ -37,10 +38,12 @@ function MessageItem({ message }: { message: Message }) {
     )
   }
   const showSpinner = message.role === 'assistant' && message.status === 'streaming'
+  const todos = message.raw ? parseTodos(message.raw) : []
   return (
     <div className={`message-row ${message.role}`}>
       <div className={`message-bubble ${message.role}`}>
         {message.thinking && <ThinkingBlock thinking={message.thinking} />}
+        {todos.length > 0 && <TodosBlock todos={todos} />}
         <div className="message-content">
           <MarkdownMessage content={message.content || ' '} />
           {showSpinner && <LoadingSpinner />}
@@ -59,6 +62,26 @@ function ThinkingBlock({ thinking }: { thinking: string }) {
         {open ? 'Hide' : 'Show'} thinking
       </button>
       {open && <pre className="thinking-text">{thinking}</pre>}
+    </div>
+  )
+}
+
+function TodosBlock({ todos }: { todos: Array<{ status: string; description: string }> }) {
+  return (
+    <div className="message-todos">
+      {todos.map((todo, index) => (
+        <div key={index} className={`message-todo-item status-${todo.status}`}>
+          <span className="todo-status-icon">
+            {todo.status === 'pending' && '○'}
+            {todo.status === 'in_progress' && '⟳'}
+            {todo.status === 'completed' && '✓'}
+            {todo.status === 'failed' && '✗'}
+          </span>
+          <span className={todo.status === 'completed' ? 'todo-text-completed' : 'todo-text'}>
+            {todo.description}
+          </span>
+        </div>
+      ))}
     </div>
   )
 }

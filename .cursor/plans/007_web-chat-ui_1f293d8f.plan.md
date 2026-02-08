@@ -24,6 +24,7 @@ todos:
     status: completed
     dependencies:
       - frontend-scaffold
+isProject: false
 ---
 
 # Web Chat + Scene UI Plan
@@ -32,6 +33,7 @@ todos:
 
 - Frontend: Vite + React + TypeScript in `3DSceneAgent/web/`, localStorage 维护对话与设置，SSE 接收流式消息，three.js 渲染 glTF 场景。
 - Backend: 在 `interfaces/api.py` 增加 scene 专用接口（渲染相机图、导出 glTF），复用 Blender socket 命令（通过 `execute_code` 导出 glTF）。
+
 ```mermaid
 sequenceDiagram
 participant User as User
@@ -54,9 +56,10 @@ Web->>Web: three.js渲染
 ```
 
 
+
 ## Backend changes
 
-- Add scene helper functions in [`interfaces/api.py`](interfaces/api.py) (or a small new helper module if needed) to:
+- Add scene helper functions in `[interfaces/api.py](interfaces/api.py)` (or a small new helper module if needed) to:
   - 获取相机列表：调用 `get_scene_info` 并筛出 `type == "CAMERA"` 的对象。
   - 渲染相机图：循环 `render_from_camera`，返回 `{camera_name, image_base64}` 列表。
   - 导出场景 glTF：通过 `execute_code` 调用 `bpy.ops.export_scene.gltf` 生成 `GLB`，FastAPI 以 `model/gltf-binary` 返回文件。
@@ -100,3 +103,4 @@ Web->>Web: three.js渲染
 - **frontend-chat**: 实现聊天流式 UI、Thinking 折叠、对话管理（localStorage）。
 - **frontend-scene**: 实现 SceneTab（scene info、todos、渲染图、glTF viewer）。
 - **theme-settings**: 设置页（backend URL、主题/配色）并持久化。
+

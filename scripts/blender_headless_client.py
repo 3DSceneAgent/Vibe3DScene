@@ -20,6 +20,7 @@ import importlib
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 
@@ -51,11 +52,51 @@ def _get_env_first(*keys: str, default: str | None = None) -> str | None:
     return default
 
 
+def _ensure_repo_addon_path() -> Path | None:
+    script_dir = Path(__file__).resolve().parent
+    project_root = script_dir.parent
+    addon_dir = project_root / "addon"
+    if addon_dir.exists() and str(addon_dir) not in sys.path:
+        sys.path.insert(0, str(addon_dir))
+    return addon_dir if addon_dir.exists() else None
+
+
+def _import_addon_module(module: str) -> Any | None:
+    repo_addon_dir = _ensure_repo_addon_path()
+    try:
+        addon = importlib.import_module(module)
+    except Exception as exc:
+        print(f"Failed to import addon module '{module}': {exc}")
+        return None
+    addon_file = getattr(addon, "__file__", "") or ""
+    if repo_addon_dir and addon_file and not addon_file.startswith(str(repo_addon_dir)):
+        # Prefer the repo addon if a different install is loaded.
+        sys.modules.pop(module, None)
+        try:
+            addon = importlib.import_module(module)
+        except Exception as exc:
+            print(f"Failed to reload addon module '{module}' from repo: {exc}")
+            return None
+    return addon
+
+
 def _enable_addon(bpy: Any, module: str) -> None:
+    _ensure_repo_addon_path()
     addons = bpy.context.preferences.addons
     if module in addons:
         return
-    bpy.ops.preferences.addon_enable(module=module)
+    try:
+        bpy.ops.preferences.addon_enable(module=module)
+    except Exception as exc:
+        print(f"Failed to enable addon via preferences: {exc}")
+
+    if module not in addons:
+        addon = _import_addon_module(module)
+        if addon and hasattr(addon, "register"):
+            try:
+                addon.register()
+            except Exception as exc:
+                print(f"Failed to register addon module '{module}': {exc}")
 
 
 def _call_operator(bpy: Any, operator_path: str, host: str, port: int) -> bool:
@@ -80,15 +121,45 @@ def _call_operator(bpy: Any, operator_path: str, host: str, port: int) -> bool:
 
 
 def _call_addon_function(module: str, host: str, port: int) -> bool:
-    addon = importlib.import_module(module)
-    for func_name in ("start_server", "start_addon", "start_mcpv_server"):
+    """
+    Call addon's blocking server start function.
+    
+    Priority order:
+    1. start_server_blocking (new headless-optimized function)
+    2. start_server (legacy, may not work in headless)
+    """
+    addon = _import_addon_module(module)
+    if addon is None:
+        return False
+    
+    # Try blocking function first (headless-optimized)
+    for func_name in ("start_server_blocking", "start_server", "start_addon", "start_mcpv_server"):
         func = getattr(addon, func_name, None)
         if callable(func):
             try:
-                func(host=host, port=port)
+                print(f"Calling addon function: {func_name}")
+                func(host=host, port=port, blocking=True)
+                return True
             except TypeError:
-                func()
+                # Function doesn't accept blocking parameter, try without
+                try:
+                    func(host=host, port=port)
+                    return True
+                except TypeError:
+                    func()
+                    return True
+
+    # Fallback: call server class directly if present
+    try:
+        server_module = importlib.import_module(f"{module}.server")
+        server_cls = getattr(server_module, "BlenderMCPVisionServer", None)
+        if server_cls:
+            print("Calling addon server class directly")
+            server = server_cls(host, port)
+            server.start(blocking=True)
             return True
+    except Exception as exc:
+        print(f"Failed to start addon server directly: {exc}")
     return False
 
 
@@ -104,32 +175,33 @@ def main() -> int:
     port_value = args.port or _get_env_first("BLENDER_PORT", "BLENDER_HEADLESS_PORT")
     port = int(port_value) if port_value else 9876
     addon_module = args.addon or os.getenv("BLENDER_ADDON_MODULE", "blender_mcpv_addon")
-    operator_path = args.operator or os.getenv("BLENDER_ADDON_START_OP", "blendermcpv.start_server")
+    # Operator removed in headless refactor - use function entry point only
+    operator_path = args.operator or os.getenv("BLENDER_ADDON_START_OP", "")
 
     print(f"Starting addon '{addon_module}' on {host}:{port}")
     _enable_addon(bpy, addon_module)
 
-    started = False
-    if operator_path:
+    # Directly call addon function for headless mode (operators removed)
+    started = _call_addon_function(addon_module, host, port)
+    
+    # Fallback to operator only if explicitly specified
+    if not started and operator_path:
         started = _call_operator(bpy, operator_path, host, port)
-    if not started:
-        started = _call_addon_function(addon_module, host, port)
 
     if not started:
         print(
             "Addon enabled but server start entrypoint not found. "
             "Set BLENDER_ADDON_START_OP or pass --operator to call a custom operator."
         )
+        return 1
 
     if args.exit_after_start:
         return 0
 
-    # Keep Blender alive for the socket server.
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        return 0
+    # No keepalive loop needed - server.start(blocking=True) runs in main thread
+    # and blocks until server is stopped. Process stays alive naturally.
+    print("Server started in blocking mode - process will stay alive")
+    return 0
 
 
 if __name__ == "__main__":

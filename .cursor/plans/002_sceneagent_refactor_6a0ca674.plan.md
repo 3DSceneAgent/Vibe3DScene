@@ -20,6 +20,7 @@ todos:
     status: completed
     dependencies:
       - entrypoint-check
+isProject: false
 ---
 
 # SceneAgent Backend Refactor Plan
@@ -38,11 +39,11 @@ todos:
 
 ## Files/Areas to Touch
 
-- [`\/Users\/fishwowater\/projects\/blender-mcp-vision\/thirdparty\/3DSceneAgent\/scene_agent\/__init__.py`](/Users/fishwowater/projects/blender-mcp-vision/thirdparty/3DSceneAgent/scene_agent/__init__.py)
-- [`\/Users\/fishwowater\/projects\/blender-mcp-vision\/thirdparty\/3DSceneAgent\/main.py`](/Users/fishwowater/projects/blender-mcp-vision/thirdparty/3DSceneAgent/main.py)
-- All moved modules under [`\/Users\/fishwowater\/projects\/blender-mcp-vision\/thirdparty\/3DSceneAgent\/scene_agent\/`](/Users/fishwowater/projects/blender-mcp-vision/thirdparty/3DSceneAgent/scene_agent/)
-- Tests under [`\/Users\/fishwowater\/projects\/blender-mcp-vision\/thirdparty\/3DSceneAgent\/tests`](/Users/fishwowater/projects/blender-mcp-vision/thirdparty/3DSceneAgent/tests)
-- Docs that show layout/imports: [`\/Users\/fishwowater\/projects\/blender-mcp-vision\/thirdparty\/3DSceneAgent\/README.md`](/Users/fishwowater/projects/blender-mcp-vision/thirdparty/3DSceneAgent/README.md) (and any spec/quickstart that references paths)
+- `[\/Users\/fishwowater\/projects\/blender-mcp-vision\/thirdparty\/3DSceneAgent\/scene_agent\/__init__.py](/Users/fishwowater/projects/blender-mcp-vision/thirdparty/3DSceneAgent/scene_agent/__init__.py)`
+- `[\/Users\/fishwowater\/projects\/blender-mcp-vision\/thirdparty\/3DSceneAgent\/main.py](/Users/fishwowater/projects/blender-mcp-vision/thirdparty/3DSceneAgent/main.py)`
+- All moved modules under `[\/Users\/fishwowater\/projects\/blender-mcp-vision\/thirdparty\/3DSceneAgent\/scene_agent\/](/Users/fishwowater/projects/blender-mcp-vision/thirdparty/3DSceneAgent/scene_agent/)`
+- Tests under `[\/Users\/fishwowater\/projects\/blender-mcp-vision\/thirdparty\/3DSceneAgent\/tests](/Users/fishwowater/projects/blender-mcp-vision/thirdparty/3DSceneAgent/tests)`
+- Docs that show layout/imports: `[\/Users\/fishwowater\/projects\/blender-mcp-vision\/thirdparty\/3DSceneAgent\/README.md](/Users/fishwowater/projects/blender-mcp-vision/thirdparty/3DSceneAgent/README.md)` (and any spec/quickstart that references paths)
 
 ## Implementation Todos
 
@@ -50,3 +51,4 @@ todos:
 - `update-imports`: Rewrite imports to `scene_agent.*` across code/tests/docs.
 - `entrypoint-check`: Update `main.py` to import `scene_agent.interfaces.*`.
 - `smoke-check`: Quick lint/import sanity check (no runtime execution).
+

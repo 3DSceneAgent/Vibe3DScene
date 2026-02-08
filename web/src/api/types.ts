@@ -27,6 +27,17 @@ export type RenderImage = {
   image_base64: string
 }
 
+export type ReferenceImage = {
+  id: string
+  thread_id: string
+  filename: string
+  content_type: string
+  size_bytes: number
+  sha256: string
+  uploaded_at: string
+  previewUrl?: string
+}
+
 export type StreamEvent = {
   messages?: unknown[]
   todos?: TodoItem[]

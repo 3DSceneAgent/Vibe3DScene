@@ -1,14 +1,17 @@
 import type { Thread } from '../state/types'
 import { MessageList } from './MessageList'
 import { ChatComposer } from './ChatComposer'
+import { ReferenceImageStrip } from './ReferenceImageStrip'
+import type { ReferenceImage } from '../api/types'
 
 type ChatTabProps = {
   thread: Thread | null
   isStreaming: boolean
-  onSend: (message: string) => void
+  onSend: (message: string, files: File[]) => Promise<boolean>
+  onStop?: () => void
 }
 
-export function ChatTab({ thread, isStreaming, onSend }: ChatTabProps) {
+export function ChatTab({ thread, isStreaming, onSend, onStop }: ChatTabProps) {
   if (!thread) {
     return <div className="empty-state">Create a conversation to begin.</div>
   }
@@ -18,7 +21,15 @@ export function ChatTab({ thread, isStreaming, onSend }: ChatTabProps) {
       <div className="chat-scroll-area">
         <MessageList messages={thread.messages} />
       </div>
-      <ChatComposer disabled={isStreaming} onSend={onSend} />
+      {thread.referenceImages && thread.referenceImages.length > 0 && (
+        <ReferenceImageStrip images={thread.referenceImages as ReferenceImage[]} />
+      )}
+      <ChatComposer
+        disabled={isStreaming}
+        onSend={onSend}
+        onStop={onStop}
+        referenceImagesCount={thread.referenceImages?.length ?? 0}
+      />
     </div>
   )
 }
