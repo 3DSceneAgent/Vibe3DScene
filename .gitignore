@@ -17,8 +17,12 @@ build/
 coverage/
 
 .env
-.env.*
 .vscode/
 .idea/
 
 .pytest_cache
+
+# some helpers used during the development 
+scripts/helpers
+# legacy code and references 
+legacy

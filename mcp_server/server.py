@@ -10,7 +10,9 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator, Dict, Any, List, Optional
 import os
 import base64
+import shutil
 from urllib.parse import urlparse
+from urllib.request import urlopen
 import requests
 import sys
 from pathlib import Path
@@ -21,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scene_agent.blender.connection import BlenderConnection
 from scene_agent.utils.rendering import process_and_save_render
+from scene_agent.utils.health_check_services import ServiceHealthChecker
 # Configure logging
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -44,9 +47,17 @@ DEFAULT_CLIENT_HOST = "localhost"
 DEFAULT_CLIENT_PORT = 9876
 DEFAULT_SERVER_HOST = os.getenv("MCP_SERVER_HOST", "localhost")
 DEFAULT_SERVER_PORT = int(os.getenv("MCP_SERVER_PORT", "9877"))
-
-polyhaven_meta_info = json.load(open("assets/polyhaven_meta.json"))
 REQ_HEADERS = {"User-Agent": "blender-mcp-vision"}
+POLYHAVEN_META_URL = "https://fishwowater.oss-cn-shenzhen.aliyuncs.com/polyhaven_meta.json"
+
+# TODO: pre-get all the hosts/ports here as the configuration
+
+
+def load_polyhaven_meta_info() -> Dict[str, Any]:
+    with urlopen(POLYHAVEN_META_URL, timeout=30) as response:
+        return json.load(response)
+
+polyhaven_meta_info = load_polyhaven_meta_info()
 
 
 @asynccontextmanager
@@ -93,11 +104,11 @@ mcp = FastMCP(
     port=DEFAULT_SERVER_PORT
 )
 
-# Resource endpoints
 
 # Global connection for resources (since resources can't access context)
 _blender_connection = None
-_polyhaven_enabled = True  # Add this global variable
+_tools_registered = False
+_enabled_tool_names: list[str] = []
 
 def record_startup():
     """Placeholder for telemetry - can be implemented if needed"""
@@ -105,12 +116,12 @@ def record_startup():
 
 def get_blender_connection():
     """Get or create a persistent Blender connection"""
-    global _blender_connection, _polyhaven_enabled  # Add _polyhaven_enabled to globals
+    global _blender_connection
     
     # If we have an existing connection, check if it's still valid
     if _blender_connection is not None:
         try:
-            # First check if PolyHaven is enabled by sending a ping command
+            # First check if the connection is still valid by sending a ping command
             result = _blender_connection.send_command("get_scene_info")
             return _blender_connection
         except Exception as e:
@@ -135,16 +146,34 @@ def get_blender_connection():
     
     return _blender_connection
 
+# Resource endpoints
 @mcp.resource("resource://polyhaven_types")
 def get_polyhaven_types() -> str:
     return json.dumps(["hdris", "textures", "models"], indent=2)
 
 @mcp.resource("resource://polyhaven_categories/{category}")
-def get_polyhaven_categories_offline(category: str) -> str:
-    return json.dumps(polyhaven_meta_info.get(category, {}), indent=2)
+def get_polyhaven_categories(category: str) -> str:
+    if category not in ["hdris", "textures", "models", "all"]:
+        return (
+            f"Error: Invalid asset type: {category}. Must be one of: "
+            "hdris, textures, models, all"
+        )
+
+    categories = polyhaven_meta_info.get(category)
+    if not categories:
+        return f"Error: No cached categories for asset type: {category}"
+
+    formatted_output = f"Categories for {category}:\n\n"
+
+    # Sort categories by count (descending) to match online tool format.
+    sorted_categories = sorted(categories.items(), key=lambda x: x[1], reverse=True)
+
+    for category_name, count in sorted_categories:
+        formatted_output += f"- {category_name}: {count} assets\n"
+
+    return formatted_output
 
 
-@mcp.tool()
 def get_scene_info(ctx: Context) -> str:
     """Get detailed information about the current Blender scene"""
     try:
@@ -157,7 +186,6 @@ def get_scene_info(ctx: Context) -> str:
         logger.error(f"Error getting scene info from Blender: {str(e)}")
         return f"Error getting scene info: {str(e)}"
 
-@mcp.tool()
 def get_object_info(ctx: Context, object_name: str) -> str:
     """
     Get detailed information about a specific object in the Blender scene.
@@ -175,7 +203,6 @@ def get_object_info(ctx: Context, object_name: str) -> str:
         logger.error(f"Error getting object info from Blender: {str(e)}")
         return f"Error getting object info: {str(e)}"
 
-@mcp.tool()
 def get_viewport_screenshot(ctx: Context, max_size: int = 800) -> Image:
     """
     Capture a screenshot of the current Blender 3D viewport.
@@ -218,7 +245,6 @@ def get_viewport_screenshot(ctx: Context, max_size: int = 800) -> Image:
         raise Exception(f"Screenshot failed: {str(e)}")
 
 
-@mcp.tool()
 def execute_blender_code(ctx: Context, code: str) -> str:
     """
     Execute arbitrary Python code in Blender. Make sure to do it step-by-step by breaking it into smaller chunks.
@@ -235,41 +261,7 @@ def execute_blender_code(ctx: Context, code: str) -> str:
         logger.error(f"Error executing code: {str(e)}")
         return f"Error executing code: {str(e)}"
 
-@mcp.tool()
-def get_polyhaven_categories(ctx: Context, asset_type: str = "hdris") -> str:
-    """
-    Get a list of categories for a specific asset type on Polyhaven.
-    
-    Parameters:
-    - asset_type: The type of asset to get categories for (hdris, textures, models, all)
-    """
-    try:
-        if asset_type not in ["hdris", "textures", "models", "all"]:
-            return f"Error: Invalid asset type: {asset_type}. Must be one of: hdris, textures, models, all"
 
-        response = requests.get(
-            f"https://api.polyhaven.com/categories/{asset_type}",
-            headers=REQ_HEADERS,
-            timeout=30
-        )
-        if response.status_code != 200:
-            return f"Error: PolyHaven API failed with status code {response.status_code}"
-
-        categories = response.json()
-        formatted_output = f"Categories for {asset_type}:\n\n"
-        
-        # Sort categories by count (descending)
-        sorted_categories = sorted(categories.items(), key=lambda x: x[1], reverse=True)
-        
-        for category, count in sorted_categories:
-            formatted_output += f"- {category}: {count} assets\n"
-        
-        return formatted_output
-    except Exception as e:
-        logger.error(f"Error getting Polyhaven categories: {str(e)}")
-        return f"Error getting Polyhaven categories: {str(e)}"
-
-@mcp.tool()
 def search_polyhaven_assets(
     ctx: Context,
     asset_type: str = "all",
@@ -330,7 +322,6 @@ def search_polyhaven_assets(
         logger.error(f"Error searching Polyhaven assets: {str(e)}")
         return f"Error searching Polyhaven assets: {str(e)}"
 
-@mcp.tool()
 def download_polyhaven_asset(
     ctx: Context,
     asset_id: str,
@@ -381,7 +372,6 @@ def download_polyhaven_asset(
         logger.error(f"Error downloading Polyhaven asset: {str(e)}")
         return f"Error downloading Polyhaven asset: {str(e)}"
 
-@mcp.tool()
 def set_texture(
     ctx: Context,
     object_name: str,
@@ -441,7 +431,6 @@ def set_texture(
         return f"Error applying texture: {str(e)}"
 
 
-@mcp.tool()
 def import_glb_model(
     ctx: Context,
     model_url: str,
@@ -487,7 +476,129 @@ def import_glb_model(
         return f"Error importing GLB model: {str(e)}"
 
 
-@mcp.tool()
+def get_infinigen_available_assets(
+    ctx: Context,
+    timeout: int = 30,
+) -> Dict[str, Any]:
+    """Fetch available Infinigen asset types from the API."""
+
+    infinigen_host = os.getenv("INFINIGEN_HOST", "localhost")
+    infinigen_port = os.getenv("INFINIGEN_PORT", "8000")
+    base_url = f"http://{infinigen_host}:{infinigen_port}/api/v1"
+    endpoint = f"{base_url}/infinigen/assets/available"
+    try:
+        logger.info("Fetching available Infinigen assets from %s", endpoint)
+        response = requests.get(endpoint, timeout=timeout)
+        if response.status_code != 200:
+            return {
+                "error": (
+                    "Infinigen API request failed with status "
+                    f"{response.status_code}: {response.text}"
+                )
+            }
+        result = response.json()
+        return {
+            "success": True,
+            "total_count": result.get("total_count", 0),
+            "asset_types": result.get("asset_types", {}),
+        }
+    except requests.exceptions.Timeout:
+        return {"error": f"Infinigen API request timed out after {timeout} seconds"}
+    except requests.exceptions.ConnectionError:
+        return {
+            "error": (
+                f"Could not connect to Infinigen API at {base_url}. "
+                "Make sure Infinigen service is running."
+            )
+        }
+    except Exception as exc:
+        logger.exception("Failed to fetch available Infinigen assets")
+        return {"error": f"Failed to fetch available assets: {str(exc)}"}
+
+def generate_infinigen_assets(
+    ctx: Context,
+    asset_type: str,
+    seed: Optional[int] = 42,
+    timeout: int = 300,
+    output_dir: Optional[str] = None,
+    cleanup: bool = False,
+) -> Dict[str, Any]:
+    """Generate an Infinigen asset and download the .blend output."""
+    if not asset_type:
+        return {"error": "asset_type is required"}
+    
+    infinigen_host = os.getenv("INFINIGEN_HOST", "localhost")
+    infinigen_port = os.getenv("INFINIGEN_PORT", "8000")
+    base_url = f"http://{infinigen_host}:{infinigen_port}/api/v1"
+    endpoint = f"{base_url}/infinigen/assets/generate"
+
+    temp_dir_created = False
+    target_dir = Path(output_dir) if output_dir else Path(
+        tempfile.mkdtemp(prefix="infinigen_")
+    )
+    if not output_dir:
+        temp_dir_created = True
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    blend_file_path = target_dir / f"{asset_type}.blend"
+
+    data = {
+        "asset_type": asset_type,
+        "num_assets": 1,
+        "output_folder": str(target_dir),
+    }
+    if seed is not None:
+        data["seed"] = seed
+
+    try:
+        logger.info("Generating Infinigen asset: %s", asset_type)
+        response = requests.post(endpoint, json=data, timeout=timeout, stream=True)
+        if response.status_code != 200:
+            return {
+                "error": (
+                    "Infinigen API request failed with status "
+                    f"{response.status_code}: {response.text}"
+                )
+            }
+
+        with open(blend_file_path, "wb") as handle:
+            handle.write(response.content)
+
+        if not blend_file_path.exists():
+            return {"error": f"Blend file not found at: {blend_file_path}"}
+
+        result = {
+            "success": True,
+            "asset_type": asset_type,
+            "blend_file_path": str(blend_file_path),
+            "output_dir": str(target_dir),
+            "downloaded_bytes": blend_file_path.stat().st_size,
+            "cleanup_required": temp_dir_created and not cleanup,
+        }
+
+        if cleanup and temp_dir_created:
+            try:
+                shutil.rmtree(target_dir)
+                result["cleanup_performed"] = True
+            except Exception as exc:
+                logger.warning("Failed to clean up temp dir %s: %s", target_dir, exc)
+                result["cleanup_performed"] = False
+
+        return result
+    except requests.exceptions.Timeout:
+        return {"error": f"Infinigen request timed out after {timeout} seconds"}
+    except requests.exceptions.ConnectionError:
+        return {
+            "error": (
+                f"Could not connect to Infinigen API at {base_url}. "
+                "Make sure Infinigen service is running."
+            )
+        }
+    except Exception as exc:
+        logger.exception("Failed to generate Infinigen assets")
+        return {"error": f"Failed to generate Infinigen assets: {str(exc)}"}
+
+
 def generate_trellis2_model(
     ctx: Context,
     text_prompt: str,
@@ -548,7 +659,6 @@ def generate_trellis2_model(
         return f"Error generating TRELLIS2 model: {str(e)}"
 
 
-@mcp.tool()
 def search_3d_assets_by_text(
     ctx: Context,
     query: str,
@@ -623,7 +733,6 @@ def search_3d_assets_by_text(
         logger.error(f"Error searching 3D assets: {str(e)}")
         return f"Error searching 3D assets: {str(e)}"
 
-@mcp.tool()
 def import_retrieved_asset(
     ctx: Context,
     model_url: str,
@@ -644,7 +753,6 @@ def import_retrieved_asset(
     
     return import_glb_model(ctx, model_url, object_name)
 
-@mcp.tool()
 def create_camera_from_objects(
     ctx: Context,
     object_names: list[str],
@@ -676,7 +784,6 @@ def create_camera_from_objects(
         logger.error(f"Error creating camera from objects: {str(e)}")
         return f"Error creating camera from objects: {str(e)}"
 
-@mcp.tool()
 def create_camera_from_params(
     ctx: Context,
     x: float,
@@ -709,7 +816,6 @@ def create_camera_from_params(
         logger.error(f"Error creating camera from params: {str(e)}")
         return f"Error creating camera from params: {str(e)}"
 
-@mcp.tool()
 def render_from_objects(
     ctx: Context,
     object_names: list[str],
@@ -788,7 +894,6 @@ def render_from_objects(
         logger.error(f"Error rendering from objects: {str(e)}")
         raise Exception(f"Render failed: {str(e)}")
 
-@mcp.tool()
 def render_from_camera(
     ctx: Context,
     camera_name: str,
@@ -871,8 +976,29 @@ def asset_creation_strategy() -> str:
             - For objects/models: Use download_polyhaven_asset() with asset_type="models"
             - For materials/textures: Use download_polyhaven_asset() with asset_type="textures"
             - For environment lighting: Use download_polyhaven_asset() with asset_type="hdris"
+
+        2. Infinigen (Procedural Content Generation)
+            Infinigen generates high-quality procedural natural and indoor assets with realistic variations.
+            Best practices:
+            - ALWAYS call get_infinigen_available_assets() first to see available asset types
+            - Choose appropriate asset_type from the returned list (e.g., 'TreeFactory', 'BushFactory', 'TableFactory')
+            - Excellent for: trees, plants, bushes, rocks, furniture, architectural elements
+            - Each generation creates unique variations based on procedural algorithms
+            - Assets include proper materials and realistic details
+            
+            Workflow:
+            1. Call get_infinigen_available_assets() to see what's available
+            2. Select appropriate asset_type based on user needs
+            3. Call generate_infinigen_assets(asset_type="SelectedFactory")
+            4. Generation takes 1-5 minutes depending on complexity
+            
+            Best for:
+            - Natural elements: trees, plants, bushes, flowers, rocks, terrain features
+            - Indoor furniture: chairs, tables, sofas, cabinets, shelves
+            - Architectural elements: doors, windows, stairs, railings
+            - When you need procedural variation and realism
         
-        2. TRELLIS2 (3DAIGC Generation)
+        3. TRELLIS2 (3DAIGC Generation)
             TRELLIS2 is excellent at generating high-quality 3D models from text or images.
             Best practices:
             - Generate single objects (not entire scenes)
@@ -886,7 +1012,7 @@ def asset_creation_strategy() -> str:
             - The operation is synchronous and may take 30s-1min
             - Reuse generated assets by duplicating objects with Python code
         
-        3. 3D Asset Retrieval Database
+        4. 3D Asset Retrieval Database
             - For searching existing 3D models: Use search_3d_assets_by_text() with descriptive queries
                 * Examples: "wooden chair", "sports car", "medieval castle", "office desk"
                 * Use algorithm="siglip" for English queries (default, recommended for most cases)
@@ -903,8 +1029,10 @@ def asset_creation_strategy() -> str:
         - Items have right spatial relationship.
     
     3. Recommended asset source priority:
-        - For common real-world objects (furniture, vehicles, everyday items): Try 3D Asset Retrieval first
-        - For specific architectural elements or natural materials: Try PolyHaven first, then Retrieval
+        - For natural elements (trees, plants, rocks, organic shapes): Try Infinigen first (check available types)
+        - For indoor furniture and architectural elements: Try Infinigen first, then Retrieval
+        - For common real-world objects (vehicles, everyday items): Try 3D Asset Retrieval first
+        - For specific architectural elements or materials: Try PolyHaven first, then Infinigen
         - For custom or highly specific unique items: Try Retrieval first, then TRELLIS2 for generation
         - For generating from reference images: Use TRELLIS2 image-to-3D
         - For procedural/primitive objects (cubes, spheres, planes): Use Blender scripting directly
@@ -912,17 +1040,105 @@ def asset_creation_strategy() -> str:
         - For materials/textures: Use PolyHaven textures
 
     Only fall back to scripting when:
-    - All asset sources (Retrieval, PolyHaven, TRELLIS2) are disabled or unavailable
+    - All asset sources (Retrieval, PolyHaven, TRELLIS2, Infinigen) are unavailable
     - A simple primitive is explicitly requested
     - No suitable asset exists in any of the libraries after searching
     - TRELLIS2 failed to generate the desired asset or is taking too long
     - The task specifically requires a basic material/color or procedural geometry
     """
 
+
+def _probe_conditional_services() -> dict[str, bool]:
+    timeout_raw = os.getenv("MCP_TOOL_HEALTH_TIMEOUT_SECONDS", "2.0")
+    try:
+        timeout = float(timeout_raw)
+    except ValueError:
+        timeout = 2.0
+
+    checker = ServiceHealthChecker(
+        host_override=os.getenv("MCP_TOOL_HEALTH_HOST"),
+        timeout=timeout,
+    )
+    service_names = ["trellis2", "retrieval", "pcg_integrator"]
+
+    try:
+        check_results = checker.check_services(service_names)
+    except Exception as exc:
+        logger.warning("Failed to probe conditional services: %s", exc)
+        check_results = {}
+
+    service_status: dict[str, bool] = {}
+    service_details: dict[str, Any] = {}
+    for name in service_names:
+        result = check_results.get(name)
+        if result is None:
+            service_status[name] = False
+            service_details[name] = {"ok": False, "error": "missing check result"}
+            continue
+        service_status[name] = result.ok
+        service_details[name] = result.to_dict()
+
+    logger.info("Conditional tool service health: %s", json.dumps(service_details))
+    print(
+        f"[mcp_server] conditional_service_health={json.dumps(service_details)}",
+        flush=True,
+    )
+    return service_status
+
+
+def register_mcp_tools() -> list[str]:
+    global _tools_registered, _enabled_tool_names
+    if _tools_registered:
+        return _enabled_tool_names
+
+    service_status = _probe_conditional_services()
+    tool_specs: list[tuple[Any, Optional[str]]] = [
+        (get_scene_info, None),
+        (get_object_info, None),
+        (get_viewport_screenshot, None),
+        (execute_blender_code, None),
+        (search_polyhaven_assets, None),
+        (download_polyhaven_asset, None),
+        (set_texture, None),
+        (import_glb_model, None),
+        (get_infinigen_available_assets, "pcg_integrator"),
+        (generate_infinigen_assets, "pcg_integrator"),
+        (generate_trellis2_model, "trellis2"),
+        (search_3d_assets_by_text, "retrieval"),
+        (import_retrieved_asset, None),
+        (create_camera_from_objects, None),
+        (create_camera_from_params, None),
+        (render_from_objects, None),
+        (render_from_camera, None),
+    ]
+
+    enabled: list[str] = []
+    skipped: list[str] = []
+    for func, dependency in tool_specs:
+        if dependency and not service_status.get(dependency, False):
+            skipped.append(f"{func.__name__} (requires {dependency})")
+            continue
+        mcp.add_tool(func)
+        enabled.append(func.__name__)
+
+    _enabled_tool_names = enabled
+    _tools_registered = True
+
+    print(f"[mcp_server] enabled_tools={','.join(enabled)}", flush=True)
+    if skipped:
+        print(f"[mcp_server] skipped_tools={'; '.join(skipped)}", flush=True)
+    logger.info("Enabled MCP tools: %s", ", ".join(enabled))
+    if skipped:
+        logger.info("Skipped MCP tools: %s", "; ".join(skipped))
+
+    return enabled
+
+
 # Main execution
 
 def main():
     """Run the MCP server"""
+    register_mcp_tools()
     mcp.run(transport="streamable-http")
 
 if __name__ == "__main__":

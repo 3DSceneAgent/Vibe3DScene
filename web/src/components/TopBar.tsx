@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 
 type EnvironmentPreset = 'studio' | 'warm' | 'cool'
 type BackendStatus = 'online' | 'offline' | 'checking'
+type BackendMode = 'headless' | 'local-client' | null
 
 type TopBarProps = {
   environment: EnvironmentPreset
@@ -23,6 +24,7 @@ type TopBarProps = {
   isDownloadDisabled: boolean
   canRunActions: boolean
   backendStatus: BackendStatus
+  backendMode: BackendMode
   backendUrl: string
 }
 
@@ -68,7 +70,7 @@ function DownloadDropdown({
         onClick={() => setIsOpen(!isOpen)}
         disabled={isDownloadLoading || isDownloadDisabled || !canRunActions}
       >
-        Download Scene {isOpen ? '▲' : '▼'}
+        Export {isOpen ? '▲' : '▼'}
       </button>
       {isOpen && (
         <div className="dropdown-menu">
@@ -112,10 +114,14 @@ export function TopBar({
   isDownloadDisabled,
   canRunActions,
   backendStatus,
+  backendMode,
   backendUrl
 }: TopBarProps) {
   const statusLabel =
     backendStatus === 'online' ? 'Online' : backendStatus === 'offline' ? 'Offline' : 'Checking'
+  const modeLabel =
+    backendMode === 'headless' ? 'Headless' : backendMode === 'local-client' ? 'Local' : null
+  const statusText = modeLabel ? `Server ${statusLabel} • ${modeLabel}` : `Server ${statusLabel}`
 
   if (sceneCollapsed) {
     return (
@@ -128,7 +134,7 @@ export function TopBar({
         <div className="top-bar-group">
           <div className="top-bar-status" title={`Backend: ${backendUrl}`}>
             <span className={`status-dot ${backendStatus}`} />
-            <span className="status-text">Server {statusLabel}</span>
+            <span className="status-text">{statusText}</span>
           </div>
         </div>
       </div>
@@ -181,7 +187,7 @@ export function TopBar({
         </label>
         <div className="top-bar-status" title={`Backend: ${backendUrl}`}>
           <span className={`status-dot ${backendStatus}`} />
-          <span className="status-text">Server {statusLabel}</span>
+          <span className="status-text">{statusText}</span>
         </div>
         <button className="ghost-btn" onClick={onOpenSettings}>
           Settings

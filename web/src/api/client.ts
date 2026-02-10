@@ -163,10 +163,13 @@ export async function listReferenceImages(baseUrl: string, threadId: string): Pr
   return data.images ?? []
 }
 
-export async function getHealth(baseUrl: string, signal?: AbortSignal): Promise<{ status: string }> {
+export async function getHealth(
+  baseUrl: string,
+  signal?: AbortSignal
+): Promise<{ status: string; blender_mode?: 'headless' | 'local-client' }> {
   const response = await fetch(`${baseUrl}/health`, { signal })
   if (!response.ok) {
     throw new Error(`Healthcheck failed (${response.status})`)
   }
-  return (await response.json()) as { status: string }
+  return (await response.json()) as { status: string; blender_mode?: 'headless' | 'local-client' }
 }

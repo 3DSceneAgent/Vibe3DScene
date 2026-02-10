@@ -397,7 +397,12 @@ async def root():
 @app.get("/health")
 async def healthcheck():
     """Healthcheck endpoint."""
-    return {"status": "ok", "timestamp": time.time()}
+    settings = get_settings()
+    return {
+        "status": "ok",
+        "timestamp": time.time(),
+        "blender_mode": settings.blender_mode,
+    }
 
 
 @app.post("/chat", response_model=ChatResponse)

@@ -38,6 +38,7 @@ function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
   const [backendStatus, setBackendStatus] = useState<'online' | 'offline' | 'checking'>('checking')
+  const [backendMode, setBackendMode] = useState<'headless' | 'local-client' | null>(null)
   const [loading, setLoading] = useState({
     scene: false,
     renders: false,
@@ -112,6 +113,7 @@ function App() {
       if (!settings.backendUrl) {
         if (isActive) {
           setBackendStatus('offline')
+          setBackendMode(null)
         }
         return
       }
@@ -122,13 +124,15 @@ function App() {
       healthAbortRef.current = controller
       const timeoutId = window.setTimeout(() => controller.abort(), 3000)
       try {
-        await getHealth(settings.backendUrl, controller.signal)
+        const health = await getHealth(settings.backendUrl, controller.signal)
         if (isActive) {
           setBackendStatus('online')
+          setBackendMode(health.blender_mode ?? null)
         }
       } catch {
         if (isActive) {
           setBackendStatus('offline')
+          setBackendMode(null)
         }
       } finally {
         window.clearTimeout(timeoutId)
@@ -336,6 +340,22 @@ function App() {
         if (existingId) {
           return existingId
         }
+
+        const initialId = messageIdMapRef.current.get('initial')
+        if (initialId) {
+          messageIdMapRef.current.set(messageId, initialId)
+          messageIdMapRef.current.delete('initial')
+          updateThread(threadId, (thread) => ({
+            ...thread,
+            messages: thread.messages.map((message) =>
+              message.id === initialId && !message.streamId
+                ? { ...message, streamId: messageId }
+                : message
+            )
+          }))
+          return initialId
+        }
+
         const newAssistantId = `msg-${Date.now()}-${Math.random()}-assistant`
         messageIdMapRef.current.set(messageId, newAssistantId)
         const newMessage: Message = {
@@ -514,9 +534,14 @@ function App() {
     streamPromise
       .catch((error) => {
         updateThread(threadId, (thread) => {
-          const lastAssistantIndex = thread.messages.findLastIndex(
-            (m) => m.role === 'assistant' && m.status === 'streaming'
-          )
+          let lastAssistantIndex = -1
+          for (let i = thread.messages.length - 1; i >= 0; i -= 1) {
+            const message = thread.messages[i]
+            if (message.role === 'assistant' && message.status === 'streaming') {
+              lastAssistantIndex = i
+              break
+            }
+          }
           if (lastAssistantIndex === -1) {
             return thread
           }
@@ -764,6 +789,7 @@ function App() {
           isDownloadDisabled={!activeThread?.scene}
           canRunActions={Boolean(activeThread)}
           backendStatus={backendStatus}
+          backendMode={backendMode}
           backendUrl={settings.backendUrl}
         />
 
