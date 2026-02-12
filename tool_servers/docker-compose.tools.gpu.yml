@@ -1,0 +1,3 @@
+services:
+  trellis2:
+    gpus: ${TRELLIS2_GPU}

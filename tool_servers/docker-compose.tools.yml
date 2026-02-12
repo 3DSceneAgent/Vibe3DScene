@@ -1,0 +1,54 @@
+services:
+  trellis2:
+    image: ${TRELLIS2_IMAGE}
+    container_name: ${TRELLIS2_CONTAINER}
+    command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "${TRELLIS2_CONTAINER_PORT}"]
+    environment:
+      HUGGINGFACE_TOKEN: ${HUGGINGFACE_TOKEN}
+    ports:
+      - "${TRELLIS2_HOST}:${TRELLIS2_PORT}:${TRELLIS2_CONTAINER_PORT}"
+    networks:
+      - tools
+    restart: unless-stopped
+
+  retrieval:
+    image: ${RETRIEVAL_IMAGE}
+    container_name: ${RETRIEVAL_CONTAINER}
+    command: ["uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "${RETRIEVAL_CONTAINER_PORT}"]
+    ports:
+      - "${RETRIEVAL_HOST}:${RETRIEVAL_PORT}:${RETRIEVAL_CONTAINER_PORT}"
+    environment:
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY}
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME_QWEN: ${DB_NAME_QWEN}
+      QWEN_DB_AUTO_BOOTSTRAP: ${QWEN_DB_AUTO_BOOTSTRAP}
+      QWEN_DB_OSS_URL: ${QWEN_DB_OSS_URL}
+      QWEN_DB_DUMP_FORMAT: ${QWEN_DB_DUMP_FORMAT}
+      QWEN_DB_DUMP_LOCAL_PATH: ${QWEN_DB_DUMP_LOCAL_PATH}
+      QWEN_DB_DOWNLOAD_TIMEOUT_SECONDS: ${QWEN_DB_DOWNLOAD_TIMEOUT_SECONDS}
+      MAX_ASSETS: ${MAX_ASSETS}
+      LOG_LEVEL: ${LOG_LEVEL}
+      BASE_URL_TEMPLATE: ${BASE_URL_TEMPLATE}
+    networks:
+      - tools
+    restart: unless-stopped
+
+  pcg:
+    image: ${PCG_IMAGE}
+    container_name: ${PCG_CONTAINER}
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "${PCG_CONTAINER_PORT}"]
+    ports:
+      - "${PCG_HOST}:${PCG_PORT}:${PCG_CONTAINER_PORT}"
+    environment:
+      ENVIRONMENT: ${PCG_ENVIRONMENT}
+      OUTPUT_BASE_DIR: ${PCG_OUTPUT_BASE_DIR}
+    networks:
+      - tools
+    restart: unless-stopped
+
+networks:
+  tools:
+    name: ${DOCKER_NETWORK}

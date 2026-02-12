@@ -26,3 +26,6 @@ coverage/
 scripts/helpers
 # legacy code and references 
 legacy
+
+# codex is only used for dev 
+AGENTS.md
