@@ -9,9 +9,24 @@ type ChatTabProps = {
   isStreaming: boolean
   onSend: (message: string, files: File[]) => Promise<boolean>
   onStop?: () => void
+  backendUrl: string
+  examplePrompts: string[]
+  mcpTools: string[]
+  mcpToolsLoading?: boolean
+  mcpToolsError?: string | null
 }
 
-export function ChatTab({ thread, isStreaming, onSend, onStop }: ChatTabProps) {
+export function ChatTab({
+  thread,
+  isStreaming,
+  onSend,
+  onStop,
+  backendUrl,
+  examplePrompts,
+  mcpTools,
+  mcpToolsLoading,
+  mcpToolsError
+}: ChatTabProps) {
   if (!thread) {
     return <div className="empty-state">Create a conversation to begin.</div>
   }
@@ -19,7 +34,7 @@ export function ChatTab({ thread, isStreaming, onSend, onStop }: ChatTabProps) {
   return (
     <div className="chat-tab chat-pane">
       <div className="chat-scroll-area">
-        <MessageList messages={thread.messages} />
+        <MessageList messages={thread.messages} backendUrl={backendUrl} />
       </div>
       {thread.referenceImages && thread.referenceImages.length > 0 && (
         <ReferenceImageStrip images={thread.referenceImages as ReferenceImage[]} />
@@ -29,6 +44,10 @@ export function ChatTab({ thread, isStreaming, onSend, onStop }: ChatTabProps) {
         onSend={onSend}
         onStop={onStop}
         referenceImagesCount={thread.referenceImages?.length ?? 0}
+        examplePrompts={examplePrompts}
+        mcpTools={mcpTools}
+        mcpToolsLoading={mcpToolsLoading}
+        mcpToolsError={mcpToolsError}
       />
     </div>
   )

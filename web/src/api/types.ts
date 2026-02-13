@@ -47,3 +47,11 @@ export type StreamEvent = {
   event?: 'done'
   scene_has_change?: boolean
 }
+
+export type McpToolsInfo = {
+  thread_id: string
+  loaded: boolean
+  tool_count: number
+  tools: string[]
+  blender_mode: 'headless' | 'local-client' | string
+}

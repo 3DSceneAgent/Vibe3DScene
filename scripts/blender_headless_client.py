@@ -34,6 +34,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--host")
     parser.add_argument("--port", type=int)
+    parser.add_argument("--blend-path")
     parser.add_argument("--addon")
     parser.add_argument("--operator")
     parser.add_argument(
@@ -174,9 +175,19 @@ def main() -> int:
     host = args.host or _get_env_first("BLENDER_HOST", "BLENDER_HEADLESS_HOST", default="localhost")
     port_value = args.port or _get_env_first("BLENDER_PORT", "BLENDER_HEADLESS_PORT")
     port = int(port_value) if port_value else 9876
+    blend_path = args.blend_path or _get_env_first("SESSION_BLEND_PATH", "BLENDER_SESSION_BLEND_PATH")
     addon_module = args.addon or os.getenv("BLENDER_ADDON_MODULE", "blender_mcpv_addon")
     # Operator removed in headless refactor - use function entry point only
     operator_path = args.operator or os.getenv("BLENDER_ADDON_START_OP", "")
+
+    if blend_path and os.path.exists(blend_path):
+        try:
+            current_path = bpy.data.filepath or ""
+            if os.path.abspath(current_path) != os.path.abspath(blend_path):
+                print(f"Loading persisted blend before server start: {blend_path}")
+                bpy.ops.wm.open_mainfile(filepath=blend_path, load_ui=False)
+        except Exception as exc:
+            print(f"Failed to load blend '{blend_path}': {exc}")
 
     print(f"Starting addon '{addon_module}' on {host}:{port}")
     _enable_addon(bpy, addon_module)

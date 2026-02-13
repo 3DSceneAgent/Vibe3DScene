@@ -663,19 +663,130 @@
   text-decoration: line-through;
 }
 
-.composer {
+.composer-shell {
   display: flex;
-  gap: 12px;
-  align-items: flex-end;
-  padding-top: 16px;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.composer {
+  display: grid;
+  grid-template-columns: minmax(160px, auto) minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.composer-input-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.composer-tools-panel {
+  border-radius: 10px;
+  border: 1px solid var(--color-border);
+  background: rgba(14, 18, 28, 0.7);
+  overflow: hidden;
+}
+
+.composer-tools-summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  cursor: pointer;
+  padding: 7px 10px;
+  font-size: 12px;
+}
+
+.composer-tools-summary::-webkit-details-marker {
+  display: none;
+}
+
+.composer-tools-title {
+  color: var(--color-text);
+  font-weight: 500;
+}
+
+.composer-tools-meta {
+  color: var(--color-muted);
+  font-size: 11px;
+}
+
+.composer-tools-meta.error {
+  color: #fca5a5;
+}
+
+.composer-tools-body {
+  border-top: 1px solid var(--color-border);
+  padding: 8px 10px;
+  max-height: 170px;
+  overflow-y: auto;
+}
+
+.composer-tools-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.composer-tools-empty {
+  font-size: 12px;
+}
+
+.composer-input-area {
   position: relative;
+  min-width: 0;
+}
+
+.composer-prompt-popover {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  border: 1px solid rgba(95, 164, 255, 0.4);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(19, 25, 40, 0.98), rgba(11, 16, 28, 0.96));
+  box-shadow: 0 14px 30px rgba(6, 9, 16, 0.45);
+  overflow: hidden;
+  z-index: 5;
+}
+
+.composer-prompt-option {
+  display: block;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--color-text);
+  text-align: left;
+  padding: 9px 12px;
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.composer-prompt-option:hover:not(:disabled) {
+  background: rgba(95, 164, 255, 0.16);
+}
+
+.composer-prompt-option:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.composer-prompt-option + .composer-prompt-option {
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
 }
 
 .composer-upload {
-  position: absolute;
-  top: -56px;
-  right: 0;
-  min-width: 150px;
   padding: 10px 12px;
   border-radius: 12px;
   border: 1px dashed var(--color-border);
@@ -706,20 +817,16 @@
 }
 
 .composer-upload-meta {
-  position: absolute;
-  top: -28px;
-  right: 0;
   font-size: 11px;
   color: var(--color-muted);
 }
 
 .composer-upload-previews {
-  position: absolute;
-  top: -4px;
-  right: 0;
+  grid-column: 1;
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  padding: 6px 0;
+  padding-top: 4px;
 }
 
 .composer-upload-preview {
@@ -792,7 +899,8 @@
 }
 
 .composer-input {
-  flex: 1;
+  width: 100%;
+  min-height: 46px;
   border-radius: 12px;
   border: 1px solid var(--color-border);
   background: var(--color-surface);
@@ -1108,5 +1216,54 @@
 
   .scene-top {
     grid-template-columns: 1fr;
+  }
+
+  .composer {
+    grid-template-columns: minmax(140px, auto) minmax(0, 1fr) auto;
+    grid-template-areas:
+      "upload input send"
+      "meta hint hint"
+      "previews previews previews";
+  }
+
+  .composer-upload {
+    grid-area: upload;
+  }
+
+  .composer-input-stack {
+    grid-area: input;
+  }
+
+  .composer .primary-btn {
+    grid-area: send;
+  }
+
+  .composer-upload-meta {
+    grid-area: meta;
+  }
+
+  .composer-hint {
+    grid-area: hint;
+  }
+
+  .composer-upload-previews {
+    grid-area: previews;
+  }
+}
+
+@media (max-width: 760px) {
+  .composer {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "upload"
+      "meta"
+      "previews"
+      "input"
+      "hint"
+      "send";
+  }
+
+  .composer .primary-btn {
+    width: 100%;
   }
 }

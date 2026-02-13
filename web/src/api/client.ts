@@ -1,4 +1,4 @@
-import type { ReferenceImage, RenderImage, SceneInfo, StreamEvent, TodoItem } from './types'
+import type { McpToolsInfo, ReferenceImage, RenderImage, SceneInfo, StreamEvent, TodoItem } from './types'
 
 type StreamChatArgs = {
   baseUrl: string
@@ -172,4 +172,29 @@ export async function getHealth(
     throw new Error(`Healthcheck failed (${response.status})`)
   }
   return (await response.json()) as { status: string; blender_mode?: 'headless' | 'local-client' }
+}
+
+
+export async function getExamplePrompts(baseUrl: string): Promise<string[]> {
+  const response = await fetch(`${baseUrl}/example-prompts`)
+  if (!response.ok) {
+    throw new Error(`Failed to load example prompts (${response.status})`)
+  }
+  const data = (await response.json()) as { prompts?: string[] }
+  return Array.isArray(data.prompts) ? data.prompts : []
+}
+
+export async function getMcpTools(baseUrl: string, threadId: string): Promise<McpToolsInfo> {
+  const response = await fetch(`${baseUrl}/threads/${threadId}/mcp-tools`)
+  if (!response.ok) {
+    throw new Error(`Failed to load MCP tools (${response.status})`)
+  }
+  const data = (await response.json()) as Partial<McpToolsInfo>
+  return {
+    thread_id: typeof data.thread_id === 'string' ? data.thread_id : threadId,
+    loaded: Boolean(data.loaded),
+    tool_count: typeof data.tool_count === 'number' ? data.tool_count : 0,
+    tools: Array.isArray(data.tools) ? data.tools.filter((item): item is string => typeof item === 'string') : [],
+    blender_mode: typeof data.blender_mode === 'string' ? data.blender_mode : 'unknown'
+  }
 }

@@ -52,6 +52,7 @@ This helps track progress and makes your reasoning transparent.
 
 Remember: You decide when to perceive and render - not every step requires it.
 Only call tools when you need information or want to take action.
+If CURRENT_AVAILABLE_TOOLS is provided at runtime, never call tools outside that list.
 
 Verification guidance:
 - If a tool message named "verification" is present, summarize the match/mismatch result and reason.

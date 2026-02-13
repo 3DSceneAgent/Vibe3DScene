@@ -1,15 +1,18 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Components } from 'react-markdown'
+import { resolveMediaUrl } from '../utils/url'
 
 type MarkdownMessageProps = {
   content: string
+  backendUrl: string
 }
 
-export function MarkdownMessage({ content }: MarkdownMessageProps) {
+export function MarkdownMessage({ content, backendUrl }: MarkdownMessageProps) {
   const components: Components = {
-    code({ inline, children, ...props }) {
-      if (inline) {
+    code({ children, className, ...props }) {
+      const isInline = typeof className !== 'string' || !className.includes('language-')
+      if (isInline) {
         return (
           <code className="markdown-inline-code" {...props}>
             {children}
@@ -30,9 +33,13 @@ export function MarkdownMessage({ content }: MarkdownMessageProps) {
       )
     },
     img({ src, alt }) {
+      const resolvedSrc = resolveMediaUrl(src, backendUrl)
+      if (!resolvedSrc) {
+        return null
+      }
       return (
         <img
-          src={src}
+          src={resolvedSrc}
           alt={alt || 'image'}
           className="markdown-image"
           loading="lazy"

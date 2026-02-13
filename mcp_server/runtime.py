@@ -97,6 +97,14 @@ def is_trellis2_tool_enabled() -> bool:
     return get_blender_mode() == "headless" and parse_env_bool("ENABLE_TRELLIS2", False)
 
 
+def is_retrieval_tool_enabled() -> bool:
+    return parse_env_bool("ENABLE_RETRIEVAL", False)
+
+
+def is_infinigen_tool_enabled() -> bool:
+    return parse_env_bool("ENABLE_INFINIGEN", False)
+
+
 def is_sketchfab_tool_enabled() -> bool:
     return parse_env_bool("ENABLE_SKETCHFAB", False)
 

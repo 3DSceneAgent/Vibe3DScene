@@ -10,7 +10,7 @@ import os
 import re
 import tempfile
 import time
-from typing import Dict, Any
+from typing import Any, Dict
 from langchain_core.messages import ToolMessage, AIMessage, SystemMessage, HumanMessage
 from scene_agent.agent.state import AgentState, TodoItem, create_todo, update_todo_status
 from scene_agent.config import get_settings
@@ -19,7 +19,11 @@ from scene_agent.memory.reference_image_memory import get_reference_image_memory
 from scene_agent.vlm.verification import verify_render_with_references
 
 
-def agent_node(state: AgentState, llm_with_tools) -> Dict[str, Any]:
+def agent_node(
+    state: AgentState,
+    llm_with_tools,
+    available_tool_names: list[str] | None = None,
+) -> Dict[str, Any]:
     """
     Agent node: VLM reasoning with all tools bound.
     The agent decides when to perceive, render, and manipulate the scene.
@@ -35,12 +39,78 @@ def agent_node(state: AgentState, llm_with_tools) -> Dict[str, Any]:
     from scene_agent.agent.prompts import get_full_system_prompt
     
     messages = [SystemMessage(content=get_full_system_prompt())]
+    tool_constraints = _build_available_tools_constraint(available_tool_names)
+    if tool_constraints:
+        messages.append(SystemMessage(content=tool_constraints))
     messages.extend(state["messages"])
     
     # Invoke the LLM
     response = llm_with_tools.invoke(messages)
+    response, dropped_tools = _filter_unavailable_tool_calls(response, available_tool_names)
+    if dropped_tools:
+        content_text = _message_content_to_text(getattr(response, "content", ""))
+        if not content_text.strip():
+            skipped = ", ".join(sorted(set(dropped_tools)))
+            response.content = (
+                "I skipped unavailable tool calls and will continue with enabled tools only. "
+                f"Skipped: {skipped}."
+            )
     
     return {"messages": [response]}
+
+
+def _build_available_tools_constraint(available_tool_names: list[str] | None) -> str | None:
+    if not available_tool_names:
+        return None
+    deduped = sorted(set(available_tool_names))
+    tools_csv = ", ".join(deduped)
+    return (
+        "Runtime tool constraints:\n"
+        "- Only call tools listed in CURRENT_AVAILABLE_TOOLS.\n"
+        f"- CURRENT_AVAILABLE_TOOLS: [{tools_csv}]\n"
+        "- If a needed tool is missing, explain and use available alternatives."
+    )
+
+
+def _extract_tool_call_name(tool_call: Any) -> str | None:
+    if isinstance(tool_call, dict):
+        name = tool_call.get("name")
+        return name if isinstance(name, str) and name else None
+    name = getattr(tool_call, "name", None)
+    return name if isinstance(name, str) and name else None
+
+
+def _filter_unavailable_tool_calls(
+    response: Any,
+    available_tool_names: list[str] | None,
+) -> tuple[Any, list[str]]:
+    if not available_tool_names:
+        return response, []
+    tool_calls = getattr(response, "tool_calls", None)
+    if not isinstance(tool_calls, list) or len(tool_calls) == 0:
+        return response, []
+
+    allowed_names = set(available_tool_names)
+    filtered_calls: list[Any] = []
+    dropped_calls: list[str] = []
+    for tool_call in tool_calls:
+        tool_name = _extract_tool_call_name(tool_call)
+        if tool_name and tool_name in allowed_names:
+            filtered_calls.append(tool_call)
+            continue
+        dropped_calls.append(tool_name or "<unknown>")
+
+    if len(filtered_calls) == len(tool_calls):
+        return response, []
+
+    response.tool_calls = filtered_calls
+    additional_kwargs = getattr(response, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict):
+        if filtered_calls:
+            additional_kwargs["tool_calls"] = filtered_calls
+        else:
+            additional_kwargs.pop("tool_calls", None)
+    return response, dropped_calls
 
 
 def update_memory_node(state: AgentState) -> Dict[str, Any]:
@@ -147,7 +217,12 @@ def _find_last_render_message(messages: list) -> ToolMessage | None:
     for msg in reversed(messages):
         if isinstance(msg, ToolMessage) and msg.name:
             name = msg.name
-            if "render_from_camera" in name or "render_from_objects" in name:
+            if (
+                "render_from_camera" in name
+                or "render_from_objects" in name
+                or "camera_observe" in name
+                or "camera_act" in name
+            ):
                 return msg
     return None
 

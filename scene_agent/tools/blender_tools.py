@@ -38,6 +38,7 @@ async def get_blender_tools(session_id: str | None = None) -> List[Any]:
     if settings.blender_mode == "headless" and session_id:
         manager = get_session_manager()
         session = manager.ensure(session_id, "headless")
+        manager.ensure_session_storage(session_id)
         host = os.getenv("BLENDER_HEADLESS_HOST", settings.blender_host)
         base_port = int(os.getenv("BLENDER_HEADLESS_BASE_PORT", "9876"))
         port_range = int(os.getenv("BLENDER_HEADLESS_PORT_RANGE", "16"))
@@ -53,9 +54,27 @@ async def get_blender_tools(session_id: str | None = None) -> List[Any]:
         else:
             port = session.port
 
-        command, args = build_headless_command_args(session_id, host, port)
+        command, args = build_headless_command_args(
+            session_id,
+            host,
+            port,
+            blend_path=session.blend_path,
+        )
+        headless_env = os.environ.copy()
+        headless_env.update(
+            {
+                "SESSION_ID": session_id,
+                "SESSION_STORAGE_DIR": session.storage_dir or "",
+                "SESSION_BLEND_PATH": session.blend_path or "",
+                "SESSION_SNAPSHOT_DIR": session.snapshot_dir or "",
+                "SESSION_MAX_SNAPSHOTS": str(session.max_snapshots),
+                "SESSION_IDLE_TIMEOUT_SECONDS": str(session.idle_timeout_seconds),
+                "SESSION_BLEND_ROOT": settings.session_blend_root,
+                "SESSION_PERSISTENCE_ENABLED": "1",
+            }
+        )
         with session.lock:
-            start_headless_process(session, command, args)
+            start_headless_process(session, command, args, env=headless_env)
 
         mcp_host = os.getenv("BLENDER_MCP_HOST", "localhost")
         mcp_base_port = int(os.getenv("BLENDER_MCP_BASE_PORT", "9877"))
@@ -80,6 +99,13 @@ async def get_blender_tools(session_id: str | None = None) -> List[Any]:
                 "MCP_SERVER_PORT": str(mcp_port),
                 "BLENDER_HOST": host,
                 "BLENDER_PORT": str(port),
+                "SESSION_ID": session_id,
+                "SESSION_STORAGE_DIR": session.storage_dir or "",
+                "SESSION_BLEND_PATH": session.blend_path or "",
+                "SESSION_SNAPSHOT_DIR": session.snapshot_dir or "",
+                "SESSION_MAX_SNAPSHOTS": str(session.max_snapshots),
+                "SESSION_IDLE_TIMEOUT_SECONDS": str(session.idle_timeout_seconds),
+                "SESSION_PERSISTENCE_ENABLED": "1",
             }
         )
         with session.lock:

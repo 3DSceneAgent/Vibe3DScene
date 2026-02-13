@@ -17,6 +17,35 @@ from scene_agent.utils.rendering import process_and_save_render
 logger = logging.getLogger("BlenderMCPServer")
 
 
+def _extract_thread_id(ctx: Context) -> str:
+    thread_id = "unknown"
+    if hasattr(ctx, "request_context") and ctx.request_context:
+        if hasattr(ctx.request_context, "get"):
+            thread_id = ctx.request_context.get("thread_id", "unknown")
+        elif isinstance(ctx.request_context, dict):
+            thread_id = ctx.request_context.get("thread_id", "unknown")
+    return thread_id
+
+
+def _render_result_to_markdown(
+    *,
+    filepath: str,
+    thread_id: str,
+    camera_name: str,
+    alt_text: str,
+) -> CallToolResult:
+    if not os.path.exists(filepath):
+        raise Exception(f"Rendered file not found: {filepath}")
+    image_url = process_and_save_render(filepath, thread_id, camera_name, logger=logger)
+    try:
+        os.remove(filepath)
+    except Exception:
+        pass
+    logger.info("Render available at: %s", image_url)
+    markdown_image = f"![{alt_text}]({image_url})"
+    return CallToolResult(content=[{"type": "text", "text": markdown_image}], isError=False)
+
+
 def get_scene_info(ctx: Context) -> str:
     """Get detailed information about the current Blender scene."""
     try:
@@ -316,25 +345,15 @@ def render_from_objects(
         if not result.get("success"):
             raise Exception("Render failed")
         filepath = result["filepath"]
-        if not os.path.exists(filepath):
-            raise Exception(f"Rendered file not found: {filepath}")
-
-        thread_id = "unknown"
-        if hasattr(ctx, "request_context") and ctx.request_context:
-            if hasattr(ctx.request_context, "get"):
-                thread_id = ctx.request_context.get("thread_id", "unknown")
-            elif isinstance(ctx.request_context, dict):
-                thread_id = ctx.request_context.get("thread_id", "unknown")
+        thread_id = _extract_thread_id(ctx)
         camera_name = result.get("camera", "auto")
-        image_url = process_and_save_render(filepath, thread_id, camera_name, logger=logger)
-        try:
-            os.remove(filepath)
-        except Exception:
-            pass
-        logger.info("Render available at: %s", image_url)
         objects_str = ", ".join(object_names)
-        markdown_image = f"![Render of {objects_str}]({image_url})"
-        return CallToolResult(content=[{"type": "text", "text": markdown_image}], isError=False)
+        return _render_result_to_markdown(
+            filepath=filepath,
+            thread_id=thread_id,
+            camera_name=camera_name,
+            alt_text=f"Render of {objects_str}",
+        )
     except Exception as exc:
         logger.error("Error rendering from objects: %s", str(exc))
         raise Exception(f"Render failed: {str(exc)}")
@@ -364,23 +383,121 @@ def render_from_camera(
         if not result.get("success"):
             raise Exception("Render failed")
         filepath = result["filepath"]
-        if not os.path.exists(filepath):
-            raise Exception(f"Rendered file not found: {filepath}")
-
-        thread_id = "unknown"
-        if hasattr(ctx, "request_context") and ctx.request_context:
-            if hasattr(ctx.request_context, "get"):
-                thread_id = ctx.request_context.get("thread_id", "unknown")
-            elif isinstance(ctx.request_context, dict):
-                thread_id = ctx.request_context.get("thread_id", "unknown")
-        image_url = process_and_save_render(filepath, thread_id, camera_name, logger=logger)
-        try:
-            os.remove(filepath)
-        except Exception:
-            pass
-        logger.info("Render available at: %s", image_url)
-        markdown_image = f"![Render from {camera_name}]({image_url})"
-        return CallToolResult(content=[{"type": "text", "text": markdown_image}], isError=False)
+        thread_id = _extract_thread_id(ctx)
+        return _render_result_to_markdown(
+            filepath=filepath,
+            thread_id=thread_id,
+            camera_name=camera_name,
+            alt_text=f"Render from {camera_name}",
+        )
     except Exception as exc:
         logger.error("Error rendering from camera: %s", str(exc))
         raise Exception(f"Render failed: {str(exc)}")
+
+
+def camera_observe(
+    ctx: Context,
+    object_names: list[str],
+    mode: str = "multi_view",
+    focal_length: str = "normal",
+    azimuth: float = 45,
+    elevation: float = 30,
+    reuse_cameras: bool = True,
+) -> CallToolResult:
+    """Observe objects with single or multi-view camera strategy."""
+    try:
+        blender = runtime.get_blender_connection(logger)
+        temp_path = os.path.join(
+            tempfile.gettempdir(), f"blender_observe_{os.getpid()}_{int(time.time())}.png"
+        )
+        result = blender.send_command(
+            "camera_observe",
+            {
+                "object_names": object_names,
+                "mode": mode,
+                "focal_length": focal_length,
+                "azimuth": azimuth,
+                "elevation": elevation,
+                "reuse_cameras": reuse_cameras,
+                "filepath": temp_path,
+            },
+        )
+        if not result.get("success"):
+            raise Exception("Camera observe failed")
+        filepath = result["filepath"]
+        thread_id = _extract_thread_id(ctx)
+        camera_name = result.get("camera", "observe")
+        return _render_result_to_markdown(
+            filepath=filepath,
+            thread_id=thread_id,
+            camera_name=camera_name,
+            alt_text=f"Observation view ({mode})",
+        )
+    except Exception as exc:
+        logger.error("Error observing scene: %s", str(exc))
+        raise Exception(f"Camera observe failed: {str(exc)}")
+
+
+def camera_act(
+    ctx: Context,
+    action: str = "focus",
+    object_names: Optional[list[str]] = None,
+    direction: Optional[str] = None,
+    step_scale: float = 1.0,
+    keep_distance: bool = True,
+    mode: str = "rgb",
+) -> CallToolResult:
+    """Actively control camera with focus/move/zoom and render."""
+    try:
+        blender = runtime.get_blender_connection(logger)
+        temp_path = os.path.join(
+            tempfile.gettempdir(), f"blender_camera_act_{os.getpid()}_{int(time.time())}.png"
+        )
+        result = blender.send_command(
+            "camera_act",
+            {
+                "action": action,
+                "object_names": object_names or [],
+                "direction": direction,
+                "step_scale": step_scale,
+                "keep_distance": keep_distance,
+                "mode": mode,
+                "filepath": temp_path,
+            },
+        )
+        if not result.get("success"):
+            raise Exception("Camera act failed")
+        filepath = result["filepath"]
+        thread_id = _extract_thread_id(ctx)
+        camera_name = result.get("camera", "camera_act")
+        return _render_result_to_markdown(
+            filepath=filepath,
+            thread_id=thread_id,
+            camera_name=camera_name,
+            alt_text=f"Camera action ({action})",
+        )
+    except Exception as exc:
+        logger.error("Error running camera action: %s", str(exc))
+        raise Exception(f"Camera action failed: {str(exc)}")
+
+
+def undo_last_snapshot(ctx: Context) -> str:
+    """Undo last mutating step by loading previous snapshot."""
+    try:
+        blender = runtime.get_blender_connection(logger)
+        result = blender.send_command("undo_last_snapshot", {})
+        return json.dumps(result, indent=2)
+    except Exception as exc:
+        logger.error("Error undoing last snapshot: %s", str(exc))
+        return f"Error undoing snapshot: {str(exc)}"
+
+
+def get_session_persistence_status(ctx: Context) -> str:
+    """Get current session persistence metadata from addon."""
+    try:
+        blender = runtime.get_blender_connection(logger)
+        result = blender.send_command("get_session_persistence_status", {})
+        return json.dumps(result, indent=2)
+    except Exception as exc:
+        logger.error("Error getting session persistence status: %s", str(exc))
+        return f"Error getting session persistence status: {str(exc)}"

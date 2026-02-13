@@ -7,9 +7,10 @@ import { parseTodos } from '../utils/message'
 
 type MessageListProps = {
   messages: Message[]
+  backendUrl: string
 }
 
-export function MessageList({ messages }: MessageListProps) {
+export function MessageList({ messages, backendUrl }: MessageListProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -21,18 +22,18 @@ export function MessageList({ messages }: MessageListProps) {
     <div className="message-list" ref={containerRef}>
       {messages.length === 0 && <div className="muted">Let's build something!</div>}
       {messages.map((message) => (
-        <MessageItem key={message.id} message={message} />
+        <MessageItem key={message.id} message={message} backendUrl={backendUrl} />
       ))}
     </div>
   )
 }
 
-function MessageItem({ message }: { message: Message }) {
+function MessageItem({ message, backendUrl }: { message: Message; backendUrl: string }) {
   if (message.role === 'tool') {
     return (
       <div className="message-row tool">
         <div className="message-bubble tool">
-          <ToolResultBlock message={message} />
+          <ToolResultBlock message={message} backendUrl={backendUrl} />
         </div>
       </div>
     )
@@ -45,7 +46,7 @@ function MessageItem({ message }: { message: Message }) {
         {message.thinking && <ThinkingBlock thinking={message.thinking} />}
         {todos.length > 0 && <TodosBlock todos={todos} />}
         <div className="message-content">
-          <MarkdownMessage content={message.content || ' '} />
+          <MarkdownMessage content={message.content || ' '} backendUrl={backendUrl} />
           {showSpinner && <LoadingSpinner />}
         </div>
       </div>

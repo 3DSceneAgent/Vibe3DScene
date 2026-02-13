@@ -53,13 +53,18 @@ async def create_agent_graph(session_id: str | None = None):
     
     # Load tools from Blender MCP server
     tools = await get_blender_tools(session_id=session_id)
+    available_tool_names = [
+        tool.name
+        for tool in tools
+        if hasattr(tool, "name") and isinstance(tool.name, str) and tool.name
+    ]
     
     # Bind tools to model
     llm_with_tools = model.bind_tools(tools)
     
     # Define agent node with bound tools
     def call_model(state: AgentState) -> dict:
-        return agent_node(state, llm_with_tools)
+        return agent_node(state, llm_with_tools, available_tool_names)
     
     # Build graph
     builder = StateGraph(AgentState)
@@ -90,6 +95,7 @@ async def create_agent_graph(session_id: str | None = None):
     # Compile with checkpointing
     memory = MemorySaver()
     app = builder.compile(checkpointer=memory)
+    setattr(app, "_available_tool_names", available_tool_names)
     
     return app
 

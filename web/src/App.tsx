@@ -7,7 +7,9 @@ import {
   getSceneBlend,
   getHealth,
   uploadReferenceImages,
-  listReferenceImages
+  listReferenceImages,
+  getExamplePrompts,
+  getMcpTools
 } from './api/client'
 import type { ReferenceImage, StreamEvent, TodoItem } from './api/types'
 import { ChatTab } from './components/ChatTab'
@@ -39,6 +41,10 @@ function App() {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
   const [backendStatus, setBackendStatus] = useState<'online' | 'offline' | 'checking'>('checking')
   const [backendMode, setBackendMode] = useState<'headless' | 'local-client' | null>(null)
+  const [examplePrompts, setExamplePrompts] = useState<string[]>([])
+  const [mcpToolsByThread, setMcpToolsByThread] = useState<Record<string, string[]>>({})
+  const [mcpToolsErrorByThread, setMcpToolsErrorByThread] = useState<Record<string, string | null>>({})
+  const [mcpToolsLoadingThreadId, setMcpToolsLoadingThreadId] = useState<string | null>(null)
   const [loading, setLoading] = useState({
     scene: false,
     renders: false,
@@ -151,13 +157,74 @@ function App() {
     }
   }, [settings.backendUrl])
 
+  useEffect(() => {
+    let cancelled = false
+    if (!settings.backendUrl) {
+      setExamplePrompts([])
+      return () => {
+        cancelled = true
+      }
+    }
+    const fetchPrompts = async () => {
+      try {
+        const prompts = await getExamplePrompts(settings.backendUrl)
+        if (!cancelled) {
+          setExamplePrompts(prompts)
+        }
+      } catch {
+        if (!cancelled) {
+          setExamplePrompts([])
+        }
+      }
+    }
+    void fetchPrompts()
+    return () => {
+      cancelled = true
+    }
+  }, [settings.backendUrl])
+
+  useEffect(() => {
+    let cancelled = false
+    const threadId = activeThread?.id
+    if (!threadId || !settings.backendUrl || backendStatus !== 'online') {
+      return () => {
+        cancelled = true
+      }
+    }
+
+    setMcpToolsLoadingThreadId(threadId)
+    const fetchTools = async () => {
+      try {
+        const toolInfo = await getMcpTools(settings.backendUrl, threadId)
+        if (cancelled) return
+        setMcpToolsByThread((prev) => ({ ...prev, [threadId]: toolInfo.tools }))
+        setMcpToolsErrorByThread((prev) => ({ ...prev, [threadId]: null }))
+      } catch (error) {
+        if (cancelled) return
+        setMcpToolsByThread((prev) => ({ ...prev, [threadId]: [] }))
+        setMcpToolsErrorByThread((prev) => ({
+          ...prev,
+          [threadId]: error instanceof Error ? error.message : 'Failed to load MCP tools'
+        }))
+      } finally {
+        if (!cancelled) {
+          setMcpToolsLoadingThreadId((current) => (current === threadId ? null : current))
+        }
+      }
+    }
+    void fetchTools()
+    return () => {
+      cancelled = true
+    }
+  }, [activeThread?.id, settings.backendUrl, backendStatus])
+
   const updateThread = useCallback((threadId: string, updater: (thread: Thread) => Thread) => {
     setThreads((prev) => prev.map((thread) => (thread.id === threadId ? updater(thread) : thread)))
   }, [])
 
   const createThread = () => {
     const newThread: Thread = {
-      id: `thread-${Date.now()}`,
+      id: `thread-${crypto.randomUUID()}`,
       title: 'New chat',
       createdAt: Date.now(),
       messages: [],
@@ -190,6 +257,17 @@ function App() {
     requestedSceneRef.current.delete(threadId)
     loadedReferenceImagesRef.current.delete(threadId)
     delete sceneChangeRef.current[threadId]
+    setMcpToolsByThread((prev) => {
+      const next = { ...prev }
+      delete next[threadId]
+      return next
+    })
+    setMcpToolsErrorByThread((prev) => {
+      const next = { ...prev }
+      delete next[threadId]
+      return next
+    })
+    setMcpToolsLoadingThreadId((current) => (current === threadId ? null : current))
     if (activeThreadId === threadId) {
       const remaining = threads.filter((thread) => thread.id !== threadId)
       setActiveThreadId(remaining[0]?.id ?? null)
@@ -818,6 +896,11 @@ function App() {
               isStreaming={isStreaming}
               onSend={handleSend}
               onStop={handleStop}
+              backendUrl={settings.backendUrl}
+              examplePrompts={examplePrompts}
+              mcpTools={activeThread ? mcpToolsByThread[activeThread.id] ?? [] : []}
+              mcpToolsLoading={activeThread ? mcpToolsLoadingThreadId === activeThread.id : false}
+              mcpToolsError={activeThread ? mcpToolsErrorByThread[activeThread.id] ?? null : null}
             />
           </section>
         </div>

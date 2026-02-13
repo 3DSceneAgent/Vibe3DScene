@@ -67,6 +67,24 @@ class Settings(BaseSettings):
         description="Max seconds to allow a single headless scene/render request"
     )
 
+    # Session durability (headless mode)
+    session_blend_root: str = Field(
+        default="/tmp/scene_agent_sessions",
+        description="Root directory for per-session .blend persistence"
+    )
+    session_idle_timeout_seconds: int = Field(
+        default=600,
+        description="Seconds of inactivity before stopping headless session processes"
+    )
+    session_sweep_interval_seconds: int = Field(
+        default=30,
+        description="Seconds between idle-session sweep checks"
+    )
+    session_max_snapshots: int = Field(
+        default=20,
+        description="Maximum retained snapshots per session for undo"
+    )
+
     # Reference Image Uploads
     reference_image_max_count: int = Field(
         default=3,
@@ -89,6 +107,14 @@ class Settings(BaseSettings):
     retrieval_api_port: int = Field(
         default=8001,
         description="3D asset retrieval API port"
+    )
+    enable_retrieval: bool = Field(
+        default=False,
+        description="Enable retrieval MCP tools"
+    )
+    enable_infinigen: bool = Field(
+        default=False,
+        description="Enable Infinigen MCP tools"
     )
     
     # RAG Configuration

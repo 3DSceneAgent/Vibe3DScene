@@ -6,9 +6,11 @@ import asyncio
 import base64
 import json
 import os
+import re
 import tempfile
 import threading
 import time
+from pathlib import Path
 from typing import Dict, Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse, Response, FileResponse
@@ -60,10 +62,12 @@ app.add_middleware(
 # Image storage configuration
 # Mount static files for renders
 app.mount("/renders", StaticFiles(directory=str(RENDERS_DIR)), name="renders")
+EXAMPLE_PROMPTS_PATH = Path(__file__).resolve().parents[2] / "assets" / "example_prompts.md"
 
 # Global agent instance
 _agent_graph = None
 _agent_graphs_by_thread: Dict[str, Any] = {}
+_idle_sweeper_task: asyncio.Task | None = None
 
 # Blender addon connection (direct socket)
 _blender_connection = None
@@ -90,6 +94,7 @@ def get_blender_connection_for_thread(thread_id: str) -> BlenderConnection:
 
     manager = get_session_manager()
     session = manager.ensure(thread_id, "headless")
+    manager.ensure_session_storage(thread_id)
     host = os.getenv("BLENDER_HEADLESS_HOST", settings.blender_host)
     base_port = int(os.getenv("BLENDER_HEADLESS_BASE_PORT", "9876"))
     port_range = int(os.getenv("BLENDER_HEADLESS_PORT_RANGE", "16"))
@@ -105,7 +110,25 @@ def get_blender_connection_for_thread(thread_id: str) -> BlenderConnection:
     else:
         port = session.port
 
-    command, args = build_headless_command_args(thread_id, host, port)
+    command, args = build_headless_command_args(
+        thread_id,
+        host,
+        port,
+        blend_path=session.blend_path,
+    )
+    headless_env = os.environ.copy()
+    headless_env.update(
+        {
+            "SESSION_ID": thread_id,
+            "SESSION_STORAGE_DIR": session.storage_dir or "",
+            "SESSION_BLEND_PATH": session.blend_path or "",
+            "SESSION_SNAPSHOT_DIR": session.snapshot_dir or "",
+            "SESSION_MAX_SNAPSHOTS": str(session.max_snapshots),
+            "SESSION_IDLE_TIMEOUT_SECONDS": str(session.idle_timeout_seconds),
+            "SESSION_BLEND_ROOT": settings.session_blend_root,
+            "SESSION_PERSISTENCE_ENABLED": "1",
+        }
+    )
     print("Building headless command and args...")
     print(f"Command: {command}")
     print(f"Args: {args}")
@@ -119,7 +142,7 @@ def get_blender_connection_for_thread(thread_id: str) -> BlenderConnection:
             session.connection = connection
         if not connection.connect():
             print("Starting headless process...")
-            start_headless_process(session, command, args)
+            start_headless_process(session, command, args, env=headless_env)
             
             # 等待进程启动并监控
             deadline = time.time() + settings.blender_headless_startup_timeout
@@ -281,8 +304,22 @@ async def get_agent(thread_id: str | None = None):
     global _agent_graph, _agent_graphs_by_thread
     settings = get_settings()
     if settings.blender_mode == "headless" and thread_id:
+        manager = get_session_manager()
+        session = manager.ensure(thread_id, "headless")
+        manager.ensure_session_storage(thread_id)
+        restart_needed = False
+        if session.process is None or session.mcp_process is None:
+            restart_needed = True
+        else:
+            if session.process.poll() is not None or session.mcp_process.poll() is not None:
+                restart_needed = True
         if thread_id not in _agent_graphs_by_thread:
             _agent_graphs_by_thread[thread_id] = await create_agent_graph(session_id=thread_id)
+        elif restart_needed:
+            # Keep existing graph memory, only bring headless runtime back.
+            from scene_agent.tools.blender_tools import get_blender_tools as _ensure_tools
+
+            await _ensure_tools(session_id=thread_id)
         return _agent_graphs_by_thread[thread_id]
     if _agent_graph is None:
         _agent_graph = await create_agent_graph()
@@ -316,6 +353,18 @@ class ReferenceImageListResponse(BaseModel):
     images: list[ReferenceImageResponse]
 
 
+class ExamplePromptsResponse(BaseModel):
+    prompts: list[str]
+
+
+class MCPToolsResponse(BaseModel):
+    thread_id: str
+    loaded: bool
+    tool_count: int
+    tools: list[str]
+    blender_mode: str
+
+
 def serialize_reference_image(image: ReferenceImage) -> ReferenceImageResponse:
     return ReferenceImageResponse(
         id=image.id,
@@ -326,6 +375,40 @@ def serialize_reference_image(image: ReferenceImage) -> ReferenceImageResponse:
         sha256=image.sha256,
         uploaded_at=image.uploaded_at,
     )
+
+
+def parse_example_prompts(markdown_text: str) -> list[str]:
+    prompts: list[str] = []
+    numbered_line_pattern = re.compile(r"^\s*(?:[-*]\s*)?(\d+)[\.\)]\s+(.+?)\s*$")
+    for raw_line in markdown_text.splitlines():
+        match = numbered_line_pattern.match(raw_line)
+        if not match:
+            continue
+        prompt = match.group(2).strip()
+        if prompt:
+            prompts.append(prompt)
+    return prompts
+
+
+def load_example_prompts() -> list[str]:
+    with EXAMPLE_PROMPTS_PATH.open("r", encoding="utf-8") as handle:
+        content = handle.read()
+    prompts = parse_example_prompts(content)
+    if not prompts:
+        raise ValueError("No prompts found in assets/example_prompts.md")
+    return prompts
+
+
+def extract_available_tool_names(agent: Any) -> list[str]:
+    raw_names = getattr(agent, "_available_tool_names", [])
+    if not isinstance(raw_names, list):
+        return []
+    valid_names = [
+        name
+        for name in raw_names
+        if isinstance(name, str) and name
+    ]
+    return sorted(set(valid_names))
 
 
 def build_headless_diagnostics(
@@ -350,12 +433,50 @@ def build_headless_diagnostics(
     return payload
 
 
+async def _idle_session_sweeper() -> None:
+    while True:
+        settings = get_settings()
+        interval = max(1, settings.session_sweep_interval_seconds)
+        await asyncio.sleep(interval)
+        manager = get_session_manager()
+        idle_sessions = manager.get_idle_sessions()
+        for session in idle_sessions:
+            stopped, persisted = await asyncio.to_thread(
+                manager.shutdown_if_idle,
+                session.session_id,
+            )
+            if not stopped:
+                continue
+            log_event(
+                "info",
+                "headless_session_idle_stopped",
+                {
+                    "thread_id": session.session_id,
+                    "session_id": session.session_id,
+                    "blend_path": session.blend_path,
+                    "persisted": persisted,
+                    "idle_timeout_seconds": session.idle_timeout_seconds,
+                },
+            )
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize agent on startup"""
+    global _idle_sweeper_task
     try:
         settings = get_settings()
         if settings.blender_mode == "headless":
+            if _idle_sweeper_task is None or _idle_sweeper_task.done():
+                _idle_sweeper_task = asyncio.create_task(_idle_session_sweeper())
+                log_event(
+                    "info",
+                    "headless_idle_sweeper_started",
+                    {
+                        "interval_seconds": max(1, settings.session_sweep_interval_seconds),
+                        "idle_timeout_seconds": settings.session_idle_timeout_seconds,
+                    },
+                )
             log_event("info", "startup_skip_agent_init", {"mode": settings.blender_mode})
             return
         await get_agent()
@@ -367,8 +488,25 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Ensure headless processes are cleaned up on shutdown."""
+    global _idle_sweeper_task
     try:
-        get_session_manager().shutdown_all()
+        if _idle_sweeper_task is not None:
+            _idle_sweeper_task.cancel()
+            try:
+                await _idle_sweeper_task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                _idle_sweeper_task = None
+
+        manager = get_session_manager()
+        for session in manager.list_sessions():
+            if session.mode == "headless":
+                try:
+                    manager.persist_session_blend(session.session_id)
+                except Exception:
+                    pass
+        manager.shutdown_all()
     except Exception as e:
         log_event("error", "shutdown_cleanup_failed", {"error": str(e)})
 
@@ -387,6 +525,8 @@ async def root():
             "scene_renders": "GET /scene/{thread_id}/renders",
             "scene_gltf": "GET /scene/{thread_id}/gltf",
             "reference_images": "GET/POST /threads/{thread_id}/reference-images",
+            "example_prompts": "GET /example-prompts",
+            "mcp_tools": "GET /threads/{thread_id}/mcp-tools",
             "todos": "GET /todos/{thread_id}",
             "threads": "GET /threads",
             "websocket": "WS /ws"
@@ -403,6 +543,38 @@ async def healthcheck():
         "timestamp": time.time(),
         "blender_mode": settings.blender_mode,
     }
+
+
+@app.get("/example-prompts", response_model=ExamplePromptsResponse)
+async def get_example_prompts():
+    try:
+        prompts = load_example_prompts()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="assets/example_prompts.md not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return ExamplePromptsResponse(prompts=prompts)
+
+
+@app.get("/threads/{thread_id}/mcp-tools", response_model=MCPToolsResponse)
+async def get_mcp_tools(thread_id: str):
+    settings = get_settings()
+    try:
+        agent = await get_agent(thread_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to load MCP tools for thread '{thread_id}': {exc}",
+        ) from exc
+
+    tools = extract_available_tool_names(agent)
+    return MCPToolsResponse(
+        thread_id=thread_id,
+        loaded=len(tools) > 0,
+        tool_count=len(tools),
+        tools=tools,
+        blender_mode=settings.blender_mode,
+    )
 
 
 @app.post("/chat", response_model=ChatResponse)

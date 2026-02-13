@@ -21,11 +21,14 @@ from mcp_server.tools.asset_tools import (
     search_sketchfab_models,
 )
 from mcp_server.tools.core_blender_tools import (
+    camera_act,
+    camera_observe,
     create_camera_from_objects,
     create_camera_from_params,
     download_polyhaven_asset,
     execute_blender_code,
     get_object_info,
+    get_session_persistence_status,
     get_scene_info,
     get_viewport_screenshot,
     import_glb_model,
@@ -33,6 +36,7 @@ from mcp_server.tools.core_blender_tools import (
     render_from_objects,
     search_polyhaven_assets,
     set_texture,
+    undo_last_snapshot,
 )
 
 _tools_registered = False
@@ -44,21 +48,36 @@ def register_mcp_tools(mcp, logger) -> list[str]:
     if _tools_registered:
         return _enabled_tool_names
 
-    service_status = runtime.probe_conditional_services(logger)
     mode_name = runtime.get_blender_mode() or "<unset>"
     enable_hunyuan = runtime.is_hunyuan_tool_enabled()
     enable_rodin = runtime.is_rodin_tool_enabled()
     enable_trellis2 = runtime.is_trellis2_tool_enabled()
+    enable_retrieval = runtime.is_retrieval_tool_enabled()
+    enable_infinigen = runtime.is_infinigen_tool_enabled()
     enable_sketchfab = runtime.is_sketchfab_tool_enabled()
+
+    if enable_hunyuan and enable_trellis2:
+        raise RuntimeError(
+            "Invalid tool configuration: ENABLE_HUNYUAN and ENABLE_TRELLIS2 cannot both be enabled."
+        )
+    if enable_retrieval and enable_sketchfab:
+        raise RuntimeError(
+            "Invalid tool configuration: ENABLE_RETRIEVAL and ENABLE_SKETCHFAB cannot both be enabled."
+        )
+
+    service_status = runtime.probe_conditional_services(logger)
     logger.info(
         (
             "Tool-gating context: BLENDER_MODE=%s ENABLE_HUNYUAN=%s "
-            "ENABLE_RODIN=%s ENABLE_TRELLIS2=%s ENABLE_SKETCHFAB=%s"
+            "ENABLE_RODIN=%s ENABLE_TRELLIS2=%s ENABLE_RETRIEVAL=%s "
+            "ENABLE_INFINIGEN=%s ENABLE_SKETCHFAB=%s"
         ),
         mode_name,
         enable_hunyuan,
         enable_rodin,
         enable_trellis2,
+        enable_retrieval,
+        enable_infinigen,
         enable_sketchfab,
     )
 
@@ -73,8 +92,18 @@ def register_mcp_tools(mcp, logger) -> list[str]:
         (download_polyhaven_asset, None, None, None),
         (set_texture, None, None, None),
         (import_glb_model, None, None, None),
-        (get_infinigen_available_assets, "pcg_integrator", None, None),
-        (generate_infinigen_assets, "pcg_integrator", None, None),
+        (
+            get_infinigen_available_assets,
+            "pcg_integrator",
+            runtime.is_infinigen_tool_enabled,
+            "requires ENABLE_INFINIGEN=true",
+        ),
+        (
+            generate_infinigen_assets,
+            "pcg_integrator",
+            runtime.is_infinigen_tool_enabled,
+            "requires ENABLE_INFINIGEN=true",
+        ),
         (
             generate_trellis2_model,
             "trellis2",
@@ -141,12 +170,26 @@ def register_mcp_tools(mcp, logger) -> list[str]:
             runtime.is_hunyuan_tool_enabled,
             "requires BLENDER_MODE=headless and ENABLE_HUNYUAN=true",
         ),
-        (search_3d_assets_by_text, "retrieval", None, None),
-        (import_retrieved_asset, None, None, None),
+        (
+            search_3d_assets_by_text,
+            "retrieval",
+            runtime.is_retrieval_tool_enabled,
+            "requires ENABLE_RETRIEVAL=true",
+        ),
+        (
+            import_retrieved_asset,
+            "retrieval",
+            runtime.is_retrieval_tool_enabled,
+            "requires ENABLE_RETRIEVAL=true",
+        ),
         (create_camera_from_objects, None, None, None),
         (create_camera_from_params, None, None, None),
         (render_from_objects, None, None, None),
         (render_from_camera, None, None, None),
+        (camera_observe, None, None, None),
+        (camera_act, None, None, None),
+        (undo_last_snapshot, None, None, None),
+        (get_session_persistence_status, None, None, None),
     ]
 
     enabled: list[str] = []
