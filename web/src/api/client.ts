@@ -1,9 +1,21 @@
-import type { McpToolsInfo, ReferenceImage, RenderImage, SceneInfo, StreamEvent, TodoItem } from './types'
+import type {
+  McpToolsInfo,
+  ReferenceImage,
+  RenderImage,
+  SceneInfo,
+  StreamEvent,
+  TodoItem,
+  VlmModelsInfo,
+  VlmProviderOption,
+  ThreadVlmSelection
+} from './types'
 
 type StreamChatArgs = {
   baseUrl: string
   message: string
   threadId: string
+  vlmProvider?: string
+  vlmModel?: string
   onEvent: (event: StreamEvent) => void
   signal?: AbortSignal
 }
@@ -12,13 +24,22 @@ export async function streamChat({
   baseUrl,
   message,
   threadId,
+  vlmProvider,
+  vlmModel,
   onEvent,
   signal
 }: StreamChatArgs) {
+  const payload: Record<string, string> = { message, thread_id: threadId }
+  if (vlmProvider) {
+    payload.vlm_provider = vlmProvider
+  }
+  if (vlmModel) {
+    payload.vlm_model = vlmModel
+  }
   const response = await fetch(`${baseUrl}/chat/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, thread_id: threadId }),
+    body: JSON.stringify(payload),
     signal
   })
 
@@ -184,8 +205,12 @@ export async function getExamplePrompts(baseUrl: string): Promise<string[]> {
   return Array.isArray(data.prompts) ? data.prompts : []
 }
 
-export async function getMcpTools(baseUrl: string, threadId: string): Promise<McpToolsInfo> {
-  const response = await fetch(`${baseUrl}/threads/${threadId}/mcp-tools`)
+export async function getMcpTools(
+  baseUrl: string,
+  threadId: string,
+  signal?: AbortSignal
+): Promise<McpToolsInfo> {
+  const response = await fetch(`${baseUrl}/threads/${threadId}/mcp-tools`, { signal })
   if (!response.ok) {
     throw new Error(`Failed to load MCP tools (${response.status})`)
   }
@@ -196,5 +221,73 @@ export async function getMcpTools(baseUrl: string, threadId: string): Promise<Mc
     tool_count: typeof data.tool_count === 'number' ? data.tool_count : 0,
     tools: Array.isArray(data.tools) ? data.tools.filter((item): item is string => typeof item === 'string') : [],
     blender_mode: typeof data.blender_mode === 'string' ? data.blender_mode : 'unknown'
+  }
+}
+
+export async function getVlmModels(
+  baseUrl: string,
+  threadId?: string,
+  signal?: AbortSignal
+): Promise<VlmModelsInfo> {
+  const query = threadId ? `?thread_id=${encodeURIComponent(threadId)}` : ''
+  const response = await fetch(`${baseUrl}/vlm/models${query}`, { signal })
+  if (!response.ok) {
+    throw new Error(`Failed to load VLM models (${response.status})`)
+  }
+  const data = (await response.json()) as Partial<VlmModelsInfo>
+  const providers = Array.isArray(data.providers)
+    ? data.providers
+        .map((item): VlmProviderOption | null => {
+          if (!item || typeof item !== 'object') return null
+          const provider = typeof item.provider === 'string' ? item.provider : ''
+          const display_name = typeof item.display_name === 'string' ? item.display_name : provider
+          const default_model = typeof item.default_model === 'string' ? item.default_model : ''
+          const models = Array.isArray(item.models)
+            ? item.models.filter((model): model is string => typeof model === 'string')
+            : []
+          if (!provider || !default_model) return null
+          return {
+            provider,
+            display_name,
+            default_model,
+            models,
+            configured: Boolean(item.configured)
+          }
+        })
+        .filter((item): item is VlmProviderOption => item !== null)
+    : []
+
+  const rawSelection = data.thread_selection
+  let threadSelection: ThreadVlmSelection | undefined
+  if (rawSelection && typeof rawSelection === 'object') {
+    const selectionProvider = typeof rawSelection.provider === 'string' ? rawSelection.provider : ''
+    const selectionModel = typeof rawSelection.model === 'string' ? rawSelection.model : ''
+    const selectionThreadId = typeof rawSelection.thread_id === 'string' ? rawSelection.thread_id : threadId ?? ''
+    if (selectionProvider && selectionModel && selectionThreadId) {
+      threadSelection = {
+        thread_id: selectionThreadId,
+        provider: selectionProvider,
+        model: selectionModel,
+        locked: Boolean(rawSelection.locked)
+      }
+    }
+  }
+
+  const defaultProvider =
+    typeof data.default_provider === 'string'
+      ? data.default_provider
+      : providers[0]?.provider ?? 'openai'
+  const defaultModel =
+    typeof data.default_model === 'string'
+      ? data.default_model
+      : providers.find((item) => item.provider === defaultProvider)?.default_model ??
+        providers[0]?.default_model ??
+        ''
+
+  return {
+    providers,
+    default_provider: defaultProvider,
+    default_model: defaultModel,
+    thread_selection: threadSelection
   }
 }

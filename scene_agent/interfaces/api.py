@@ -72,6 +72,194 @@ _idle_sweeper_task: asyncio.Task | None = None
 # Blender addon connection (direct socket)
 _blender_connection = None
 _blender_lock = threading.Lock()
+_thread_vlm_lock = threading.Lock()
+_thread_vlm_configs: Dict[str, Dict[str, Any]] = {}
+_SUPPORTED_VLM_PROVIDERS = ("openai", "anthropic", "gemini")
+_VLM_PROVIDER_DISPLAY_NAMES = {
+    "openai": "OpenAI",
+    "anthropic": "Anthropic",
+    "gemini": "Gemini",
+}
+
+
+def _normalize_optional(value: str | None, *, lower: bool = False) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    return normalized.lower() if lower else normalized
+
+
+def _build_vlm_provider_catalog() -> list[Dict[str, Any]]:
+    settings = get_settings()
+    providers: list[Dict[str, Any]] = []
+    for provider in _SUPPORTED_VLM_PROVIDERS:
+        models = settings.get_vlm_provider_models(provider)
+        default_model = settings.get_vlm_default_model(provider)
+        if default_model not in models:
+            models = [default_model, *models]
+        providers.append(
+            {
+                "provider": provider,
+                "display_name": _VLM_PROVIDER_DISPLAY_NAMES.get(provider, provider.title()),
+                "default_model": default_model,
+                "models": models,
+                "configured": bool(settings.get_vlm_api_key(provider)),
+            }
+        )
+    return providers
+
+
+def _resolve_vlm_selection(
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+) -> Dict[str, str]:
+    settings = get_settings()
+    selected_provider = _normalize_optional(provider, lower=True) or settings.vlm_provider
+    if selected_provider not in _SUPPORTED_VLM_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported VLM provider '{selected_provider}'. "
+                f"Supported providers: {', '.join(_SUPPORTED_VLM_PROVIDERS)}."
+            ),
+        )
+
+    available_models = settings.get_vlm_provider_models(selected_provider)
+    default_model = settings.get_vlm_default_model(selected_provider)
+    if default_model not in available_models:
+        available_models = [default_model, *available_models]
+
+    selected_model = _normalize_optional(model) or default_model
+    if selected_model not in available_models:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported model '{selected_model}' for provider '{selected_provider}'. "
+                f"Available models: {', '.join(available_models)}."
+            ),
+        )
+
+    selected_api_key = settings.get_vlm_api_key(selected_provider)
+    if not selected_api_key:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No API key configured for provider '{selected_provider}'. "
+                f"Set {selected_provider.upper()}_API_KEY or VLM_API_KEY."
+            ),
+        )
+
+    return {
+        "provider": selected_provider,
+        "model": selected_model,
+        "api_key": selected_api_key,
+    }
+
+
+def _ensure_thread_vlm_config(thread_id: str) -> Dict[str, Any]:
+    with _thread_vlm_lock:
+        existing = _thread_vlm_configs.get(thread_id)
+    if existing is None:
+        resolved = _resolve_vlm_selection()
+        with _thread_vlm_lock:
+            current = _thread_vlm_configs.get(thread_id)
+            if current is None:
+                current = {
+                    "provider": resolved["provider"],
+                    "model": resolved["model"],
+                }
+                _thread_vlm_configs[thread_id] = current
+            existing = current
+    return {
+        "provider": str(existing["provider"]),
+        "model": str(existing["model"]),
+        "locked": bool(existing.get("locked", False)),
+    }
+
+
+def _resolve_thread_vlm_for_chat(
+    thread_id: str,
+    requested_provider: str | None,
+    requested_model: str | None,
+) -> Dict[str, str]:
+    normalized_provider = _normalize_optional(requested_provider, lower=True)
+    normalized_model = _normalize_optional(requested_model)
+    state = _ensure_thread_vlm_config(thread_id)
+    current_provider = state["provider"]
+    current_model = state["model"]
+
+    target_provider = normalized_provider or current_provider
+    if normalized_model:
+        target_model = normalized_model
+    elif normalized_provider and normalized_provider != current_provider:
+        target_model = None
+    else:
+        target_model = current_model
+
+    resolved = _resolve_vlm_selection(provider=target_provider, model=target_model)
+    with _thread_vlm_lock:
+        current = _thread_vlm_configs.get(thread_id)
+        if current is None:
+            current = {
+                "provider": resolved["provider"],
+                "model": resolved["model"],
+            }
+            _thread_vlm_configs[thread_id] = current
+        else:
+            current["provider"] = resolved["provider"]
+            current["model"] = resolved["model"]
+    return resolved
+
+
+def _resolve_thread_vlm_for_agent(thread_id: str) -> Dict[str, str]:
+    state = _ensure_thread_vlm_config(thread_id)
+    return _resolve_vlm_selection(provider=state["provider"], model=state["model"])
+
+
+async def _migrate_agent_state_if_possible(
+    *,
+    thread_id: str,
+    from_graph: Any,
+    to_graph: Any,
+) -> None:
+    if from_graph is to_graph:
+        return
+    config = {"configurable": {"thread_id": thread_id}}
+    try:
+        snapshot = await from_graph.aget_state(config)
+    except Exception as exc:
+        log_event(
+            "warning",
+            "vlm_switch_state_snapshot_failed",
+            {"thread_id": thread_id, "error": str(exc)},
+        )
+        return
+    values = getattr(snapshot, "values", None)
+    if not isinstance(values, dict) or len(values) == 0:
+        return
+    await to_graph.aupdate_state(config, values)
+
+
+async def _create_agent_graph_for_runtime(
+    *,
+    session_id: str | None,
+    provider: str,
+    model: str,
+    api_key: str,
+):
+    try:
+        return await create_agent_graph(
+            session_id=session_id,
+            provider_name=provider,
+            model=model,
+            api_key=api_key,
+        )
+    except TypeError:
+        # Backward compatibility for monkeypatched test doubles that accept only session_id.
+        return await create_agent_graph(session_id=session_id)
 
 
 def get_blender_connection() -> BlenderConnection:
@@ -303,26 +491,63 @@ async def get_agent(thread_id: str | None = None):
     """Get or create the agent graph (singleton or per-thread in headless mode)."""
     global _agent_graph, _agent_graphs_by_thread
     settings = get_settings()
-    if settings.blender_mode == "headless" and thread_id:
-        manager = get_session_manager()
-        session = manager.ensure(thread_id, "headless")
-        manager.ensure_session_storage(thread_id)
+    if thread_id:
+        vlm_runtime = _resolve_thread_vlm_for_agent(thread_id)
         restart_needed = False
-        if session.process is None or session.mcp_process is None:
-            restart_needed = True
-        else:
-            if session.process.poll() is not None or session.mcp_process.poll() is not None:
+        if settings.blender_mode == "headless":
+            manager = get_session_manager()
+            session = manager.ensure(thread_id, "headless")
+            manager.ensure_session_storage(thread_id)
+            if session.process is None or session.mcp_process is None:
                 restart_needed = True
-        if thread_id not in _agent_graphs_by_thread:
-            _agent_graphs_by_thread[thread_id] = await create_agent_graph(session_id=thread_id)
+            else:
+                if session.process.poll() is not None or session.mcp_process.poll() is not None:
+                    restart_needed = True
+
+        graph = _agent_graphs_by_thread.get(thread_id)
+        graph_provider = getattr(graph, "_vlm_provider", None) if graph is not None else None
+        graph_model = getattr(graph, "_vlm_model", None) if graph is not None else None
+        has_vlm_metadata = graph_provider is not None and graph_model is not None
+        graph_mismatch = (
+            graph is None
+            or (
+                has_vlm_metadata
+                and (
+                    graph_provider != vlm_runtime["provider"]
+                    or graph_model != vlm_runtime["model"]
+                )
+            )
+        )
+        if graph_mismatch:
+            previous_graph = graph
+            next_graph = await _create_agent_graph_for_runtime(
+                session_id=thread_id,
+                provider=vlm_runtime["provider"],
+                model=vlm_runtime["model"],
+                api_key=vlm_runtime["api_key"],
+            )
+            if previous_graph is not None:
+                await _migrate_agent_state_if_possible(
+                    thread_id=thread_id,
+                    from_graph=previous_graph,
+                    to_graph=next_graph,
+                )
+            _agent_graphs_by_thread[thread_id] = next_graph
         elif restart_needed:
             # Keep existing graph memory, only bring headless runtime back.
             from scene_agent.tools.blender_tools import get_blender_tools as _ensure_tools
 
             await _ensure_tools(session_id=thread_id)
         return _agent_graphs_by_thread[thread_id]
+
     if _agent_graph is None:
-        _agent_graph = await create_agent_graph()
+        runtime = _resolve_vlm_selection()
+        _agent_graph = await _create_agent_graph_for_runtime(
+            session_id=None,
+            provider=runtime["provider"],
+            model=runtime["model"],
+            api_key=runtime["api_key"],
+        )
     return _agent_graph
 
 
@@ -330,6 +555,8 @@ async def get_agent(thread_id: str | None = None):
 class ChatRequest(BaseModel):
     message: str
     thread_id: str = "default"
+    vlm_provider: str | None = None
+    vlm_model: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -363,6 +590,28 @@ class MCPToolsResponse(BaseModel):
     tool_count: int
     tools: list[str]
     blender_mode: str
+
+
+class VLMProviderOption(BaseModel):
+    provider: str
+    display_name: str
+    default_model: str
+    models: list[str]
+    configured: bool
+
+
+class ThreadVLMSelectionResponse(BaseModel):
+    thread_id: str
+    provider: str
+    model: str
+    locked: bool
+
+
+class VLMModelsResponse(BaseModel):
+    providers: list[VLMProviderOption]
+    default_provider: str
+    default_model: str
+    thread_selection: ThreadVLMSelectionResponse | None = None
 
 
 def serialize_reference_image(image: ReferenceImage) -> ReferenceImageResponse:
@@ -507,6 +756,9 @@ async def shutdown_event():
                 except Exception:
                     pass
         manager.shutdown_all()
+        _agent_graphs_by_thread.clear()
+        with _thread_vlm_lock:
+            _thread_vlm_configs.clear()
     except Exception as e:
         log_event("error", "shutdown_cleanup_failed", {"error": str(e)})
 
@@ -526,6 +778,7 @@ async def root():
             "scene_gltf": "GET /scene/{thread_id}/gltf",
             "reference_images": "GET/POST /threads/{thread_id}/reference-images",
             "example_prompts": "GET /example-prompts",
+            "vlm_models": "GET /vlm/models",
             "mcp_tools": "GET /threads/{thread_id}/mcp-tools",
             "todos": "GET /todos/{thread_id}",
             "threads": "GET /threads",
@@ -554,6 +807,27 @@ async def get_example_prompts():
     except ValueError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return ExamplePromptsResponse(prompts=prompts)
+
+
+@app.get("/vlm/models", response_model=VLMModelsResponse)
+async def get_vlm_models(thread_id: str | None = None):
+    settings = get_settings()
+    providers = _build_vlm_provider_catalog()
+    thread_selection: ThreadVLMSelectionResponse | None = None
+    if thread_id:
+        state = _ensure_thread_vlm_config(thread_id)
+        thread_selection = ThreadVLMSelectionResponse(
+            thread_id=thread_id,
+            provider=state["provider"],
+            model=state["model"],
+            locked=False,
+        )
+    return VLMModelsResponse(
+        providers=[VLMProviderOption(**provider) for provider in providers],
+        default_provider=settings.vlm_provider,
+        default_model=settings.get_vlm_default_model(settings.vlm_provider),
+        thread_selection=thread_selection,
+    )
 
 
 @app.get("/threads/{thread_id}/mcp-tools", response_model=MCPToolsResponse)
@@ -589,6 +863,11 @@ async def chat(request: ChatRequest):
         ChatResponse with agent's response and todos
     """
     try:
+        _resolve_thread_vlm_for_chat(
+            request.thread_id,
+            request.vlm_provider,
+            request.vlm_model,
+        )
         agent = await get_agent(request.thread_id)
         config = {"configurable": {"thread_id": request.thread_id}}
         
@@ -607,7 +886,9 @@ async def chat(request: ChatRequest):
             thread_id=request.thread_id,
             todos=result.get("todos", [])
         )
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -637,6 +918,11 @@ async def chat_stream(request: ChatRequest):
         scene_has_change = False
         done_payload: dict[str, Any] | None = None
         try:
+            _resolve_thread_vlm_for_chat(
+                request.thread_id,
+                request.vlm_provider,
+                request.vlm_model,
+            )
             agent = await get_agent(request.thread_id)
             config = {"configurable": {"thread_id": request.thread_id}}
             try:
@@ -730,6 +1016,11 @@ async def chat_stream(request: ChatRequest):
                             payload = {"messages": [serialized]}
                             yield f"data: {json.dumps(payload, default=str)}\n\n"
 
+            done_payload = {"event": "done", "scene_has_change": scene_has_change}
+        except HTTPException as e:
+            detail = e.detail if isinstance(e.detail, str) else json.dumps(e.detail, ensure_ascii=False)
+            error_event = {"error": detail, "status_code": e.status_code}
+            yield f"data: {json.dumps(error_event)}\n\n"
             done_payload = {"event": "done", "scene_has_change": scene_has_change}
         except Exception as e:
             log_event(

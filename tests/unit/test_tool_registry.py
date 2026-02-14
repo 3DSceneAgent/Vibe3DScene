@@ -24,10 +24,12 @@ def _configure_runtime(
     mode: str = "headless",
     hunyuan: bool = False,
     rodin: bool = False,
+    rodin_key: str = "",
     trellis2: bool = False,
     retrieval: bool = False,
     infinigen: bool = False,
     sketchfab: bool = False,
+    sketchfab_key: str = "",
 ) -> None:
     monkeypatch.setattr(tool_registry.runtime, "get_blender_mode", lambda: mode)
     monkeypatch.setattr(tool_registry.runtime, "is_hunyuan_tool_enabled", lambda: hunyuan)
@@ -36,6 +38,8 @@ def _configure_runtime(
     monkeypatch.setattr(tool_registry.runtime, "is_retrieval_tool_enabled", lambda: retrieval)
     monkeypatch.setattr(tool_registry.runtime, "is_infinigen_tool_enabled", lambda: infinigen)
     monkeypatch.setattr(tool_registry.runtime, "is_sketchfab_tool_enabled", lambda: sketchfab)
+    monkeypatch.setattr(tool_registry.runtime, "get_rodin_api_key", lambda: rodin_key)
+    monkeypatch.setattr(tool_registry.runtime, "get_sketchfab_api_key", lambda: sketchfab_key)
     monkeypatch.setattr(
         tool_registry.runtime,
         "probe_conditional_services",
@@ -53,10 +57,29 @@ def test_register_mcp_tools_fails_on_hunyuan_trellis2_conflict(monkeypatch):
 
 def test_register_mcp_tools_fails_on_retrieval_sketchfab_conflict(monkeypatch):
     _reset_registry_state(monkeypatch)
-    _configure_runtime(monkeypatch, retrieval=True, sketchfab=True)
+    _configure_runtime(
+        monkeypatch,
+        retrieval=True,
+        sketchfab=True,
+        sketchfab_key="configured",
+    )
 
     with pytest.raises(RuntimeError, match="ENABLE_RETRIEVAL and ENABLE_SKETCHFAB"):
         tool_registry.register_mcp_tools(FakeMCP(), logging.getLogger(__name__))
+
+
+def test_register_mcp_tools_skips_sketchfab_without_key(monkeypatch):
+    _reset_registry_state(monkeypatch)
+    _configure_runtime(monkeypatch, retrieval=True, sketchfab=True, sketchfab_key="")
+    mcp = FakeMCP()
+
+    enabled = tool_registry.register_mcp_tools(mcp, logging.getLogger(__name__))
+
+    assert "search_3d_assets_by_text" in enabled
+    assert "import_retrieved_asset" in enabled
+    assert "search_sketchfab_models" not in enabled
+    assert "get_sketchfab_model_preview" not in enabled
+    assert "download_sketchfab_model" not in enabled
 
 
 def test_register_mcp_tools_respects_retrieval_and_infinigen_switches(monkeypatch):

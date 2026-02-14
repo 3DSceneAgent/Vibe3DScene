@@ -9,16 +9,16 @@ import {
   uploadReferenceImages,
   listReferenceImages,
   getExamplePrompts,
-  getMcpTools
+  getMcpTools,
+  getVlmModels
 } from './api/client'
-import type { ReferenceImage, StreamEvent, TodoItem } from './api/types'
+import type { ReferenceImage, StreamEvent, TodoItem, VlmProviderOption } from './api/types'
 import { ChatTab } from './components/ChatTab'
 import { SceneTab } from './components/SceneTab'
 import { SettingsPanel } from './components/SettingsPanel'
-import { TopBar } from './components/TopBar'
 import { ThreadList } from './components/ThreadList'
 import { loadSettings, loadThreads, loadSettingsAsync, loadThreadsAsync, saveSettings, saveThreads } from './state/storage'
-import type { Message, Thread } from './state/types'
+import type { Message, SceneHierarchyNode, Thread } from './state/types'
 import {
   applyStreamingDeltaWithId,
   extractMessageContent,
@@ -32,6 +32,8 @@ import './App.css'
 
 function App() {
   const REQUEST_TIMEOUT_MS = 35000
+  const MCP_REQUEST_TIMEOUT_MS = 10000
+  const VLM_REQUEST_TIMEOUT_MS = 10000
   const [threads, setThreads] = useState<Thread[]>(() => loadThreads())
   const [activeThreadId, setActiveThreadId] = useState<string | null>(() => loadThreads()[0]?.id ?? null)
   const [settings, setSettings] = useState(() => loadSettings())
@@ -45,6 +47,11 @@ function App() {
   const [mcpToolsByThread, setMcpToolsByThread] = useState<Record<string, string[]>>({})
   const [mcpToolsErrorByThread, setMcpToolsErrorByThread] = useState<Record<string, string | null>>({})
   const [mcpToolsLoadingThreadId, setMcpToolsLoadingThreadId] = useState<string | null>(null)
+  const [vlmProviders, setVlmProviders] = useState<VlmProviderOption[]>([])
+  const [vlmDefaultProvider, setVlmDefaultProvider] = useState<string>('openai')
+  const [vlmDefaultModel, setVlmDefaultModel] = useState<string>('')
+  const [vlmErrorByThread, setVlmErrorByThread] = useState<Record<string, string | null>>({})
+  const [vlmLoadingThreadId, setVlmLoadingThreadId] = useState<string | null>(null)
   const [loading, setLoading] = useState({
     scene: false,
     renders: false,
@@ -71,6 +78,9 @@ function App() {
     () => threads.find((thread) => thread.id === activeThreadId) ?? null,
     [threads, activeThreadId]
   )
+  const updateThread = useCallback((threadId: string, updater: (thread: Thread) => Thread) => {
+    setThreads((prev) => prev.map((thread) => (thread.id === threadId ? updater(thread) : thread)))
+  }, [])
 
   // Load data from IndexedDB on mount
   useEffect(() => {
@@ -83,9 +93,7 @@ function App() {
       if (mounted) {
         if (loadedThreads.length > 0) {
           setThreads(loadedThreads)
-          if (!activeThreadId) {
-            setActiveThreadId(loadedThreads[0].id)
-          }
+          setActiveThreadId((current) => current ?? loadedThreads[0]?.id ?? null)
         }
         setSettings(loadedSettings)
       }
@@ -192,10 +200,12 @@ function App() {
       }
     }
 
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), MCP_REQUEST_TIMEOUT_MS)
     setMcpToolsLoadingThreadId(threadId)
     const fetchTools = async () => {
       try {
-        const toolInfo = await getMcpTools(settings.backendUrl, threadId)
+        const toolInfo = await getMcpTools(settings.backendUrl, threadId, controller.signal)
         if (cancelled) return
         setMcpToolsByThread((prev) => ({ ...prev, [threadId]: toolInfo.tools }))
         setMcpToolsErrorByThread((prev) => ({ ...prev, [threadId]: null }))
@@ -204,9 +214,15 @@ function App() {
         setMcpToolsByThread((prev) => ({ ...prev, [threadId]: [] }))
         setMcpToolsErrorByThread((prev) => ({
           ...prev,
-          [threadId]: error instanceof Error ? error.message : 'Failed to load MCP tools'
+          [threadId]:
+            error instanceof DOMException && error.name === 'AbortError'
+              ? 'Timed out while loading MCP tools'
+              : error instanceof Error
+                ? error.message
+                : 'Failed to load MCP tools'
         }))
       } finally {
+        window.clearTimeout(timeoutId)
         if (!cancelled) {
           setMcpToolsLoadingThreadId((current) => (current === threadId ? null : current))
         }
@@ -215,23 +231,97 @@ function App() {
     void fetchTools()
     return () => {
       cancelled = true
+      controller.abort()
+      window.clearTimeout(timeoutId)
     }
-  }, [activeThread?.id, settings.backendUrl, backendStatus])
+  }, [activeThread?.id, settings.backendUrl, backendStatus, MCP_REQUEST_TIMEOUT_MS])
 
-  const updateThread = useCallback((threadId: string, updater: (thread: Thread) => Thread) => {
-    setThreads((prev) => prev.map((thread) => (thread.id === threadId ? updater(thread) : thread)))
-  }, [])
+  useEffect(() => {
+    let cancelled = false
+    const threadId = activeThread?.id
+    if (!threadId || !settings.backendUrl || backendStatus !== 'online') {
+      return () => {
+        cancelled = true
+      }
+    }
+
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), VLM_REQUEST_TIMEOUT_MS)
+    setVlmLoadingThreadId(threadId)
+    const fetchVlmConfig = async () => {
+      try {
+        const modelInfo = await getVlmModels(settings.backendUrl, threadId, controller.signal)
+        if (cancelled) return
+        setVlmProviders(modelInfo.providers)
+        setVlmDefaultProvider(modelInfo.default_provider)
+        setVlmDefaultModel(modelInfo.default_model)
+        setVlmErrorByThread((prev) => ({ ...prev, [threadId]: null }))
+        updateThread(threadId, (thread) => {
+          const fallbackProvider =
+            modelInfo.default_provider || modelInfo.providers[0]?.provider || thread.vlmProvider || 'openai'
+          const preferredProvider = thread.vlmProvider || modelInfo.thread_selection?.provider || fallbackProvider
+          const selectedProvider =
+            modelInfo.providers.find((item) => item.provider === preferredProvider)?.provider || fallbackProvider
+          const providerOption = modelInfo.providers.find((item) => item.provider === selectedProvider)
+          const providerModels = providerOption?.models ?? []
+          let nextModel =
+            thread.vlmModel ||
+            modelInfo.thread_selection?.model ||
+            providerOption?.default_model ||
+            modelInfo.default_model
+          if (!nextModel || (providerModels.length > 0 && !providerModels.includes(nextModel))) {
+            nextModel = providerOption?.default_model ?? providerModels[0] ?? nextModel
+          }
+          return {
+            ...thread,
+            vlmProvider: selectedProvider,
+            vlmModel: nextModel,
+            vlmLocked: false
+          }
+        })
+      } catch (error) {
+        if (cancelled) return
+        setVlmErrorByThread((prev) => ({
+          ...prev,
+          [threadId]:
+            error instanceof DOMException && error.name === 'AbortError'
+              ? 'Timed out while loading VLM models'
+              : error instanceof Error
+                ? error.message
+                : 'Failed to load VLM models'
+        }))
+      } finally {
+        window.clearTimeout(timeoutId)
+        if (!cancelled) {
+          setVlmLoadingThreadId((current) => (current === threadId ? null : current))
+        }
+      }
+    }
+    void fetchVlmConfig()
+    return () => {
+      cancelled = true
+      controller.abort()
+      window.clearTimeout(timeoutId)
+    }
+  }, [activeThread?.id, settings.backendUrl, backendStatus, updateThread, VLM_REQUEST_TIMEOUT_MS])
 
   const createThread = () => {
+    const initialProvider = vlmDefaultProvider || vlmProviders[0]?.provider
+    const initialProviderOption = vlmProviders.find((item) => item.provider === initialProvider)
+    const initialModel = initialProviderOption?.default_model || vlmDefaultModel
     const newThread: Thread = {
       id: `thread-${crypto.randomUUID()}`,
       title: 'New chat',
       createdAt: Date.now(),
       messages: [],
+      vlmProvider: initialProvider,
+      vlmModel: initialModel,
+      vlmLocked: false,
       todos: [],
       scene: null,
       renders: [],
       gltfUrl: null,
+      sceneHierarchy: [],
       sceneHasChange: false,
       referenceImages: []
     }
@@ -267,7 +357,13 @@ function App() {
       delete next[threadId]
       return next
     })
+    setVlmErrorByThread((prev) => {
+      const next = { ...prev }
+      delete next[threadId]
+      return next
+    })
     setMcpToolsLoadingThreadId((current) => (current === threadId ? null : current))
+    setVlmLoadingThreadId((current) => (current === threadId ? null : current))
     if (activeThreadId === threadId) {
       const remaining = threads.filter((thread) => thread.id !== threadId)
       setActiveThreadId(remaining[0]?.id ?? null)
@@ -292,9 +388,42 @@ function App() {
     return Array.from(map.values())
   }
 
-  const toggleSceneTab = useCallback(() => {
-    setSettings((prev) => ({ ...prev, sceneTabCollapsed: !prev.sceneTabCollapsed }))
-  }, [])
+  const handleVlmSelectionChange = useCallback(
+    (provider: string, model: string) => {
+      if (!activeThreadId) return
+      updateThread(activeThreadId, (thread) => {
+        const providerOption = vlmProviders.find(
+          (item) => item.provider === provider && item.configured
+        )
+        if (!providerOption) {
+          return thread
+        }
+        const allowedModels =
+          providerOption.models.length > 0
+            ? providerOption.models
+            : [providerOption.default_model]
+        if (!allowedModels.includes(model)) {
+          return thread
+        }
+        return {
+          ...thread,
+          vlmProvider: providerOption.provider,
+          vlmModel: model
+        }
+      })
+    },
+    [activeThreadId, updateThread, vlmProviders]
+  )
+
+  const handleSceneHierarchyChange = useCallback(
+    (threadId: string, hierarchy: SceneHierarchyNode[]) => {
+      updateThread(threadId, (thread) => ({
+        ...thread,
+        sceneHierarchy: hierarchy
+      }))
+    },
+    [updateThread]
+  )
 
   const handleStop = useCallback(() => {
     if (streamAbortRef.current) {
@@ -322,6 +451,17 @@ function App() {
       return false
     }
     const threadId = activeThread.id
+    const selectedProvider =
+      activeThread.vlmProvider || vlmDefaultProvider || vlmProviders[0]?.provider || undefined
+    const selectedProviderOption = selectedProvider
+      ? vlmProviders.find((item) => item.provider === selectedProvider)
+      : undefined
+    const selectedModel =
+      activeThread.vlmModel ||
+      selectedProviderOption?.default_model ||
+      vlmDefaultModel ||
+      vlmProviders[0]?.default_model ||
+      undefined
 
     if (files.length > 0) {
       if (!settings.backendUrl) {
@@ -399,6 +539,9 @@ function App() {
       return {
         ...thread,
         title,
+        vlmProvider: selectedProvider || thread.vlmProvider,
+        vlmModel: selectedModel || thread.vlmModel,
+        vlmLocked: false,
         messages: [...thread.messages, userMessage, assistantMessage]
       }
     })
@@ -606,6 +749,8 @@ function App() {
       baseUrl: settings.backendUrl,
       message: text,
       threadId,
+      vlmProvider: selectedProvider,
+      vlmModel: selectedModel,
       signal: abortController.signal,
       onEvent: handleStreamEvent
     })
@@ -745,10 +890,6 @@ function App() {
 
   const downloadGltf = useCallback(async () => {
     if (!activeThread) return
-    if (!activeThread.scene) {
-      window.alert('No scene available. Refresh the scene before downloading.')
-      return
-    }
     setLoading((prev) => ({ ...prev, download: true }))
     try {
       const blob = await getSceneGltf(settings.backendUrl, activeThread.id)
@@ -763,10 +904,6 @@ function App() {
 
   const downloadBlend = useCallback(async () => {
     if (!activeThread) return
-    if (!activeThread.scene) {
-      window.alert('No scene available. Refresh the scene before downloading.')
-      return
-    }
     setLoading((prev) => ({ ...prev, download: true }))
     try {
       const blob = await getSceneBlend(settings.backendUrl, activeThread.id)
@@ -787,6 +924,7 @@ function App() {
       refreshScene(threadId)
     }
   }, [
+    activeThread,
     activeThread?.id,
     activeThread?.scene,
     loading.scene,
@@ -800,7 +938,21 @@ function App() {
       loadedReferenceImagesRef.current.add(threadId)
       void refreshReferenceImages(threadId)
     }
-  }, [activeThread?.id, refreshReferenceImages])
+  }, [activeThread, activeThread?.id, refreshReferenceImages])
+
+  const statusLabel =
+    backendStatus === 'online'
+      ? 'Online'
+      : backendStatus === 'offline'
+        ? 'Offline'
+        : 'Checking'
+  const modeLabel =
+    backendMode === 'headless'
+      ? 'Headless'
+      : backendMode === 'local-client'
+        ? 'Local'
+        : null
+  const statusText = modeLabel ? `Server ${statusLabel} • ${modeLabel}` : `Server ${statusLabel}`
 
   return (
     <div className="app-shell">
@@ -830,6 +982,19 @@ function App() {
           onNew={createThread}
           collapsed={isSidebarCollapsed}
         />
+        <div className="sidebar-footer">
+          <div className={`sidebar-status-card ${isSidebarCollapsed ? 'compact' : ''}`} title={`Backend: ${settings.backendUrl}`}>
+            <span className={`status-dot ${backendStatus}`} />
+            {!isSidebarCollapsed && <span className="status-text">{statusText}</span>}
+          </div>
+          <button
+            className={`ghost-btn ${isSidebarCollapsed ? 'icon-btn' : 'full-width'}`}
+            onClick={() => setShowSettings(true)}
+            title={isSidebarCollapsed ? 'Settings' : undefined}
+          >
+            {isSidebarCollapsed ? 'Cfg' : 'Settings'}
+          </button>
+        </div>
       </aside>
 
       <main className="main">
@@ -847,62 +1012,70 @@ function App() {
           </div>
         )}
 
-        <TopBar
-          environment={environment}
-          onEnvironmentChange={setEnvironment}
-          onRefreshScene={refreshScene}
-          onFetchRenders={fetchRenders}
-          onLoadGltf={fetchGltf}
-          onDownloadGltf={downloadGltf}
-          onDownloadBlend={downloadBlend}
-          autoRefreshScene={settings.autoRefreshScene}
-          onAutoRefreshChange={(enabled) => setSettings((prev) => ({ ...prev, autoRefreshScene: enabled }))}
-          sceneCollapsed={settings.sceneTabCollapsed}
-          onSceneToggle={toggleSceneTab}
-          onOpenSettings={() => setShowSettings(true)}
-          isSceneLoading={loading.scene}
-          isRendersLoading={loading.renders}
-          isGltfLoading={loading.gltf}
-          isDownloadLoading={loading.download}
-          isDownloadDisabled={!activeThread?.scene}
-          canRunActions={Boolean(activeThread)}
-          backendStatus={backendStatus}
-          backendMode={backendMode}
-          backendUrl={settings.backendUrl}
-        />
-
-        <div className={`workspace ${settings.sceneTabCollapsed ? 'is-scene-collapsed' : ''}`}>
-          <section className="workspace-scene">
-            {activeThread ? (
-              <SceneTab
-                scene={activeThread.scene ?? null}
-                renders={activeThread.renders ?? []}
-                gltfUrl={activeThread.gltfUrl ?? null}
-                environment={environment}
-                loading={{
-                  scene: loading.scene,
-                  renders: loading.renders
-                }}
-                collapsed={settings.sceneTabCollapsed}
-                onToggleCollapse={toggleSceneTab}
-              />
-            ) : (
-              <div className="empty-state">Create a conversation to see scene info.</div>
-            )}
-          </section>
-          <section className="workspace-chat">
-            <ChatTab
-              thread={activeThread}
-              isStreaming={isStreaming}
-              onSend={handleSend}
-              onStop={handleStop}
-              backendUrl={settings.backendUrl}
-              examplePrompts={examplePrompts}
-              mcpTools={activeThread ? mcpToolsByThread[activeThread.id] ?? [] : []}
-              mcpToolsLoading={activeThread ? mcpToolsLoadingThreadId === activeThread.id : false}
-              mcpToolsError={activeThread ? mcpToolsErrorByThread[activeThread.id] ?? null : null}
-            />
-          </section>
+        <div className={`workspace ${activeThread ? '' : 'is-empty'}`}>
+          {activeThread ? (
+            <>
+              <section className="workspace-chat">
+                <ChatTab
+                  thread={activeThread}
+                  isStreaming={isStreaming}
+                  onSend={handleSend}
+                  onStop={handleStop}
+                  backendUrl={settings.backendUrl}
+                  examplePrompts={examplePrompts}
+                  mcpTools={mcpToolsByThread[activeThread.id] ?? []}
+                  mcpToolsLoading={mcpToolsLoadingThreadId === activeThread.id}
+                  mcpToolsError={mcpToolsErrorByThread[activeThread.id] ?? null}
+                  vlmProviders={vlmProviders}
+                  vlmProvider={activeThread.vlmProvider ?? vlmDefaultProvider}
+                  vlmModel={activeThread.vlmModel ?? vlmDefaultModel}
+                  vlmLoading={vlmLoadingThreadId === activeThread.id}
+                  vlmError={vlmErrorByThread[activeThread.id] ?? null}
+                  vlmLocked={Boolean(activeThread.vlmLocked)}
+                  onVlmSelectionChange={handleVlmSelectionChange}
+                />
+              </section>
+              <section className="workspace-scene">
+                <SceneTab
+                  threadId={activeThread.id}
+                  renders={activeThread.renders ?? []}
+                  gltfUrl={activeThread.gltfUrl ?? null}
+                  sceneHierarchy={activeThread.sceneHierarchy ?? []}
+                  environment={environment}
+                  autoFetch={settings.autoRefreshScene}
+                  onAutoFetchChange={(enabled) =>
+                    setSettings((prev) => ({ ...prev, autoRefreshScene: enabled }))
+                  }
+                  onEnvironmentChange={setEnvironment}
+                  onFetchRenders={() => void fetchRenders()}
+                  onFetchGltf={() => void fetchGltf()}
+                  onDownloadGltf={() => void downloadGltf()}
+                  onDownloadBlend={() => void downloadBlend()}
+                  onHierarchyChange={handleSceneHierarchyChange}
+                  loading={{
+                    scene: loading.scene,
+                    renders: loading.renders,
+                    gltf: loading.gltf,
+                    download: loading.download
+                  }}
+                  canRunActions={Boolean(activeThread)}
+                />
+              </section>
+            </>
+          ) : (
+            <section className="workspace-empty">
+              <div className="workspace-empty-card">
+                <div className="workspace-empty-badge">3D Scene Agent</div>
+                <div className="workspace-empty-title">Start Vibe Building 3D Scene</div>
+                <div className="workspace-empty-subtitle">
+                  Create a new chat from the left sidebar to begin.
+                </div>
+                <button className="primary-btn workspace-empty-cta" onClick={createThread}>
+                  New Chat
+                </button>
+              </div>
+            </section>
+          )}
         </div>
       </main>
     </div>

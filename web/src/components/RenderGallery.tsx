@@ -7,26 +7,19 @@ type RenderGalleryProps = {
 
 export function RenderGallery({ renders, isLoading }: RenderGalleryProps) {
   return (
-    <div className="panel">
+    <div className="scene-renders-panel">
       <div className="panel-header">
         <div className="panel-title">Camera Renders</div>
       </div>
       {renders.length === 0 && <div className="muted">No renders loaded yet.</div>}
-      <div
-        className="render-scroll"
-        onWheel={(event) => {
-          event.preventDefault()
-          event.stopPropagation()
-        }}
-      >
+      <div className="render-scroll">
         <div className="render-grid">
           {renders.map((render) => (
             <div key={render.camera_name} className="render-card">
               <div className="render-title">{render.camera_name}</div>
-              <img
-                src={`data:image/png;base64,${render.image_base64}`}
-                alt={`Render ${render.camera_name}`}
-              />
+              <div className="render-image-frame">
+                <img src={`data:image/png;base64,${render.image_base64}`} alt={`Render ${render.camera_name}`} />
+              </div>
             </div>
           ))}
         </div>

@@ -14,8 +14,7 @@ const MAX_MESSAGES_PER_THREAD = 100
 export const defaultSettings: Settings = {
   backendUrl: 'http://localhost:8000',
   theme: 'dark',
-  autoRefreshScene: false,
-  sceneTabCollapsed: false
+  autoRefreshScene: true
 }
 
 const legacyDarkThemes = new Set(['midnight', 'slate', 'warm'])
@@ -31,8 +30,14 @@ function sanitizeThreads(threads: Thread[]): Thread[] {
       messages,
       renders: [],
       gltfUrl: null,
+      sceneHierarchy: [],
       sceneHasChange: false,
-      referenceImages: thread.referenceImages?.map(({ previewUrl, ...image }) => image) ?? []
+      referenceImages:
+        thread.referenceImages?.map((image) => {
+          const sanitizedImage = { ...image }
+          delete sanitizedImage.previewUrl
+          return sanitizedImage
+        }) ?? []
     }
   })
 }
@@ -49,8 +54,8 @@ function loadThreadsFromLocalStorage(): Thread[] {
 }
 
 function saveThreadsToLocalStorage(threads: Thread[]): boolean {
+  const sanitized = sanitizeThreads(threads)
   try {
-    const sanitized = sanitizeThreads(threads)
     localStorage.setItem(THREADS_KEY, JSON.stringify(sanitized))
     return true
   } catch (error) {
@@ -126,7 +131,7 @@ function loadSettingsFromLocalStorage(): Settings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY)
     if (!raw) return defaultSettings
-    const parsed = JSON.parse(raw) as Settings
+    const parsed = JSON.parse(raw) as Partial<Settings> & { sceneTabCollapsed?: boolean }
     const nextTheme =
       parsed.theme && legacyDarkThemes.has(parsed.theme)
         ? 'dark'
@@ -134,8 +139,7 @@ function loadSettingsFromLocalStorage(): Settings {
     return {
       backendUrl: parsed.backendUrl || defaultSettings.backendUrl,
       theme: nextTheme,
-      autoRefreshScene: parsed.autoRefreshScene ?? defaultSettings.autoRefreshScene,
-      sceneTabCollapsed: parsed.sceneTabCollapsed ?? defaultSettings.sceneTabCollapsed
+      autoRefreshScene: parsed.autoRefreshScene ?? defaultSettings.autoRefreshScene
     }
   } catch {
     return defaultSettings

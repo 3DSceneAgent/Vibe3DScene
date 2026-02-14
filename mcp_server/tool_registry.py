@@ -10,10 +10,8 @@ from mcp_server.tools.asset_tools import (
     generate_hyper3d_model_via_text,
     generate_infinigen_assets,
     generate_trellis2_model,
-    get_hyper3d_status,
     get_infinigen_available_assets,
     get_sketchfab_model_preview,
-    get_sketchfab_status,
     import_generated_asset,
     import_retrieved_asset,
     poll_rodin_job_status,
@@ -23,8 +21,7 @@ from mcp_server.tools.asset_tools import (
 from mcp_server.tools.core_blender_tools import (
     camera_act,
     camera_observe,
-    create_camera_from_objects,
-    create_camera_from_params,
+    camera_set_pose,
     download_polyhaven_asset,
     execute_blender_code,
     get_object_info,
@@ -55,12 +52,20 @@ def register_mcp_tools(mcp, logger) -> list[str]:
     enable_retrieval = runtime.is_retrieval_tool_enabled()
     enable_infinigen = runtime.is_infinigen_tool_enabled()
     enable_sketchfab = runtime.is_sketchfab_tool_enabled()
+    has_rodin_key = bool(runtime.get_rodin_api_key())
+    has_sketchfab_key = bool(runtime.get_sketchfab_api_key())
+
+    def _is_rodin_fully_enabled() -> bool:
+        return runtime.is_rodin_tool_enabled() and bool(runtime.get_rodin_api_key())
+
+    def _is_sketchfab_fully_enabled() -> bool:
+        return runtime.is_sketchfab_tool_enabled() and bool(runtime.get_sketchfab_api_key())
 
     if enable_hunyuan and enable_trellis2:
         raise RuntimeError(
             "Invalid tool configuration: ENABLE_HUNYUAN and ENABLE_TRELLIS2 cannot both be enabled."
         )
-    if enable_retrieval and enable_sketchfab:
+    if enable_retrieval and _is_sketchfab_fully_enabled():
         raise RuntimeError(
             "Invalid tool configuration: ENABLE_RETRIEVAL and ENABLE_SKETCHFAB cannot both be enabled."
         )
@@ -70,7 +75,7 @@ def register_mcp_tools(mcp, logger) -> list[str]:
         (
             "Tool-gating context: BLENDER_MODE=%s ENABLE_HUNYUAN=%s "
             "ENABLE_RODIN=%s ENABLE_TRELLIS2=%s ENABLE_RETRIEVAL=%s "
-            "ENABLE_INFINIGEN=%s ENABLE_SKETCHFAB=%s"
+            "ENABLE_INFINIGEN=%s ENABLE_SKETCHFAB=%s RODIN_API_KEY_SET=%s SKETCHFAB_API_KEY_SET=%s"
         ),
         mode_name,
         enable_hunyuan,
@@ -79,6 +84,8 @@ def register_mcp_tools(mcp, logger) -> list[str]:
         enable_retrieval,
         enable_infinigen,
         enable_sketchfab,
+        has_rodin_key,
+        has_sketchfab_key,
     )
 
     tool_specs: list[
@@ -111,57 +118,45 @@ def register_mcp_tools(mcp, logger) -> list[str]:
             "requires BLENDER_MODE=headless and ENABLE_TRELLIS2=true",
         ),
         (
-            get_hyper3d_status,
-            None,
-            runtime.is_rodin_tool_enabled,
-            "requires BLENDER_MODE=local-client and ENABLE_RODIN=true",
-        ),
-        (
             generate_hyper3d_model_via_text,
             None,
-            runtime.is_rodin_tool_enabled,
-            "requires BLENDER_MODE=local-client and ENABLE_RODIN=true",
+            _is_rodin_fully_enabled,
+            "requires BLENDER_MODE=local-client and ENABLE_RODIN=true and RODIN_API_KEY configured",
         ),
         (
             generate_hyper3d_model_via_images,
             None,
-            runtime.is_rodin_tool_enabled,
-            "requires BLENDER_MODE=local-client and ENABLE_RODIN=true",
+            _is_rodin_fully_enabled,
+            "requires BLENDER_MODE=local-client and ENABLE_RODIN=true and RODIN_API_KEY configured",
         ),
         (
             poll_rodin_job_status,
             None,
-            runtime.is_rodin_tool_enabled,
-            "requires BLENDER_MODE=local-client and ENABLE_RODIN=true",
+            _is_rodin_fully_enabled,
+            "requires BLENDER_MODE=local-client and ENABLE_RODIN=true and RODIN_API_KEY configured",
         ),
         (
             import_generated_asset,
             None,
-            runtime.is_rodin_tool_enabled,
-            "requires BLENDER_MODE=local-client and ENABLE_RODIN=true",
-        ),
-        (
-            get_sketchfab_status,
-            None,
-            runtime.is_sketchfab_tool_enabled,
-            "requires ENABLE_SKETCHFAB=true and SKETCHFAB_API_KEY configured",
+            _is_rodin_fully_enabled,
+            "requires BLENDER_MODE=local-client and ENABLE_RODIN=true and RODIN_API_KEY configured",
         ),
         (
             search_sketchfab_models,
             None,
-            runtime.is_sketchfab_tool_enabled,
+            _is_sketchfab_fully_enabled,
             "requires ENABLE_SKETCHFAB=true and SKETCHFAB_API_KEY configured",
         ),
         (
             get_sketchfab_model_preview,
             None,
-            runtime.is_sketchfab_tool_enabled,
+            _is_sketchfab_fully_enabled,
             "requires ENABLE_SKETCHFAB=true and SKETCHFAB_API_KEY configured",
         ),
         (
             download_sketchfab_model,
             None,
-            runtime.is_sketchfab_tool_enabled,
+            _is_sketchfab_fully_enabled,
             "requires ENABLE_SKETCHFAB=true and SKETCHFAB_API_KEY configured",
         ),
         (
@@ -182,10 +177,9 @@ def register_mcp_tools(mcp, logger) -> list[str]:
             runtime.is_retrieval_tool_enabled,
             "requires ENABLE_RETRIEVAL=true",
         ),
-        (create_camera_from_objects, None, None, None),
-        (create_camera_from_params, None, None, None),
         (render_from_objects, None, None, None),
         (render_from_camera, None, None, None),
+        (camera_set_pose, None, None, None),
         (camera_observe, None, None, None),
         (camera_act, None, None, None),
         (undo_last_snapshot, None, None, None),

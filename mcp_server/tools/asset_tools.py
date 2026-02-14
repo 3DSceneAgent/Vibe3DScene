@@ -24,6 +24,8 @@ SKETCHFAB_API_BASE_URL = "https://api.sketchfab.com/v3"
 _SKETCHFAB_IMPORT_MARKER = "MCP_SKETCHFAB_IMPORT_RESULT::"
 _SKETCHFAB_MIN_SEARCH_COUNT = 1
 _SKETCHFAB_MAX_SEARCH_COUNT = 50
+RODIN_MAIN_SITE_API_BASE_URL = "https://hyperhuman.deemos.com/api/v2"
+RODIN_FAL_API_BASE_URL = "https://queue.fal.run/fal-ai/hyper3d"
 
 
 def _sketchfab_disabled_message() -> str:
@@ -46,6 +48,47 @@ def _get_sketchfab_api_key_or_error() -> tuple[Optional[str], Optional[str]]:
 
 def _sketchfab_headers(api_key: str) -> dict[str, str]:
     return {"Authorization": f"Token {api_key}"}
+
+
+def _rodin_disabled_message() -> str:
+    return (
+        "Rodin tools are disabled. They require BLENDER_MODE=local-client, "
+        "ENABLE_RODIN=true, and RODIN_API_KEY configured."
+    )
+
+
+def _get_rodin_mode_and_api_key_or_error() -> tuple[Optional[str], Optional[str], Optional[str]]:
+    if not runtime.is_rodin_tool_enabled():
+        return None, None, _rodin_disabled_message()
+
+    api_key = runtime.get_rodin_api_key()
+    if not api_key:
+        return runtime.get_rodin_mode(), None, (
+            "Rodin tools are enabled, but RODIN_API_KEY is not configured."
+        )
+
+    return runtime.get_rodin_mode(), api_key, None
+
+
+def _rodin_headers(api_key: str, mode: str, use_json: bool = False) -> dict[str, str]:
+    if mode == "FAL_AI":
+        headers = {"Authorization": f"Key {api_key}"}
+        if use_json:
+            headers["Content-Type"] = "application/json"
+        return headers
+    return {"Authorization": f"Bearer {api_key}"}
+
+
+def _format_rodin_submit_response(result: dict[str, Any]) -> str:
+    if result.get("submit_time"):
+        output: dict[str, Any] = {"task_uuid": result.get("uuid")}
+        jobs = result.get("jobs") or {}
+        if isinstance(jobs, dict) and jobs.get("subscription_key"):
+            output["subscription_key"] = jobs["subscription_key"]
+        if result.get("request_id"):
+            output["request_id"] = result["request_id"]
+        return json.dumps(output, indent=2)
+    return json.dumps(result, indent=2)
 
 
 def _safe_extract_zip(zip_path: Path, target_dir: Path) -> None:
@@ -362,79 +405,6 @@ def generate_trellis2_model(
         return f"Error generating TRELLIS2 model: {str(exc)}"
 
 
-def get_hyper3d_status(ctx: Context) -> str:
-    """Check whether Hyper3D Rodin is available through Blender addon."""
-    if not runtime.is_rodin_tool_enabled():
-        return (
-            "Hyper3D Rodin tools are disabled. "
-            "They require BLENDER_MODE=local-client and ENABLE_RODIN=true."
-        )
-    try:
-        blender = runtime.get_blender_connection(logger)
-        result = blender.send_command("get_hyper3d_status")
-        return result.get("message", json.dumps(result, indent=2))
-    except Exception as exc:
-        logger.error("Error checking Hyper3D status: %s", exc)
-        return f"Error checking Hyper3D status: {str(exc)}"
-
-
-
-def get_sketchfab_status(ctx: Context) -> str:
-    """Check whether Sketchfab integration is enabled and authenticated."""
-    switch_enabled = runtime.is_sketchfab_tool_enabled()
-    api_key = runtime.get_sketchfab_api_key()
-
-    status: dict[str, Any] = {
-        "enabled": False,
-        "switch_enabled": switch_enabled,
-        "api_key_configured": bool(api_key),
-    }
-
-    if not switch_enabled:
-        status["message"] = _sketchfab_disabled_message()
-        return json.dumps(status, indent=2)
-
-    if not api_key:
-        status["message"] = "Sketchfab is enabled, but SKETCHFAB_API_KEY is not configured."
-        return json.dumps(status, indent=2)
-
-    try:
-        response = requests.get(
-            f"{SKETCHFAB_API_BASE_URL}/me",
-            headers=_sketchfab_headers(api_key),
-            timeout=30,
-        )
-    except requests.exceptions.Timeout:
-        status["message"] = "Timeout while connecting to Sketchfab API."
-        return json.dumps(status, indent=2)
-    except requests.exceptions.ConnectionError:
-        status["message"] = "Cannot reach Sketchfab API. Check network connectivity."
-        return json.dumps(status, indent=2)
-    except Exception as exc:
-        status["message"] = f"Error checking Sketchfab status: {str(exc)}"
-        return json.dumps(status, indent=2)
-
-    if response.status_code == 200:
-        user_data = response.json()
-        status.update(
-            {
-                "enabled": True,
-                "username": user_data.get("username", "unknown"),
-                "message": "Sketchfab integration is enabled and authenticated.",
-            }
-        )
-        return json.dumps(status, indent=2)
-
-    if response.status_code == 401:
-        status["message"] = "Sketchfab API key is invalid (401 Unauthorized)."
-    else:
-        status["message"] = (
-            "Sketchfab status check failed: "
-            f"HTTP {response.status_code} - {response.text[:200]}"
-        )
-    return json.dumps(status, indent=2)
-
-
 def search_sketchfab_models(
     ctx: Context,
     query: str,
@@ -716,30 +686,58 @@ def generate_hyper3d_model_via_text(
     bbox_condition: Optional[list[float]] = None,
 ) -> str:
     """Create a Hyper3D Rodin generation task using text prompt."""
-    if not runtime.is_rodin_tool_enabled():
-        return (
-            "Rodin generation is disabled. "
-            "It requires BLENDER_MODE=local-client and ENABLE_RODIN=true."
-        )
+    mode, api_key, error_message = _get_rodin_mode_and_api_key_or_error()
+    if error_message:
+        return error_message
+    assert mode is not None and api_key is not None
+
+    processed_bbox = runtime.process_bbox(bbox_condition)
+
     try:
-        blender = runtime.get_blender_connection(logger)
-        result = blender.send_command(
-            "create_rodin_job",
-            {
-                "text_prompt": text_prompt,
-                "images": None,
-                "bbox_condition": runtime.process_bbox(bbox_condition),
-            },
-        )
-        if result.get("submit_time"):
-            output: dict[str, Any] = {"task_uuid": result.get("uuid")}
-            jobs = result.get("jobs") or {}
-            if isinstance(jobs, dict) and jobs.get("subscription_key"):
-                output["subscription_key"] = jobs["subscription_key"]
-            if result.get("request_id"):
-                output["request_id"] = result["request_id"]
-            return json.dumps(output, indent=2)
-        return json.dumps(result, indent=2)
+        if mode == "FAL_AI":
+            payload: dict[str, Any] = {
+                "tier": "Sketch",
+                "prompt": text_prompt,
+            }
+            if processed_bbox:
+                payload["bbox_condition"] = processed_bbox
+
+            response = requests.post(
+                f"{RODIN_FAL_API_BASE_URL}/rodin",
+                headers=_rodin_headers(api_key, mode, use_json=True),
+                json=payload,
+                timeout=120,
+            )
+        else:
+            files: list[tuple[str, tuple[Optional[str], str]]] = [
+                ("tier", (None, "Sketch")),
+                ("mesh_mode", (None, "Raw")),
+                ("prompt", (None, text_prompt)),
+            ]
+            if processed_bbox:
+                files.append(("bbox_condition", (None, json.dumps(processed_bbox))))
+
+            response = requests.post(
+                f"{RODIN_MAIN_SITE_API_BASE_URL}/rodin",
+                headers=_rodin_headers(api_key, mode),
+                files=files,
+                timeout=120,
+            )
+
+        if response.status_code >= 400:
+            return (
+                "Error: Rodin task creation failed with status "
+                f"{response.status_code}: {response.text[:400]}"
+            )
+
+        result = response.json()
+        return _format_rodin_submit_response(result)
+    except requests.exceptions.Timeout:
+        return "Error: Rodin task creation timed out."
+    except requests.exceptions.ConnectionError:
+        return "Error: Cannot connect to Rodin API endpoint."
+    except json.JSONDecodeError as exc:
+        return f"Error: Invalid JSON from Rodin API: {str(exc)}"
     except Exception as exc:
         logger.error("Error creating Hyper3D task via text: %s", exc)
         return f"Error creating Hyper3D task via text: {str(exc)}"
@@ -752,53 +750,98 @@ def generate_hyper3d_model_via_images(
     bbox_condition: Optional[list[float]] = None,
 ) -> str:
     """Create a Hyper3D Rodin generation task using image inputs."""
-    if not runtime.is_rodin_tool_enabled():
-        return (
-            "Rodin generation is disabled. "
-            "It requires BLENDER_MODE=local-client and ENABLE_RODIN=true."
-        )
+    mode, api_key, error_message = _get_rodin_mode_and_api_key_or_error()
+    if error_message:
+        return error_message
+    assert mode is not None and api_key is not None
+
     if input_image_paths and input_image_urls:
         return "Error: Provide only one of input_image_paths or input_image_urls."
     if not input_image_paths and not input_image_urls:
         return "Error: At least one image input is required."
+
+    processed_bbox = runtime.process_bbox(bbox_condition)
+
     try:
-        images: list[Any]
-        if input_image_paths:
+        if mode == "MAIN_SITE":
+            if not input_image_paths:
+                return (
+                    "Error: RODIN_MODE=MAIN_SITE requires input_image_paths, "
+                    "not input_image_urls."
+                )
+
             if not all(os.path.exists(path) for path in input_image_paths):
                 return "Error: One or more input_image_paths do not exist."
-            images = []
-            for path in input_image_paths:
+
+            files: list[tuple[str, tuple[Optional[str], str]]] = [
+                ("tier", (None, "Sketch")),
+                ("mesh_mode", (None, "Raw")),
+            ]
+            if processed_bbox:
+                files.append(("bbox_condition", (None, json.dumps(processed_bbox))))
+
+            for i, path in enumerate(input_image_paths):
                 with open(path, "rb") as handle:
-                    images.append(
-                        (Path(path).suffix, base64.b64encode(handle.read()).decode("ascii"))
+                    suffix = Path(path).suffix or ".png"
+                    files.append(
+                        (
+                            "images",
+                            (
+                                f"{i:04d}{suffix}",
+                                base64.b64encode(handle.read()).decode("ascii"),
+                            ),
+                        )
                     )
+
+            response = requests.post(
+                f"{RODIN_MAIN_SITE_API_BASE_URL}/rodin",
+                headers=_rodin_headers(api_key, mode),
+                files=files,
+                timeout=120,
+            )
         else:
-            assert input_image_urls is not None
+            if not input_image_urls:
+                return (
+                    "Error: RODIN_MODE=FAL_AI requires input_image_urls, "
+                    "not input_image_paths."
+                )
+
             from urllib.parse import urlparse
 
             parsed_urls = [urlparse(url) for url in input_image_urls]
-            if not all(parsed.scheme in {"http", "https"} and parsed.netloc for parsed in parsed_urls):
+            if not all(
+                parsed.scheme in {"http", "https"} and parsed.netloc for parsed in parsed_urls
+            ):
                 return "Error: One or more input_image_urls are invalid."
-            images = list(input_image_urls)
 
-        blender = runtime.get_blender_connection(logger)
-        result = blender.send_command(
-            "create_rodin_job",
-            {
-                "text_prompt": None,
-                "images": images,
-                "bbox_condition": runtime.process_bbox(bbox_condition),
-            },
-        )
-        if result.get("submit_time"):
-            output: dict[str, Any] = {"task_uuid": result.get("uuid")}
-            jobs = result.get("jobs") or {}
-            if isinstance(jobs, dict) and jobs.get("subscription_key"):
-                output["subscription_key"] = jobs["subscription_key"]
-            if result.get("request_id"):
-                output["request_id"] = result["request_id"]
-            return json.dumps(output, indent=2)
-        return json.dumps(result, indent=2)
+            payload: dict[str, Any] = {
+                "tier": "Sketch",
+                "input_image_urls": list(input_image_urls),
+            }
+            if processed_bbox:
+                payload["bbox_condition"] = processed_bbox
+
+            response = requests.post(
+                f"{RODIN_FAL_API_BASE_URL}/rodin",
+                headers=_rodin_headers(api_key, mode, use_json=True),
+                json=payload,
+                timeout=120,
+            )
+
+        if response.status_code >= 400:
+            return (
+                "Error: Rodin image task creation failed with status "
+                f"{response.status_code}: {response.text[:400]}"
+            )
+
+        result = response.json()
+        return _format_rodin_submit_response(result)
+    except requests.exceptions.Timeout:
+        return "Error: Rodin image task creation timed out."
+    except requests.exceptions.ConnectionError:
+        return "Error: Cannot connect to Rodin API endpoint."
+    except json.JSONDecodeError as exc:
+        return f"Error: Invalid JSON from Rodin API: {str(exc)}"
     except Exception as exc:
         logger.error("Error creating Hyper3D task via images: %s", exc)
         return f"Error creating Hyper3D task via images: {str(exc)}"
@@ -809,23 +852,56 @@ def poll_rodin_job_status(
     subscription_key: Optional[str] = None,
     request_id: Optional[str] = None,
 ) -> str:
-    """Poll Hyper3D Rodin task status from Blender addon."""
-    if not runtime.is_rodin_tool_enabled():
-        return (
-            "Rodin polling is disabled. "
-            "It requires BLENDER_MODE=local-client and ENABLE_RODIN=true."
-        )
-    if not subscription_key and not request_id:
-        return "Error: Provide subscription_key (MAIN_SITE) or request_id (FAL_AI)."
+    """Poll Hyper3D Rodin task status."""
+    mode, api_key, error_message = _get_rodin_mode_and_api_key_or_error()
+    if error_message:
+        return error_message
+    assert mode is not None and api_key is not None
+
     try:
-        blender = runtime.get_blender_connection(logger)
-        params: dict[str, str] = {}
-        if subscription_key:
-            params["subscription_key"] = subscription_key
-        if request_id:
-            params["request_id"] = request_id
-        result = blender.send_command("poll_rodin_job_status", params)
+        if mode == "MAIN_SITE":
+            if not subscription_key:
+                return "Error: RODIN_MODE=MAIN_SITE requires subscription_key."
+
+            response = requests.post(
+                f"{RODIN_MAIN_SITE_API_BASE_URL}/status",
+                headers=_rodin_headers(api_key, mode),
+                json={"subscription_key": subscription_key},
+                timeout=60,
+            )
+            if response.status_code >= 400:
+                return (
+                    "Error: Rodin status polling failed with status "
+                    f"{response.status_code}: {response.text[:400]}"
+                )
+            result = response.json()
+            jobs = result.get("jobs") if isinstance(result, dict) else None
+            if isinstance(jobs, list):
+                status_list = [job.get("status") for job in jobs if isinstance(job, dict)]
+                return json.dumps({"status_list": status_list}, indent=2)
+        else:
+            if not request_id:
+                return "Error: RODIN_MODE=FAL_AI requires request_id."
+
+            response = requests.get(
+                f"{RODIN_FAL_API_BASE_URL}/requests/{request_id}/status",
+                headers=_rodin_headers(api_key, mode),
+                timeout=60,
+            )
+            if response.status_code >= 400:
+                return (
+                    "Error: Rodin status polling failed with status "
+                    f"{response.status_code}: {response.text[:400]}"
+                )
+            result = response.json()
+
         return json.dumps(result, indent=2)
+    except requests.exceptions.Timeout:
+        return "Error: Rodin status polling timed out."
+    except requests.exceptions.ConnectionError:
+        return "Error: Cannot connect to Rodin status endpoint."
+    except json.JSONDecodeError as exc:
+        return f"Error: Invalid JSON from Rodin status API: {str(exc)}"
     except Exception as exc:
         logger.error("Error polling Hyper3D task: %s", exc)
         return f"Error polling Hyper3D task: {str(exc)}"
@@ -837,23 +913,92 @@ def import_generated_asset(
     task_uuid: Optional[str] = None,
     request_id: Optional[str] = None,
 ) -> str:
-    """Import a Hyper3D generated asset through Blender addon."""
-    if not runtime.is_rodin_tool_enabled():
-        return (
-            "Rodin import is disabled. "
-            "It requires BLENDER_MODE=local-client and ENABLE_RODIN=true."
-        )
-    if not task_uuid and not request_id:
-        return "Error: Provide task_uuid (MAIN_SITE) or request_id (FAL_AI)."
+    """Import a Hyper3D generated asset into Blender."""
+    mode, api_key, error_message = _get_rodin_mode_and_api_key_or_error()
+    if error_message:
+        return error_message
+    assert mode is not None and api_key is not None
+
     try:
+        glb_url: Optional[str] = None
+
+        if mode == "MAIN_SITE":
+            if not task_uuid:
+                return "Error: RODIN_MODE=MAIN_SITE requires task_uuid."
+
+            response = requests.post(
+                f"{RODIN_MAIN_SITE_API_BASE_URL}/download",
+                headers=_rodin_headers(api_key, mode),
+                json={"task_uuid": task_uuid},
+                timeout=120,
+            )
+            if response.status_code >= 400:
+                return (
+                    "Error: Rodin download metadata request failed with status "
+                    f"{response.status_code}: {response.text[:400]}"
+                )
+            payload = response.json()
+            files = payload.get("list") if isinstance(payload, dict) else None
+            if isinstance(files, list):
+                for item in files:
+                    if not isinstance(item, dict):
+                        continue
+                    name_value = item.get("name")
+                    url_value = item.get("url")
+                    if (
+                        isinstance(name_value, str)
+                        and name_value.lower().endswith(".glb")
+                        and isinstance(url_value, str)
+                        and url_value
+                    ):
+                        glb_url = url_value
+                        break
+        else:
+            if not request_id:
+                return "Error: RODIN_MODE=FAL_AI requires request_id."
+
+            response = requests.get(
+                f"{RODIN_FAL_API_BASE_URL}/requests/{request_id}",
+                headers=_rodin_headers(api_key, mode),
+                timeout=120,
+            )
+            if response.status_code >= 400:
+                return (
+                    "Error: Rodin request lookup failed with status "
+                    f"{response.status_code}: {response.text[:400]}"
+                )
+            payload = response.json()
+            model_mesh = payload.get("model_mesh") if isinstance(payload, dict) else None
+            if isinstance(model_mesh, dict):
+                url_value = model_mesh.get("url")
+                if isinstance(url_value, str) and url_value:
+                    glb_url = url_value
+
+        if not glb_url:
+            return (
+                "Error: Failed to resolve generated GLB download URL. "
+                "Please confirm the generation task is fully completed."
+            )
+
         blender = runtime.get_blender_connection(logger)
-        params: dict[str, str] = {"name": name}
-        if task_uuid:
-            params["task_uuid"] = task_uuid
-        if request_id:
-            params["request_id"] = request_id
-        result = blender.send_command("import_generated_asset", params)
-        return json.dumps(result, indent=2)
+        result = blender.send_command(
+            "import_glb_model",
+            {
+                "model_url": glb_url,
+                "object_name": name,
+            },
+        )
+        if isinstance(result, dict):
+            output = dict(result)
+            output["source_url"] = glb_url
+            return json.dumps(output, indent=2)
+        return json.dumps({"result": result, "source_url": glb_url}, indent=2)
+    except requests.exceptions.Timeout:
+        return "Error: Rodin import request timed out."
+    except requests.exceptions.ConnectionError:
+        return "Error: Cannot connect to Rodin import endpoint."
+    except json.JSONDecodeError as exc:
+        return f"Error: Invalid JSON from Rodin import API: {str(exc)}"
     except Exception as exc:
         logger.error("Error importing Hyper3D asset: %s", exc)
         return f"Error importing Hyper3D asset: {str(exc)}"
@@ -1053,86 +1198,174 @@ def import_retrieved_asset(
 
 
 def asset_creation_strategy_text() -> str:
-    return """When creating 3D content in Blender, always start by checking if integrations are available:
+    service_status = runtime.probe_conditional_services(logger)
 
-    0. Before anything, always check the scene from get_scene_info()
-    1. First use the following tools to verify if integrations are enabled:
-        1. PolyHaven
-            - For objects/models: Use download_polyhaven_asset() with asset_type="models"
-            - For materials/textures: Use download_polyhaven_asset() with asset_type="textures"
-            - For environment lighting: Use download_polyhaven_asset() with asset_type="hdris"
+    sketchfab_ready = runtime.is_sketchfab_tool_enabled() and bool(runtime.get_sketchfab_api_key())
+    infinigen_ready = runtime.is_infinigen_tool_enabled() and service_status.get("pcg_integrator", False)
+    trellis2_ready = runtime.is_trellis2_tool_enabled() and service_status.get("trellis2", False)
+    rodin_ready = runtime.is_rodin_tool_enabled() and bool(runtime.get_rodin_api_key())
+    hunyuan_ready = runtime.is_hunyuan_tool_enabled()
+    retrieval_ready = runtime.is_retrieval_tool_enabled() and service_status.get("retrieval", False)
 
-        2. Sketchfab (server-side)
-            Sketchfab tools are enabled only when ENABLE_SKETCHFAB=true and SKETCHFAB_API_KEY is configured.
-            Workflow:
-            - Call get_sketchfab_status() first
-            - Search with search_sketchfab_models(query=...)
-            - Compare candidates with get_sketchfab_model_preview(uid)
-            - Import with download_sketchfab_model(uid=..., target_size=...)
+    lines: list[str] = [
+        "When creating 3D content in Blender:",
+        "",
+        "0. Before anything, call get_scene_info().",
+        "1. Use only these currently available asset workflows (no status-check tools needed):",
+        "   - PolyHaven",
+        "     - Objects/models: download_polyhaven_asset(asset_type=\"models\")",
+        "     - Materials/textures: download_polyhaven_asset(asset_type=\"textures\")",
+        "     - Environment lighting: download_polyhaven_asset(asset_type=\"hdris\")",
+        "     - Best for physically plausible materials and HDRI lighting setup",
+    ]
 
-        3. Infinigen (Procedural Content Generation)
-            Infinigen generates high-quality procedural natural and indoor assets with realistic variations.
-            Best practices:
-            - ALWAYS call get_infinigen_available_assets() first to see available asset types
-            - Choose appropriate asset_type from the returned list (e.g., 'TreeFactory', 'BushFactory', 'TableFactory')
-            - Excellent for: trees, plants, bushes, rocks, furniture, architectural elements
-            - Each generation creates unique variations based on procedural algorithms
-            - Assets include proper materials and realistic details
+    if sketchfab_ready:
+        lines.extend(
+            [
+                "   - Sketchfab (server-side)",
+                "     - Search: search_sketchfab_models(query=...)",
+                "     - Compare previews: get_sketchfab_model_preview(uid)",
+                "     - Import: download_sketchfab_model(uid=..., target_size=...)",
+                "     - Best for authored realistic assets",
+            ]
+        )
 
-            Workflow:
-            1. Call get_infinigen_available_assets() to see what's available
-            2. Select appropriate asset_type based on user needs
-            3. Call generate_infinigen_assets(asset_type="SelectedFactory")
-            4. Generation takes 1-5 minutes depending on complexity
+    if infinigen_ready:
+        lines.extend(
+            [
+                "   - Infinigen (Procedural Content Generation)",
+                "     - Inspect supported asset types: get_infinigen_available_assets()",
+                "     - Generate: generate_infinigen_assets(asset_type=\"...\")",
+                "     - Best for natural assets and procedural indoor/architectural variations",
+            ]
+        )
 
-        4. TRELLIS2 (headless only)
-            TRELLIS2 is enabled only when BLENDER_MODE=headless and ENABLE_TRELLIS2=true.
-            Best for generating single custom objects when retrieval cannot satisfy the request.
-            Usage:
-            - Use generate_trellis2_model() with text_prompt
-            - This call is server-side and synchronous
+    if trellis2_ready:
+        lines.extend(
+            [
+                "   - TRELLIS2 (headless)",
+                "     - Generate custom single object: generate_trellis2_model(text_prompt=..., object_name=...)",
+                "     - Use when retrieval/libraries cannot satisfy a unique object request",
+            ]
+        )
 
-        5. Hyper3D Rodin (local-client only)
-            Hyper3D Rodin is enabled only when BLENDER_MODE=local-client and ENABLE_RODIN=true.
-            It is designed for single-item generation, not full scene generation.
-            Workflow:
-            - Call get_hyper3d_status() first
-            - Create task with generate_hyper3d_model_via_text() or generate_hyper3d_model_via_images()
-            - Poll with poll_rodin_job_status()
-            - Import with import_generated_asset()
-            - After import, always inspect world_bounding_box and adjust transform
+    if rodin_ready:
+        lines.extend(
+            [
+                "   - Hyper3D Rodin (local-client)",
+                "     - Create task: generate_hyper3d_model_via_text(...) or generate_hyper3d_model_via_images(...)",
+                "     - Poll task: poll_rodin_job_status(...)",
+                "     - Import generated model: import_generated_asset(...)",
+                "     - Best for single-item custom generation, especially from reference images",
+            ]
+        )
 
-        6. Hunyuan3D (headless only)
-            Hunyuan3D is enabled only when BLENDER_MODE=headless and ENABLE_HUNYUAN=true.
-            Usage:
-            - Use generate_hunyuan3d_model() with text_prompt OR input_image_url
-            - This tool submits and polls inside a single call until completion or timeout
-            - On success it returns result_file_3ds for downstream import workflow
+    if hunyuan_ready:
+        lines.extend(
+            [
+                "   - Hunyuan3D (headless)",
+                "     - Generate with built-in polling: generate_hunyuan3d_model(text_prompt=... or input_image_url=...)",
+                "     - Best for single custom object generation in headless mode",
+            ]
+        )
 
-        7. 3D Asset Retrieval Database
-            - For searching existing 3D models: Use search_3d_assets_by_text() with descriptive queries
-            - After finding suitable asset: Use import_retrieved_asset() with model_url from search results
-            - Assets are in GLB format and include materials and textures
-            - Best for: common real-world objects, furniture, vehicles, architecture, props
+    if retrieval_ready:
+        lines.extend(
+            [
+                "   - 3D Asset Retrieval Database",
+                "     - Search: search_3d_assets_by_text(query=..., top_k=...)",
+                "     - Import: import_retrieved_asset(model_url=..., object_name=...)",
+                "     - Best for common real-world objects and fast scene assembly",
+            ]
+        )
 
-    2. Always check the world_bounding_box for each item so that:
-        - Ensure that all objects that should not be clipping are not clipping.
-        - Items have right spatial relationship.
+    if not any(
+        [sketchfab_ready, infinigen_ready, trellis2_ready, rodin_ready, hunyuan_ready, retrieval_ready]
+    ):
+        lines.extend(
+            [
+                "   - Note: No extra generator/retrieval workflow is currently available beyond PolyHaven.",
+            ]
+        )
 
-    3. Recommended asset source priority:
-        - For realistic authored objects: Try Sketchfab first, then Retrieval
-        - For natural elements: Try Infinigen first
-        - For indoor furniture and architectural elements: Try Infinigen first, then Sketchfab, then Retrieval
-        - For specific architectural elements or materials: Try PolyHaven first, then Infinigen
-        - For custom unique items: Try Retrieval first, then TRELLIS2 (headless) or Rodin/Hunyuan
-        - For generating from reference images: Prefer Rodin image workflow in local-client mode
-        - For environment lighting: Use PolyHaven HDRIs
-        - For materials/textures: Use PolyHaven textures
+    priority_rules: list[str] = []
+    if sketchfab_ready and retrieval_ready:
+        priority_rules.append("For realistic authored objects: Sketchfab -> Retrieval")
+    elif sketchfab_ready:
+        priority_rules.append("For realistic authored objects: Sketchfab")
+    elif retrieval_ready:
+        priority_rules.append("For realistic authored objects: Retrieval")
 
-    Only fall back to scripting when:
-    - All asset sources (Retrieval, PolyHaven, Sketchfab, TRELLIS2, Rodin/Hunyuan, Infinigen) are unavailable
-    - A simple primitive is explicitly requested
-    - No suitable asset exists in any of the libraries after searching
-    - TRELLIS2, Rodin, or Hunyuan generation failed, timed out, or is disabled in current mode
-    - The task specifically requires a basic material/color or procedural geometry
-    """
+    if infinigen_ready:
+        if sketchfab_ready and retrieval_ready:
+            priority_rules.append(
+                "For natural or indoor procedural assets: Infinigen first, then Sketchfab, then Retrieval"
+            )
+        elif sketchfab_ready:
+            priority_rules.append("For natural or indoor procedural assets: Infinigen first, then Sketchfab")
+        elif retrieval_ready:
+            priority_rules.append("For natural or indoor procedural assets: Infinigen first, then Retrieval")
+        else:
+            priority_rules.append("For natural or indoor procedural assets: Infinigen")
+
+    if rodin_ready and retrieval_ready:
+        priority_rules.append("For unique custom objects: Retrieval first, then Rodin")
+    elif rodin_ready:
+        priority_rules.append("For unique custom objects: Rodin")
+    elif retrieval_ready:
+        priority_rules.append("For unique custom objects: Retrieval")
+
+    if trellis2_ready and retrieval_ready:
+        priority_rules.append("For headless custom generation fallback: Retrieval first, then TRELLIS2")
+    elif trellis2_ready:
+        priority_rules.append("For headless custom generation fallback: TRELLIS2")
+
+    if hunyuan_ready and retrieval_ready:
+        priority_rules.append("For headless unique-object fallback: Retrieval first, then Hunyuan3D")
+    elif hunyuan_ready:
+        priority_rules.append("For headless unique-object fallback: Hunyuan3D")
+
+    lines.extend(
+        [
+            "",
+            "2. Always verify placement and scale after each import/generation:",
+            "   - Inspect world/object bounding boxes to avoid clipping and floating assets",
+            "   - Ensure spatial relationships and target size are consistent across objects",
+            "",
+            "3. Recommended source priority among available workflows:",
+        ]
+    )
+
+    if priority_rules:
+        for rule in priority_rules:
+            lines.append(f"   - {rule}")
+    else:
+        lines.append("   - Use PolyHaven for materials/textures/HDRIs; rely on scripting for custom geometry.")
+
+    generator_names = [
+        name
+        for enabled, name in [
+            (trellis2_ready, "TRELLIS2"),
+            (rodin_ready, "Rodin"),
+            (hunyuan_ready, "Hunyuan3D"),
+        ]
+        if enabled
+    ]
+
+    lines.extend(
+        [
+            "",
+            "4. Only fall back to scripting when:",
+            "   - A simple primitive is explicitly requested",
+            "   - No suitable asset exists after searching/generating with available workflows",
+        ]
+    )
+    if generator_names:
+        lines.append(
+            "   - "
+            + ", ".join(generator_names)
+            + " generation failed, timed out, or returned unusable geometry"
+        )
+    lines.append("   - The task specifically requires basic procedural geometry/material edits")
+
+    return "\n".join(lines)

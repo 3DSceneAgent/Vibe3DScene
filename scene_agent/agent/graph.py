@@ -28,7 +28,13 @@ def _route_after_update(state: AgentState) -> Literal["verify", "agent"]:
     return "agent"
 
 
-async def create_agent_graph(session_id: str | None = None):
+async def create_agent_graph(
+    session_id: str | None = None,
+    *,
+    provider_name: str | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
+):
     """
     Create and compile the LangGraph agent.
     
@@ -44,10 +50,18 @@ async def create_agent_graph(session_id: str | None = None):
     settings = get_settings()
     
     # Initialize VLM provider
+    selected_provider = (provider_name or settings.vlm_provider).lower()
+    selected_model = model or settings.get_vlm_default_model(selected_provider)
+    selected_api_key = api_key or settings.get_vlm_api_key(selected_provider)
+    if not selected_api_key:
+        raise ValueError(
+            f"No API key configured for provider '{selected_provider}'. "
+            "Set provider-specific API key or VLM_API_KEY."
+        )
     vlm_provider = get_vlm_provider(
-        provider_name=settings.vlm_provider,
-        api_key=settings.vlm_api_key,
-        model=settings.vlm_model
+        provider_name=selected_provider,
+        api_key=selected_api_key,
+        model=selected_model,
     )
     model = vlm_provider.get_chat_model()
     
@@ -73,7 +87,15 @@ async def create_agent_graph(session_id: str | None = None):
     builder.add_node("agent", call_model)
     builder.add_node("tools", ToolNode(tools))
     builder.add_node("update_memory", update_memory_node)
-    builder.add_node("verify", verify_node)
+    builder.add_node(
+        "verify",
+        lambda state: verify_node(
+            state,
+            provider_name=selected_provider,
+            api_key=selected_api_key,
+            model=selected_model,
+        ),
+    )
     
     # Connect nodes
     builder.add_edge(START, "agent")
@@ -96,11 +118,26 @@ async def create_agent_graph(session_id: str | None = None):
     memory = MemorySaver()
     app = builder.compile(checkpointer=memory)
     setattr(app, "_available_tool_names", available_tool_names)
+    setattr(app, "_vlm_provider", selected_provider)
+    setattr(app, "_vlm_model", selected_model)
     
     return app
 
 
-def create_agent_graph_sync(session_id: str | None = None):
+def create_agent_graph_sync(
+    session_id: str | None = None,
+    *,
+    provider_name: str | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
+):
     """Synchronous wrapper for create_agent_graph"""
     import asyncio
-    return asyncio.run(create_agent_graph(session_id=session_id))
+    return asyncio.run(
+        create_agent_graph(
+            session_id=session_id,
+            provider_name=provider_name,
+            api_key=api_key,
+            model=model,
+        )
+    )

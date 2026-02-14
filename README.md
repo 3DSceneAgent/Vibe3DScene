@@ -59,9 +59,11 @@ TBD.
    cp .env.example.dev .env
    ```
 2. Set required values:
-   - `VLM_PROVIDER`
-   - `VLM_API_KEY`
+   - `VLM_PROVIDER` (default provider)
+   - At least one API key: `VLM_API_KEY` or provider-specific (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`)
    - `BLENDER_MODE` (`local-client` or `headless`)
+   - Optional provider model lists: `VLM_OPENAI_MODELS`, `VLM_ANTHROPIC_MODELS`, `VLM_GEMINI_MODELS`
+   - If using Rodin tools: `ENABLE_RODIN=true` and `RODIN_API_KEY`
 
 ### Start Services with `scripts/start_services.sh`
 
@@ -109,6 +111,7 @@ python main.py --mode cli
 Common endpoints:
 - `POST /chat`
 - `POST /chat/stream`
+- `GET /vlm/models`
 - `GET /scene/{thread_id}`
 - `GET /scene/{thread_id}/renders`
 - `GET /threads/{thread_id}/reference-images`
@@ -120,7 +123,7 @@ Example request:
 ```bash
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
-  -d '{"message": "Create a studio lighting setup", "thread_id": "demo"}'
+  -d '{"message": "Create a studio lighting setup", "thread_id": "demo", "vlm_provider": "openai", "vlm_model": "gpt-4o"}'
 ```
 
 ## Web UI

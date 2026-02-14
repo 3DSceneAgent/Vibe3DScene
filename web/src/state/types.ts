@@ -8,6 +8,13 @@ export type ToolMedia = {
   value: string
 }
 
+export type SceneHierarchyNode = {
+  id: string
+  name: string
+  type: string
+  children: SceneHierarchyNode[]
+}
+
 export type Message = {
   id: string
   role: MessageRole
@@ -28,10 +35,14 @@ export type Thread = {
   title: string
   createdAt: number
   messages: Message[]
+  vlmProvider?: string
+  vlmModel?: string
+  vlmLocked?: boolean
   todos: TodoItem[]
   scene?: SceneInfo | null
   renders?: RenderImage[]
   gltfUrl?: string | null
+  sceneHierarchy?: SceneHierarchyNode[]
   sceneHasChange?: boolean
   referenceImages?: ReferenceImage[]
 }
@@ -42,5 +53,4 @@ export type Settings = {
   backendUrl: string
   theme: ThemeId
   autoRefreshScene: boolean
-  sceneTabCollapsed: boolean
 }

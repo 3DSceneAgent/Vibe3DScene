@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 
+type ModelOption = {
+  value: string
+  label: string
+}
+
 type ChatComposerProps = {
   disabled?: boolean
   onSend: (message: string, files: File[]) => Promise<boolean>
@@ -9,6 +14,12 @@ type ChatComposerProps = {
   mcpTools?: string[]
   mcpToolsLoading?: boolean
   mcpToolsError?: string | null
+  modelOptions?: ModelOption[]
+  selectedModelValue?: string
+  onModelSelectionChange?: (value: string) => void
+  modelLoading?: boolean
+  modelError?: string | null
+  modelLocked?: boolean
 }
 
 const MAX_REFERENCE_IMAGES = 3
@@ -21,11 +32,18 @@ export function ChatComposer({
   examplePrompts = [],
   mcpTools = [],
   mcpToolsLoading = false,
-  mcpToolsError = null
+  mcpToolsError = null,
+  modelOptions = [],
+  selectedModelValue = '',
+  onModelSelectionChange,
+  modelLoading = false,
+  modelError = null,
+  modelLocked = false
 }: ChatComposerProps) {
   const [input, setInput] = useState('')
   const [dragActive, setDragActive] = useState(false)
   const [isInputFocused, setIsInputFocused] = useState(false)
+  const [isToolsOpen, setIsToolsOpen] = useState(false)
   const [pendingImages, setPendingImages] = useState<Array<{ file: File; previewUrl: string }>>([])
   const blurTimeoutRef = useRef<number | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
@@ -54,15 +72,21 @@ export function ChatComposer({
     }
   }
 
-  const handleFiles = (files: FileList | null) => {
-    if (!files || files.length === 0) return
+  const addFiles = (files: File[]) => {
+    if (files.length === 0) return
     const remaining = Math.max(0, MAX_REFERENCE_IMAGES - referenceImagesCount - pendingImages.length)
     if (remaining === 0) return
-    const selection = Array.from(files).slice(0, remaining)
+    const selection = files.filter((file) => file.type.startsWith('image/')).slice(0, remaining)
+    if (selection.length === 0) return
     setPendingImages((prev) => [
       ...prev,
       ...selection.map((file) => ({ file, previewUrl: URL.createObjectURL(file) }))
     ])
+  }
+
+  const handleFiles = (files: FileList | null) => {
+    if (!files || files.length === 0) return
+    addFiles(Array.from(files))
   }
 
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
@@ -70,7 +94,7 @@ export function ChatComposer({
     event.stopPropagation()
     setDragActive(false)
     if (disabled) return
-    handleFiles(event.dataTransfer.files)
+    addFiles(Array.from(event.dataTransfer.files))
   }
 
   const handleDragOver = (event: React.DragEvent<HTMLDivElement>) => {
@@ -82,6 +106,19 @@ export function ChatComposer({
   }
 
   const handleDragLeave = () => setDragActive(false)
+
+  const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    if (disabled) return
+    const imageFiles = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null)
+    if (imageFiles.length === 0) {
+      return
+    }
+    event.preventDefault()
+    addFiles(imageFiles)
+  }
 
   const handleRemovePending = (index: number) => {
     setPendingImages((prev) => {
@@ -118,78 +155,57 @@ export function ChatComposer({
   }
 
   const promptOptions = examplePrompts.slice(0, 5)
-  const showPromptPopover = isInputFocused && promptOptions.length > 0
+  const showPromptPopover = isInputFocused && input.trim().length === 0 && promptOptions.length > 0
+  const modelSelectDisabled = disabled || modelLocked || modelLoading || modelOptions.length === 0
+  const hasPendingImages = pendingImages.length > 0
+  const canSend = input.trim().length > 0
+
+  const shortenFilename = (filename: string) => {
+    const stem = filename.replace(/\.[^/.]+$/, '')
+    return stem.slice(0, 10)
+  }
 
   return (
     <div className="composer-shell">
-      <div className="composer">
+      <div className="composer-top-row">
+        <div className="composer-model-panel">
+          <select
+            id="composer-model-select"
+            className="composer-model-select"
+            value={selectedModelValue}
+            disabled={modelSelectDisabled}
+            onChange={(event) => onModelSelectionChange?.(event.target.value)}
+          >
+            {modelOptions.length === 0 && <option value="">No model available</option>}
+            {modelOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
         <div
-          className={`composer-upload ${dragActive ? 'active' : ''}`}
-          onClick={() => {
-            if (disabled) return
-            fileInputRef.current?.click()
-          }}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' || event.key === ' ') {
-              event.preventDefault()
-              if (!disabled) {
-                fileInputRef.current?.click()
-              }
+          className={`composer-tools-panel ${isToolsOpen ? 'open' : ''}`}
+          onMouseLeave={() => setIsToolsOpen(false)}
+          onBlur={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+              setIsToolsOpen(false)
             }
           }}
-          onDrop={handleDrop}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          role="button"
-          tabIndex={0}
         >
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            hidden
-            onChange={(event) => handleFiles(event.target.files)}
-          />
-          <span>
-            {referenceImagesCount >= MAX_REFERENCE_IMAGES
-              ? 'Reference images full'
-              : 'Add images'}
-          </span>
-          <span className="composer-upload-sub">
-            Click or drop
-          </span>
-        </div>
-        <div className="composer-upload-meta">
-          <span>{referenceImagesCount + pendingImages.length} / {MAX_REFERENCE_IMAGES}</span>
-        </div>
-        {pendingImages.length > 0 && (
-          <div className="composer-upload-previews">
-            {pendingImages.map((image, index) => (
-              <div className="composer-upload-preview" key={`${image.file.name}-${index}`}>
-                <img src={image.previewUrl} alt={image.file.name} />
-                <button
-                  className="ghost-btn"
-                  type="button"
-                  onClick={() => handleRemovePending(index)}
-                >
-                  ✕
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-        <div className="composer-input-stack">
-          <details className="composer-tools-panel">
-            <summary className="composer-tools-summary">
-              <span className="composer-tools-title">Loaded MCP tools ({mcpTools.length})</span>
-              {mcpToolsLoading && (
-                <span className="composer-tools-meta">Loading...</span>
-              )}
-              {!mcpToolsLoading && mcpToolsError && (
-                <span className="composer-tools-meta error">Unavailable</span>
-              )}
-            </summary>
+          <button
+            type="button"
+            className="composer-tools-summary"
+            onClick={() => setIsToolsOpen((prev) => !prev)}
+            aria-expanded={isToolsOpen}
+          >
+            <span className="composer-tools-title">MCP tools ({mcpTools.length})</span>
+            {mcpToolsLoading && <span className="composer-tools-meta">Loading...</span>}
+            {!mcpToolsLoading && mcpToolsError && (
+              <span className="composer-tools-meta error">Unavailable</span>
+            )}
+          </button>
+          {isToolsOpen && (
             <div className="composer-tools-body">
               {mcpTools.length > 0 ? (
                 <ul className="composer-tools-list">
@@ -207,56 +223,118 @@ export function ChatComposer({
                 </div>
               )}
             </div>
-          </details>
-          <div className="composer-input-area">
-            {showPromptPopover && (
-              <div className="composer-prompt-popover" role="listbox" aria-label="Example prompts">
-                {promptOptions.map((prompt, index) => (
-                  <button
-                    key={`${index}-${prompt}`}
-                    type="button"
-                    className="composer-prompt-option"
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => handleSelectPrompt(prompt)}
-                    title={prompt}
-                    disabled={disabled}
-                  >
-                    {prompt}
-                  </button>
-                ))}
-              </div>
-            )}
-            <textarea
-              ref={textareaRef}
-              className="composer-input"
-              placeholder="Ask the scene agent…"
-              value={input}
-              disabled={disabled}
-              onFocus={handleInputFocus}
-              onBlur={handleInputBlur}
-              onChange={(event) => setInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key !== 'Enter') return
-                if (event.ctrlKey || event.metaKey || event.shiftKey) {
-                  return
-                }
-                event.preventDefault()
-                void handleSend()
-              }}
-              rows={2}
-            />
-          </div>
+          )}
         </div>
-        <div className="composer-hint muted">Enter to send <br />Shift + Enter for newline</div>
+      </div>
+      {(modelLoading || modelLocked || modelError) && (
+        <div className="composer-model-meta muted">
+          {modelLoading
+            ? 'Loading model options...'
+            : modelLocked
+              ? 'Model switch is locked while generating'
+              : modelError}
+        </div>
+      )}
+      <div
+        className={`composer-input-panel ${dragActive ? 'drag-active' : ''} ${hasPendingImages ? 'has-images' : ''}`}
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+      >
+        {showPromptPopover && (
+          <div className="composer-prompt-popover" role="listbox" aria-label="Example prompts">
+            {promptOptions.map((prompt, index) => (
+              <button
+                key={`${index}-${prompt}`}
+                type="button"
+                className="composer-prompt-option"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => handleSelectPrompt(prompt)}
+                title={prompt}
+                disabled={disabled}
+              >
+                {prompt}
+              </button>
+            ))}
+          </div>
+        )}
+        {hasPendingImages && (
+          <div className="composer-inline-attachments">
+            {pendingImages.map((image, index) => (
+              <div className="composer-inline-attachment" key={`${image.file.name}-${index}`}>
+                <img src={image.previewUrl} alt={image.file.name} />
+                <div className="composer-inline-file" title={image.file.name}>
+                  {shortenFilename(image.file.name)}
+                </div>
+                <button
+                  className="composer-inline-remove"
+                  type="button"
+                  onClick={() => handleRemovePending(index)}
+                  aria-label={`Remove ${image.file.name}`}
+                >
+                  x
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <textarea
+          ref={textareaRef}
+          className="composer-input"
+          placeholder="Ask the scene agent..."
+          value={input}
+          disabled={disabled}
+          onFocus={handleInputFocus}
+          onBlur={handleInputBlur}
+          onPaste={handlePaste}
+          onChange={(event) => setInput(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter') return
+            if (event.ctrlKey || event.metaKey || event.shiftKey) {
+              return
+            }
+            event.preventDefault()
+            void handleSend()
+          }}
+          rows={1}
+        />
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          hidden
+          onChange={(event) => handleFiles(event.target.files)}
+        />
+        <button
+          type="button"
+          className="composer-plus-btn"
+          onClick={() => {
+            if (disabled) return
+            fileInputRef.current?.click()
+          }}
+          disabled={disabled || referenceImagesCount + pendingImages.length >= MAX_REFERENCE_IMAGES}
+          aria-label="Add images"
+        >
+          +
+        </button>
         {disabled && onStop ? (
-          <button className="primary-btn" onClick={onStop}>
-            Stop
+          <button className="composer-send-fab stop" onClick={onStop} aria-label="Stop generating">
+            ■
           </button>
         ) : (
-          <button className="primary-btn" onClick={() => void handleSend()} disabled={disabled}>
-            Send
+          <button
+            className="composer-send-fab"
+            onClick={() => void handleSend()}
+            disabled={disabled || !canSend}
+            aria-label="Send"
+          >
+            ↑
           </button>
         )}
+        <div className="composer-attachment-count">
+          {referenceImagesCount + pendingImages.length} / {MAX_REFERENCE_IMAGES} images
+        </div>
       </div>
     </div>
   )

@@ -59,12 +59,23 @@ def verify_render_with_references(
     render_path: str,
     reference_paths: list[str],
     user_request: str,
+    provider_name: str | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
+    selected_provider = (provider_name or settings.vlm_provider).lower()
+    selected_model = model or settings.get_vlm_default_model(selected_provider)
+    selected_api_key = api_key or settings.get_vlm_api_key(selected_provider)
+    if not selected_api_key:
+        raise ValueError(
+            f"No API key configured for provider '{selected_provider}'. "
+            "Set provider-specific API key or VLM_API_KEY."
+        )
     provider = get_vlm_provider(
-        provider_name=settings.vlm_provider,
-        api_key=settings.vlm_api_key,
-        model=settings.vlm_model,
+        provider_name=selected_provider,
+        api_key=selected_api_key,
+        model=selected_model,
     )
     model = provider.get_chat_model()
 

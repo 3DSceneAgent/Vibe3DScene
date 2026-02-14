@@ -269,54 +269,6 @@ def import_glb_model(ctx: Context, model_url: str, object_name: str = None) -> s
         return f"Error importing GLB model: {str(exc)}"
 
 
-def create_camera_from_objects(
-    ctx: Context,
-    object_names: list[str],
-    focal_length: str = "normal",
-    azimuth: float = 45,
-    elevation: float = 30,
-) -> str:
-    """Create and position camera to frame specified objects."""
-    try:
-        blender = runtime.get_blender_connection(logger)
-        result = blender.send_command(
-            "create_camera_from_objects",
-            {
-                "object_names": object_names,
-                "focal_length": focal_length,
-                "azimuth": azimuth,
-                "elevation": elevation,
-            },
-        )
-        return json.dumps(result, indent=2)
-    except Exception as exc:
-        logger.error("Error creating camera from objects: %s", str(exc))
-        return f"Error creating camera from objects: {str(exc)}"
-
-
-def create_camera_from_params(
-    ctx: Context,
-    x: float,
-    y: float,
-    z: float,
-    rot_x: float,
-    rot_y: float,
-    rot_z: float,
-    focal: float,
-) -> str:
-    """Create camera from explicit parameters."""
-    try:
-        blender = runtime.get_blender_connection(logger)
-        result = blender.send_command(
-            "create_camera_from_params",
-            {"x": x, "y": y, "z": z, "rot_x": rot_x, "rot_y": rot_y, "rot_z": rot_z, "focal": focal},
-        )
-        return json.dumps(result, indent=2)
-    except Exception as exc:
-        logger.error("Error creating camera from params: %s", str(exc))
-        return f"Error creating camera from params: {str(exc)}"
-
-
 def render_from_objects(
     ctx: Context,
     object_names: list[str],
@@ -479,6 +431,47 @@ def camera_act(
     except Exception as exc:
         logger.error("Error running camera action: %s", str(exc))
         raise Exception(f"Camera action failed: {str(exc)}")
+
+
+def camera_set_pose(
+    ctx: Context,
+    location: list[float],
+    rotation_euler: list[float],
+    focal_mm: float = 50.0,
+    mode: str = "rgb",
+    object_names: Optional[list[str]] = None,
+) -> CallToolResult:
+    """Set absolute camera pose and render from that viewpoint."""
+    try:
+        blender = runtime.get_blender_connection(logger)
+        temp_path = os.path.join(
+            tempfile.gettempdir(), f"blender_camera_pose_{os.getpid()}_{int(time.time())}.png"
+        )
+        result = blender.send_command(
+            "camera_set_pose",
+            {
+                "location": location,
+                "rotation_euler": rotation_euler,
+                "focal_mm": focal_mm,
+                "mode": mode,
+                "object_names": object_names or [],
+                "filepath": temp_path,
+            },
+        )
+        if not result.get("success"):
+            raise Exception("Camera set pose failed")
+        filepath = result["filepath"]
+        thread_id = _extract_thread_id(ctx)
+        camera_name = result.get("camera", "camera_set_pose")
+        return _render_result_to_markdown(
+            filepath=filepath,
+            thread_id=thread_id,
+            camera_name=camera_name,
+            alt_text="Camera pose render",
+        )
+    except Exception as exc:
+        logger.error("Error setting camera pose: %s", str(exc))
+        raise Exception(f"Camera set pose failed: {str(exc)}")
 
 
 def undo_last_snapshot(ctx: Context) -> str:

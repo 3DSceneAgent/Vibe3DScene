@@ -42,6 +42,7 @@ export type StreamEvent = {
   messages?: unknown[]
   todos?: TodoItem[]
   error?: string
+  status_code?: number
   delta?: string
   message_id?: string | null
   event?: 'done'
@@ -54,4 +55,26 @@ export type McpToolsInfo = {
   tool_count: number
   tools: string[]
   blender_mode: 'headless' | 'local-client' | string
+}
+
+export type VlmProviderOption = {
+  provider: string
+  display_name: string
+  default_model: string
+  models: string[]
+  configured: boolean
+}
+
+export type ThreadVlmSelection = {
+  thread_id: string
+  provider: string
+  model: string
+  locked: boolean
+}
+
+export type VlmModelsInfo = {
+  providers: VlmProviderOption[]
+  default_provider: string
+  default_model: string
+  thread_selection?: ThreadVlmSelection
 }

@@ -2,7 +2,7 @@ import type { Thread } from '../state/types'
 import { MessageList } from './MessageList'
 import { ChatComposer } from './ChatComposer'
 import { ReferenceImageStrip } from './ReferenceImageStrip'
-import type { ReferenceImage } from '../api/types'
+import type { ReferenceImage, VlmProviderOption } from '../api/types'
 
 type ChatTabProps = {
   thread: Thread | null
@@ -14,6 +14,24 @@ type ChatTabProps = {
   mcpTools: string[]
   mcpToolsLoading?: boolean
   mcpToolsError?: string | null
+  vlmProviders?: VlmProviderOption[]
+  vlmProvider?: string
+  vlmModel?: string
+  vlmLoading?: boolean
+  vlmError?: string | null
+  vlmLocked?: boolean
+  onVlmSelectionChange?: (provider: string, model: string) => void
+}
+
+type VlmSelectionOption = {
+  value: string
+  label: string
+  provider: string
+  model: string
+}
+
+function toSelectionValue(provider: string, model: string): string {
+  return `${encodeURIComponent(provider)}::${encodeURIComponent(model)}`
 }
 
 export function ChatTab({
@@ -25,11 +43,37 @@ export function ChatTab({
   examplePrompts,
   mcpTools,
   mcpToolsLoading,
-  mcpToolsError
+  mcpToolsError,
+  vlmProviders = [],
+  vlmProvider,
+  vlmModel,
+  vlmLoading = false,
+  vlmError = null,
+  vlmLocked = false,
+  onVlmSelectionChange
 }: ChatTabProps) {
   if (!thread) {
     return <div className="empty-state">Create a conversation to begin.</div>
   }
+
+  const selectionOptions: VlmSelectionOption[] = vlmProviders
+    .filter((provider) => provider.configured)
+    .flatMap((provider) => {
+      const models = provider.models.length > 0 ? provider.models : [provider.default_model]
+      return models.map((model) => ({
+        value: toSelectionValue(provider.provider, model),
+        label: `${provider.display_name} / ${model}`,
+        provider: provider.provider,
+        model
+      }))
+    })
+
+  const selectedOption =
+    selectionOptions.find(
+      (option) => option.provider === vlmProvider && option.model === vlmModel
+    ) ?? selectionOptions[0] ?? null
+  const selectorDisabled = isStreaming || vlmLocked
+  const availablePrompts = thread.messages.length === 0 ? examplePrompts : []
 
   return (
     <div className="chat-tab chat-pane">
@@ -44,10 +88,23 @@ export function ChatTab({
         onSend={onSend}
         onStop={onStop}
         referenceImagesCount={thread.referenceImages?.length ?? 0}
-        examplePrompts={examplePrompts}
+        examplePrompts={availablePrompts}
         mcpTools={mcpTools}
         mcpToolsLoading={mcpToolsLoading}
         mcpToolsError={mcpToolsError}
+        modelOptions={selectionOptions.map((option) => ({
+          value: option.value,
+          label: option.label
+        }))}
+        selectedModelValue={selectedOption?.value ?? ''}
+        onModelSelectionChange={(value) => {
+          const option = selectionOptions.find((entry) => entry.value === value)
+          if (!option) return
+          onVlmSelectionChange?.(option.provider, option.model)
+        }}
+        modelLoading={vlmLoading}
+        modelError={vlmError}
+        modelLocked={selectorDisabled}
       />
     </div>
   )

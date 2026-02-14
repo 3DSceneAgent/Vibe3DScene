@@ -403,7 +403,13 @@ def _latest_human_message(state: AgentState) -> str:
     return ""
 
 
-def verify_node(state: AgentState) -> Dict[str, Any]:
+def verify_node(
+    state: AgentState,
+    *,
+    provider_name: str | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
+) -> Dict[str, Any]:
     render_path = state.get("last_render_path")
     if not render_path:
         return {}
@@ -419,6 +425,9 @@ def verify_node(state: AgentState) -> Dict[str, Any]:
         render_path=render_path,
         reference_paths=reference_paths,
         user_request=_latest_human_message(state),
+        provider_name=provider_name,
+        api_key=api_key,
+        model=model,
     )
     verification.update(
         {
