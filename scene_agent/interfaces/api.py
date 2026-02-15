@@ -16,7 +16,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Uplo
 from fastapi.responses import StreamingResponse, Response, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage
 from scene_agent.blender.connection import BlenderConnection
 
@@ -557,6 +557,7 @@ class ChatRequest(BaseModel):
     thread_id: str = "default"
     vlm_provider: str | None = None
     vlm_model: str | None = None
+    enabled_mcp_tools: list[str] | None = None
 
 
 class ChatResponse(BaseModel):
@@ -589,6 +590,7 @@ class MCPToolsResponse(BaseModel):
     loaded: bool
     tool_count: int
     tools: list[str]
+    tool_hints: dict[str, str] = Field(default_factory=dict)
     blender_mode: str
 
 
@@ -658,6 +660,56 @@ def extract_available_tool_names(agent: Any) -> list[str]:
         if isinstance(name, str) and name
     ]
     return sorted(set(valid_names))
+
+
+def extract_available_tool_hints(agent: Any) -> dict[str, str]:
+    raw_hints = getattr(agent, "_available_tool_hints", {})
+    if not isinstance(raw_hints, dict):
+        return {}
+    cleaned: dict[str, str] = {}
+    for raw_name, raw_hint in raw_hints.items():
+        if not isinstance(raw_name, str):
+            continue
+        name = raw_name.strip()
+        if not name or not isinstance(raw_hint, str):
+            continue
+        hint = re.sub(r"\s+", " ", raw_hint).strip()
+        if not hint:
+            continue
+        cleaned[name] = hint
+    return cleaned
+
+
+def build_default_tool_hint(tool_name: str) -> str:
+    normalized = re.sub(r"[_\s]+", " ", tool_name).strip()
+    return f"MCP tool: {normalized}." if normalized else "MCP tool."
+
+
+def normalize_requested_tool_names(raw_names: list[str] | None) -> list[str] | None:
+    if raw_names is None:
+        return None
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_name in raw_names:
+        if not isinstance(raw_name, str):
+            continue
+        name = raw_name.strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        normalized.append(name)
+    return normalized
+
+
+def resolve_enabled_tool_names(
+    agent: Any,
+    requested_tool_names: list[str] | None,
+) -> list[str]:
+    available_tool_names = extract_available_tool_names(agent)
+    if requested_tool_names is None:
+        return available_tool_names
+    requested_set = set(requested_tool_names)
+    return [name for name in available_tool_names if name in requested_set]
 
 
 def build_headless_diagnostics(
@@ -842,11 +894,17 @@ async def get_mcp_tools(thread_id: str):
         ) from exc
 
     tools = extract_available_tool_names(agent)
+    tool_hints_raw = extract_available_tool_hints(agent)
+    tool_hints = {
+        name: tool_hints_raw.get(name, build_default_tool_hint(name))
+        for name in tools
+    }
     return MCPToolsResponse(
         thread_id=thread_id,
         loaded=len(tools) > 0,
         tool_count=len(tools),
         tools=tools,
+        tool_hints=tool_hints,
         blender_mode=settings.blender_mode,
     )
 
@@ -869,11 +927,19 @@ async def chat(request: ChatRequest):
             request.vlm_model,
         )
         agent = await get_agent(request.thread_id)
+        enabled_tool_names = resolve_enabled_tool_names(
+            agent,
+            normalize_requested_tool_names(request.enabled_mcp_tools),
+        )
         config = {"configurable": {"thread_id": request.thread_id}}
         
         # Run agent
         result = await agent.ainvoke(
-            {"messages": [HumanMessage(content=request.message)], "thread_id": request.thread_id},
+            {
+                "messages": [HumanMessage(content=request.message)],
+                "thread_id": request.thread_id,
+                "enabled_tool_names": enabled_tool_names,
+            },
             config=config
         )
         
@@ -924,6 +990,10 @@ async def chat_stream(request: ChatRequest):
                 request.vlm_model,
             )
             agent = await get_agent(request.thread_id)
+            enabled_tool_names = resolve_enabled_tool_names(
+                agent,
+                normalize_requested_tool_names(request.enabled_mcp_tools),
+            )
             config = {"configurable": {"thread_id": request.thread_id}}
             try:
                 state = await agent.aget_state(config)
@@ -944,7 +1014,11 @@ async def chat_stream(request: ChatRequest):
                 pass
 
             stream = agent.astream(
-                {"messages": [HumanMessage(content=request.message)], "thread_id": request.thread_id},
+                {
+                    "messages": [HumanMessage(content=request.message)],
+                    "thread_id": request.thread_id,
+                    "enabled_tool_names": enabled_tool_names,
+                },
                 config=config,
                 stream_mode=["messages", "values"]
             )

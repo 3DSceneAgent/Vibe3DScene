@@ -68,8 +68,13 @@ export function SceneInfoPanel({
     <div className={`scene-objects-panel ${collapsed ? 'collapsed' : ''}`}>
       <div className="scene-objects-header">
         <div className="panel-title">Scene Objects</div>
-        <button className="ghost-btn scene-objects-toggle" onClick={onToggleCollapse}>
-          {collapsed ? 'Show' : 'Hide'}
+        <button
+          className="ghost-btn scene-objects-toggle"
+          onClick={onToggleCollapse}
+          aria-label={collapsed ? 'Expand Scene Objects panel' : 'Collapse Scene Objects panel'}
+          title={collapsed ? 'Expand' : 'Collapse'}
+        >
+          {collapsed ? '>>' : '<<'}
         </button>
       </div>
       {!collapsed && (

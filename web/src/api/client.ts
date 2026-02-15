@@ -14,6 +14,7 @@ type StreamChatArgs = {
   baseUrl: string
   message: string
   threadId: string
+  enabledMcpTools?: string[]
   vlmProvider?: string
   vlmModel?: string
   onEvent: (event: StreamEvent) => void
@@ -24,12 +25,16 @@ export async function streamChat({
   baseUrl,
   message,
   threadId,
+  enabledMcpTools,
   vlmProvider,
   vlmModel,
   onEvent,
   signal
 }: StreamChatArgs) {
-  const payload: Record<string, string> = { message, thread_id: threadId }
+  const payload: Record<string, unknown> = { message, thread_id: threadId }
+  if (enabledMcpTools) {
+    payload.enabled_mcp_tools = enabledMcpTools
+  }
   if (vlmProvider) {
     payload.vlm_provider = vlmProvider
   }
@@ -215,11 +220,23 @@ export async function getMcpTools(
     throw new Error(`Failed to load MCP tools (${response.status})`)
   }
   const data = (await response.json()) as Partial<McpToolsInfo>
+  const tool_hints: Record<string, string> = {}
+  if (data.tool_hints && typeof data.tool_hints === 'object' && !Array.isArray(data.tool_hints)) {
+    Object.entries(data.tool_hints).forEach(([key, value]) => {
+      if (typeof key !== 'string' || !key) return
+      if (typeof value !== 'string') return
+      const normalized = value.trim()
+      if (!normalized) return
+      tool_hints[key] = normalized
+    })
+  }
+
   return {
     thread_id: typeof data.thread_id === 'string' ? data.thread_id : threadId,
     loaded: Boolean(data.loaded),
     tool_count: typeof data.tool_count === 'number' ? data.tool_count : 0,
     tools: Array.isArray(data.tools) ? data.tools.filter((item): item is string => typeof item === 'string') : [],
+    tool_hints,
     blender_mode: typeof data.blender_mode === 'string' ? data.blender_mode : 'unknown'
   }
 }

@@ -15,6 +15,22 @@
   --color-text: #e6ecf4;
   --color-muted: #9aa3b2;
   --color-accent: #5fa4ff;
+  --composer-control-bg-start: rgba(24, 33, 52, 0.96);
+  --composer-control-bg-end: rgba(13, 19, 32, 0.96);
+  --composer-tools-bg: rgba(11, 16, 28, 0.97);
+  --composer-tools-shadow: 0 16px 34px rgba(6, 9, 16, 0.45);
+  --composer-input-bg-start: rgba(18, 26, 44, 0.98);
+  --composer-input-bg-end: rgba(12, 18, 30, 0.98);
+  --composer-input-drag-bg-start: rgba(23, 36, 64, 0.98);
+  --composer-input-drag-bg-end: rgba(14, 23, 40, 0.98);
+  --composer-plus-bg: rgba(23, 32, 50, 0.96);
+  --composer-plus-border: rgba(255, 255, 255, 0.1);
+  --composer-plus-hover-bg: rgba(30, 42, 64, 0.98);
+  --composer-prompt-bg-start: rgba(19, 25, 40, 0.98);
+  --composer-prompt-bg-end: rgba(11, 16, 28, 0.96);
+  --composer-prompt-border: rgba(95, 164, 255, 0.4);
+  --composer-prompt-shadow: 0 14px 30px rgba(6, 9, 16, 0.45);
+  --composer-prompt-divider: rgba(255, 255, 255, 0.07);
 }
 
 :root[data-theme='light'] {
@@ -25,6 +41,22 @@
   --color-text: #1a1f2a;
   --color-muted: #5c677a;
   --color-accent: #3578e5;
+  --composer-control-bg-start: #ffffff;
+  --composer-control-bg-end: #f3f6fb;
+  --composer-tools-bg: #ffffff;
+  --composer-tools-shadow: 0 16px 34px rgba(16, 20, 30, 0.14);
+  --composer-input-bg-start: #ffffff;
+  --composer-input-bg-end: #f6f8fc;
+  --composer-input-drag-bg-start: #edf3ff;
+  --composer-input-drag-bg-end: #e7efff;
+  --composer-plus-bg: #ffffff;
+  --composer-plus-border: rgba(16, 20, 30, 0.18);
+  --composer-plus-hover-bg: #f2f6fd;
+  --composer-prompt-bg-start: #ffffff;
+  --composer-prompt-bg-end: #f4f7fc;
+  --composer-prompt-border: rgba(53, 120, 229, 0.34);
+  --composer-prompt-shadow: 0 14px 30px rgba(16, 20, 30, 0.14);
+  --composer-prompt-divider: rgba(16, 20, 30, 0.08);
 }
 
 * {

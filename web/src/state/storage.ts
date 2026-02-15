@@ -14,10 +14,12 @@ const MAX_MESSAGES_PER_THREAD = 100
 export const defaultSettings: Settings = {
   backendUrl: 'http://localhost:8000',
   theme: 'dark',
-  autoRefreshScene: true
+  autoRefreshScene: true,
+  viewportTheme: 'auto'
 }
 
 const legacyDarkThemes = new Set(['midnight', 'slate', 'warm'])
+const viewportThemes = new Set<Settings['viewportTheme']>(['auto', 'dark', 'light'])
 const useIndexedDB = isIndexedDBSupported()
 
 function sanitizeThreads(threads: Thread[]): Thread[] {
@@ -132,17 +134,31 @@ function loadSettingsFromLocalStorage(): Settings {
     const raw = localStorage.getItem(SETTINGS_KEY)
     if (!raw) return defaultSettings
     const parsed = JSON.parse(raw) as Partial<Settings> & { sceneTabCollapsed?: boolean }
-    const nextTheme =
-      parsed.theme && legacyDarkThemes.has(parsed.theme)
-        ? 'dark'
-        : parsed.theme || defaultSettings.theme
-    return {
-      backendUrl: parsed.backendUrl || defaultSettings.backendUrl,
-      theme: nextTheme,
-      autoRefreshScene: parsed.autoRefreshScene ?? defaultSettings.autoRefreshScene
-    }
+    return normalizeSettings(parsed)
   } catch {
     return defaultSettings
+  }
+}
+
+function normalizeSettings(settings: Partial<Settings> | null | undefined): Settings {
+  const rawTheme = settings?.theme
+  const nextTheme =
+    rawTheme && legacyDarkThemes.has(rawTheme)
+      ? 'dark'
+      : rawTheme === 'dark' || rawTheme === 'light'
+        ? rawTheme
+        : defaultSettings.theme
+  const rawViewportTheme = settings?.viewportTheme
+  const nextViewportTheme =
+    typeof rawViewportTheme === 'string' && viewportThemes.has(rawViewportTheme as Settings['viewportTheme'])
+      ? (rawViewportTheme as Settings['viewportTheme'])
+      : defaultSettings.viewportTheme
+
+  return {
+    backendUrl: settings?.backendUrl || defaultSettings.backendUrl,
+    theme: nextTheme,
+    autoRefreshScene: settings?.autoRefreshScene ?? defaultSettings.autoRefreshScene,
+    viewportTheme: nextViewportTheme
   }
 }
 
@@ -169,7 +185,7 @@ export async function loadSettingsAsync(): Promise<Settings> {
     try {
       const settings = await loadSettingsFromIndexedDB()
       if (settings) {
-        return settings
+        return normalizeSettings(settings)
       }
       // Try to migrate from localStorage if IndexedDB is empty
       const localSettings = loadSettingsFromLocalStorage()

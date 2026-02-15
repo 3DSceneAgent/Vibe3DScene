@@ -2,6 +2,7 @@
 LangGraph state machine construction.
 Creates the agent graph following LangGraph best practices.
 """
+import re
 from typing import Literal
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode, tools_condition
@@ -13,6 +14,16 @@ from scene_agent.agent.nodes import agent_node, update_memory_node, verify_node
 from scene_agent.config import get_settings
 from scene_agent.vlm import get_vlm_provider
 from scene_agent.tools import get_blender_tools
+
+
+def _extract_tool_hint(tool: object) -> str | None:
+    description = getattr(tool, "description", None)
+    if not isinstance(description, str):
+        return None
+    normalized = re.sub(r"\s+", " ", description).strip()
+    if not normalized:
+        return None
+    return normalized
 
 
 def _route_after_update(state: AgentState) -> Literal["verify", "agent"]:
@@ -72,6 +83,14 @@ async def create_agent_graph(
         for tool in tools
         if hasattr(tool, "name") and isinstance(tool.name, str) and tool.name
     ]
+    available_tool_hints: dict[str, str] = {}
+    for tool in tools:
+        tool_name = getattr(tool, "name", None)
+        if not isinstance(tool_name, str) or not tool_name or tool_name in available_tool_hints:
+            continue
+        hint = _extract_tool_hint(tool)
+        if hint:
+            available_tool_hints[tool_name] = hint
     
     # Bind tools to model
     llm_with_tools = model.bind_tools(tools)
@@ -118,6 +137,7 @@ async def create_agent_graph(
     memory = MemorySaver()
     app = builder.compile(checkpointer=memory)
     setattr(app, "_available_tool_names", available_tool_names)
+    setattr(app, "_available_tool_hints", available_tool_hints)
     setattr(app, "_vlm_provider", selected_provider)
     setattr(app, "_vlm_model", selected_model)
     

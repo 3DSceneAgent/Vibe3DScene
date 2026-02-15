@@ -35,6 +35,7 @@ export type Thread = {
   title: string
   createdAt: number
   messages: Message[]
+  mcpToolEnabled?: Record<string, boolean>
   vlmProvider?: string
   vlmModel?: string
   vlmLocked?: boolean
@@ -48,9 +49,11 @@ export type Thread = {
 }
 
 export type ThemeId = 'dark' | 'light'
+export type ViewportThemeId = 'auto' | 'dark' | 'light'
 
 export type Settings = {
   backendUrl: string
   theme: ThemeId
   autoRefreshScene: boolean
+  viewportTheme: ViewportThemeId
 }

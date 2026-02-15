@@ -12,6 +12,9 @@ type ChatComposerProps = {
   referenceImagesCount?: number
   examplePrompts?: string[]
   mcpTools?: string[]
+  mcpToolHints?: Record<string, string>
+  mcpToolEnabled?: Record<string, boolean>
+  onMcpToolToggle?: (toolName: string, enabled: boolean) => void
   mcpToolsLoading?: boolean
   mcpToolsError?: string | null
   modelOptions?: ModelOption[]
@@ -31,6 +34,9 @@ export function ChatComposer({
   referenceImagesCount = 0,
   examplePrompts = [],
   mcpTools = [],
+  mcpToolHints = {},
+  mcpToolEnabled = {},
+  onMcpToolToggle,
   mcpToolsLoading = false,
   mcpToolsError = null,
   modelOptions = [],
@@ -156,9 +162,10 @@ export function ChatComposer({
 
   const promptOptions = examplePrompts.slice(0, 5)
   const showPromptPopover = isInputFocused && input.trim().length === 0 && promptOptions.length > 0
-  const modelSelectDisabled = disabled || modelLocked || modelLoading || modelOptions.length === 0
+  const modelSelectDisabled = modelLocked || modelLoading || modelOptions.length === 0
   const hasPendingImages = pendingImages.length > 0
   const canSend = input.trim().length > 0
+  const enabledToolCount = mcpTools.filter((toolName) => mcpToolEnabled[toolName] !== false).length
 
   const shortenFilename = (filename: string) => {
     const stem = filename.replace(/\.[^/.]+$/, '')
@@ -186,7 +193,6 @@ export function ChatComposer({
         </div>
         <div
           className={`composer-tools-panel ${isToolsOpen ? 'open' : ''}`}
-          onMouseLeave={() => setIsToolsOpen(false)}
           onBlur={(event) => {
             if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
               setIsToolsOpen(false)
@@ -199,7 +205,7 @@ export function ChatComposer({
             onClick={() => setIsToolsOpen((prev) => !prev)}
             aria-expanded={isToolsOpen}
           >
-            <span className="composer-tools-title">MCP tools ({mcpTools.length})</span>
+            <span className="composer-tools-title">MCP tools ({enabledToolCount}/{mcpTools.length})</span>
             {mcpToolsLoading && <span className="composer-tools-meta">Loading...</span>}
             {!mcpToolsLoading && mcpToolsError && (
               <span className="composer-tools-meta error">Unavailable</span>
@@ -209,9 +215,22 @@ export function ChatComposer({
             <div className="composer-tools-body">
               {mcpTools.length > 0 ? (
                 <ul className="composer-tools-list">
-                  {mcpTools.map((toolName) => (
-                    <li key={toolName}>{toolName}</li>
-                  ))}
+                  {mcpTools.map((toolName) => {
+                    const hint = mcpToolHints[toolName] || `MCP tool: ${toolName}`
+                    return (
+                      <li key={toolName} className="composer-tools-item">
+                        <label className="composer-tools-toggle" title={hint}>
+                        <input
+                          type="checkbox"
+                          checked={mcpToolEnabled[toolName] !== false}
+                          onChange={(event) => onMcpToolToggle?.(toolName, event.target.checked)}
+                          disabled={disabled || mcpToolsLoading}
+                        />
+                          <span className="composer-tools-name">{toolName}</span>
+                        </label>
+                      </li>
+                    )
+                  })}
                 </ul>
               ) : (
                 <div className="composer-tools-empty muted">
@@ -231,7 +250,7 @@ export function ChatComposer({
           {modelLoading
             ? 'Loading model options...'
             : modelLocked
-              ? 'Model switch is locked while generating'
+              ? 'Model switch is currently locked'
               : modelError}
         </div>
       )}

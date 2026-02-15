@@ -6,6 +6,7 @@ ENV_FILE="${SCRIPT_DIR}/.env"
 ENV_EXAMPLE="${SCRIPT_DIR}/.env.example"
 COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.tools.yml"
 GPU_COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.tools.gpu.yml"
+PROXY_COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.tools.proxy.generated.yml"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   cp "$ENV_EXAMPLE" "$ENV_FILE"
@@ -44,10 +45,57 @@ fi
 : "${TRELLIS2_GPU:=all}"
 : "${HUGGINGFACE_CACHE_DIR:=./cache/huggingface/hub}"
 : "${RETRIEVAL_CACHE_DIR:=./cache/asset-retrieval}"
+: "${POSTGRES_DATA_DIR:=./cache/postgres}"
+
+# If host shell has proxy variables, route TRELLIS2 downloads through host:7890.
+HOST_HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}"
+HOST_HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}"
+HOST_NO_PROXY="${NO_PROXY:-${no_proxy:-}}"
+TRELLIS2_PROXY_HTTP=""
+TRELLIS2_PROXY_HTTPS=""
+TRELLIS2_PROXY_NO_PROXY=""
+USE_PROXY_OVERRIDE=false
+rm -f "$PROXY_COMPOSE_FILE"
+
+if [[ -n "$HOST_HTTP_PROXY" ]]; then
+  TRELLIS2_PROXY_HTTP="${TRELLIS2_HTTP_PROXY:-http://host.docker.internal:7890}"
+fi
+if [[ -n "$HOST_HTTPS_PROXY" ]]; then
+  TRELLIS2_PROXY_HTTPS="${TRELLIS2_HTTPS_PROXY:-http://host.docker.internal:7890}"
+fi
+if [[ -n "$HOST_NO_PROXY" ]]; then
+  TRELLIS2_PROXY_NO_PROXY="${TRELLIS2_NO_PROXY:-localhost,127.0.0.1,host.docker.internal,postgres}"
+fi
+
+if [[ -n "$TRELLIS2_PROXY_HTTP" || -n "$TRELLIS2_PROXY_HTTPS" || -n "$TRELLIS2_PROXY_NO_PROXY" ]]; then
+  USE_PROXY_OVERRIDE=true
+  {
+    echo "services:"
+    echo "  trellis2:"
+    echo "    extra_hosts:"
+    echo "      - \"host.docker.internal:host-gateway\""
+    echo "    environment:"
+    if [[ -n "$TRELLIS2_PROXY_HTTP" ]]; then
+      echo "      HTTP_PROXY: \"$TRELLIS2_PROXY_HTTP\""
+      echo "      http_proxy: \"$TRELLIS2_PROXY_HTTP\""
+    fi
+    if [[ -n "$TRELLIS2_PROXY_HTTPS" ]]; then
+      echo "      HTTPS_PROXY: \"$TRELLIS2_PROXY_HTTPS\""
+      echo "      https_proxy: \"$TRELLIS2_PROXY_HTTPS\""
+    fi
+    if [[ -n "$TRELLIS2_PROXY_NO_PROXY" ]]; then
+      echo "      NO_PROXY: \"$TRELLIS2_PROXY_NO_PROXY\""
+      echo "      no_proxy: \"$TRELLIS2_PROXY_NO_PROXY\""
+    fi
+  } > "$PROXY_COMPOSE_FILE"
+fi
 
 COMPOSE_ARGS=(-f "$COMPOSE_FILE")
 if [[ "$TRELLIS2_ENABLE_GPU" == "true" ]]; then
   COMPOSE_ARGS+=( -f "$GPU_COMPOSE_FILE" )
+fi
+if [[ "$USE_PROXY_OVERRIDE" == "true" ]]; then
+  COMPOSE_ARGS+=( -f "$PROXY_COMPOSE_FILE" )
 fi
 
 SERVICES=()
@@ -55,6 +103,7 @@ if [[ "$ENABLE_TRELLIS2" == "true" ]]; then
   SERVICES+=(trellis2)
 fi
 if [[ "$ENABLE_RETRIEVAL" == "true" ]]; then
+  SERVICES+=(postgres)
   SERVICES+=(retrieval)
 fi
 if [[ "$ENABLE_PCG" == "true" ]]; then
@@ -74,6 +123,7 @@ fi
 
 if [[ "$ENABLE_RETRIEVAL" == "true" ]]; then
   mkdir -p "$RETRIEVAL_CACHE_DIR"
+  mkdir -p "$POSTGRES_DATA_DIR"
 fi
 
 if [[ "$TOOL_PULL_IMAGES" == "true" ]]; then

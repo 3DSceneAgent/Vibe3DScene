@@ -54,6 +54,7 @@ export type McpToolsInfo = {
   loaded: boolean
   tool_count: number
   tools: string[]
+  tool_hints: Record<string, string>
   blender_mode: 'headless' | 'local-client' | string
 }
 

@@ -1,3 +1,4 @@
 VIGA
 .env
 cache/
+docker-compose.tools.proxy.generated.yml

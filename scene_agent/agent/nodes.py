@@ -39,14 +39,15 @@ def agent_node(
     from scene_agent.agent.prompts import get_full_system_prompt
     
     messages = [SystemMessage(content=get_full_system_prompt())]
-    tool_constraints = _build_available_tools_constraint(available_tool_names)
+    effective_tool_names = _resolve_effective_available_tools(state, available_tool_names)
+    tool_constraints = _build_available_tools_constraint(effective_tool_names)
     if tool_constraints:
         messages.append(SystemMessage(content=tool_constraints))
     messages.extend(state["messages"])
     
     # Invoke the LLM
     response = llm_with_tools.invoke(messages)
-    response, dropped_tools = _filter_unavailable_tool_calls(response, available_tool_names)
+    response, dropped_tools = _filter_unavailable_tool_calls(response, effective_tool_names)
     if dropped_tools:
         content_text = _message_content_to_text(getattr(response, "content", ""))
         if not content_text.strip():
@@ -59,8 +60,36 @@ def agent_node(
     return {"messages": [response]}
 
 
+def _resolve_effective_available_tools(
+    state: AgentState,
+    available_tool_names: list[str] | None,
+) -> list[str] | None:
+    if available_tool_names is None:
+        return None
+    deduped_available: list[str] = []
+    seen_available: set[str] = set()
+    for name in available_tool_names:
+        if not isinstance(name, str) or not name or name in seen_available:
+            continue
+        seen_available.add(name)
+        deduped_available.append(name)
+
+    requested_tools = state.get("enabled_tool_names")
+    if requested_tools is None:
+        return deduped_available
+    if not isinstance(requested_tools, list):
+        return deduped_available
+
+    requested_set = {
+        tool_name
+        for tool_name in requested_tools
+        if isinstance(tool_name, str) and tool_name
+    }
+    return [name for name in deduped_available if name in requested_set]
+
+
 def _build_available_tools_constraint(available_tool_names: list[str] | None) -> str | None:
-    if not available_tool_names:
+    if available_tool_names is None:
         return None
     deduped = sorted(set(available_tool_names))
     tools_csv = ", ".join(deduped)
@@ -84,7 +113,7 @@ def _filter_unavailable_tool_calls(
     response: Any,
     available_tool_names: list[str] | None,
 ) -> tuple[Any, list[str]]:
-    if not available_tool_names:
+    if available_tool_names is None:
         return response, []
     tool_calls = getattr(response, "tool_calls", None)
     if not isinstance(tool_calls, list) or len(tool_calls) == 0:

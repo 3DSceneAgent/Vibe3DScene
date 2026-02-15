@@ -51,3 +51,24 @@ def test_agent_node_injects_fallback_text_when_all_tool_calls_dropped():
 
     assert message.tool_calls == []
     assert "skipped unavailable tool calls" in message.content.lower()
+
+
+def test_agent_node_respects_runtime_enabled_tool_names():
+    llm = FakeLLM(
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "get_scene_info", "args": {}, "id": "tc-4", "type": "tool_call"},
+                {"name": "camera_observe", "args": {}, "id": "tc-5", "type": "tool_call"},
+            ],
+        )
+    )
+
+    result = agent_node(
+        {"messages": [], "enabled_tool_names": ["camera_observe"]},
+        llm,
+        ["get_scene_info", "camera_observe"],
+    )
+    message = result["messages"][0]
+
+    assert [call["name"] for call in message.tool_calls] == ["camera_observe"]

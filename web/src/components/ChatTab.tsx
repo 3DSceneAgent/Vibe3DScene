@@ -12,6 +12,9 @@ type ChatTabProps = {
   backendUrl: string
   examplePrompts: string[]
   mcpTools: string[]
+  mcpToolHints?: Record<string, string>
+  mcpToolEnabled?: Record<string, boolean>
+  onMcpToolToggle?: (toolName: string, enabled: boolean) => void
   mcpToolsLoading?: boolean
   mcpToolsError?: string | null
   vlmProviders?: VlmProviderOption[]
@@ -42,6 +45,9 @@ export function ChatTab({
   backendUrl,
   examplePrompts,
   mcpTools,
+  mcpToolHints,
+  mcpToolEnabled,
+  onMcpToolToggle,
   mcpToolsLoading,
   mcpToolsError,
   vlmProviders = [],
@@ -72,7 +78,7 @@ export function ChatTab({
     selectionOptions.find(
       (option) => option.provider === vlmProvider && option.model === vlmModel
     ) ?? selectionOptions[0] ?? null
-  const selectorDisabled = isStreaming || vlmLocked
+  const selectorDisabled = vlmLocked
   const availablePrompts = thread.messages.length === 0 ? examplePrompts : []
 
   return (
@@ -90,6 +96,9 @@ export function ChatTab({
         referenceImagesCount={thread.referenceImages?.length ?? 0}
         examplePrompts={availablePrompts}
         mcpTools={mcpTools}
+        mcpToolHints={mcpToolHints}
+        mcpToolEnabled={mcpToolEnabled}
+        onMcpToolToggle={onMcpToolToggle}
         mcpToolsLoading={mcpToolsLoading}
         mcpToolsError={mcpToolsError}
         modelOptions={selectionOptions.map((option) => ({

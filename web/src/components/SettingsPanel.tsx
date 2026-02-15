@@ -1,4 +1,4 @@
-import type { Settings, ThemeId } from '../state/types'
+import type { Settings, ThemeId, ViewportThemeId } from '../state/types'
 
 type SettingsPanelProps = {
   settings: Settings
@@ -8,6 +8,10 @@ type SettingsPanelProps = {
 export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
   const updateTheme = (theme: ThemeId) => {
     onChange({ ...settings, theme })
+  }
+
+  const updateViewportTheme = (viewportTheme: ViewportThemeId) => {
+    onChange({ ...settings, viewportTheme })
   }
 
   return (
@@ -45,6 +49,44 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
             <span className="theme-swatch light" />
             Light
           </button>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-header">
+          <div className="panel-title">Viewport</div>
+        </div>
+        <div className="field">
+          <span>Viewport Theme</span>
+          <div className="viewport-theme-options" role="radiogroup" aria-label="Viewport Theme">
+            <button
+              type="button"
+              className={`viewport-theme-card ${settings.viewportTheme === 'auto' ? 'active' : ''}`}
+              onClick={() => updateViewportTheme('auto')}
+              aria-pressed={settings.viewportTheme === 'auto'}
+            >
+              <span className="viewport-theme-title">Auto</span>
+              <span className="viewport-theme-meta">Follow UI theme</span>
+            </button>
+            <button
+              type="button"
+              className={`viewport-theme-card ${settings.viewportTheme === 'dark' ? 'active' : ''}`}
+              onClick={() => updateViewportTheme('dark')}
+              aria-pressed={settings.viewportTheme === 'dark'}
+            >
+              <span className="viewport-theme-title">Dark</span>
+              <span className="viewport-theme-meta">Dark viewport</span>
+            </button>
+            <button
+              type="button"
+              className={`viewport-theme-card ${settings.viewportTheme === 'light' ? 'active' : ''}`}
+              onClick={() => updateViewportTheme('light')}
+              aria-pressed={settings.viewportTheme === 'light'}
+            >
+              <span className="viewport-theme-title">Light</span>
+              <span className="viewport-theme-meta">Light viewport</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>

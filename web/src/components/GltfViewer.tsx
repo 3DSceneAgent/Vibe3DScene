@@ -8,10 +8,14 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls'
 import type { SceneHierarchyNode } from '../state/types'
 
 type EnvironmentPreset = 'studio' | 'warm' | 'cool'
+type ViewportTheme = 'auto' | 'dark' | 'light'
+type UiTheme = 'dark' | 'light'
 
 type GltfViewerProps = {
   gltfUrl: string | null
   environment: EnvironmentPreset
+  viewportTheme?: ViewportTheme
+  uiTheme?: UiTheme
   onHierarchyChange?: (nodes: SceneHierarchyNode[]) => void
   isFullscreen?: boolean
   onToggleFullscreen?: () => void
@@ -21,6 +25,32 @@ const environmentPresets: Record<EnvironmentPreset, { ambient: number; direction
   studio: { ambient: 0.55, directional: 1.2, color: '#ffffff' },
   warm: { ambient: 0.6, directional: 1.1, color: '#ffd8b2' },
   cool: { ambient: 0.5, directional: 1.3, color: '#cfe6ff' }
+}
+
+const viewportPalettes: Record<
+  UiTheme,
+  {
+    background: number
+    defaultGridMajor: number
+    defaultGridMinor: number
+    modelGridMajor: number
+    modelGridMinor: number
+  }
+> = {
+  dark: {
+    background: 0x0f1117,
+    defaultGridMajor: 0x36425a,
+    defaultGridMinor: 0x1e2534,
+    modelGridMajor: 0x3a4865,
+    modelGridMinor: 0x1e2534
+  },
+  light: {
+    background: 0xf3f6fb,
+    defaultGridMajor: 0xb4c3d8,
+    defaultGridMinor: 0xd6dfeb,
+    modelGridMajor: 0xa8bad2,
+    modelGridMinor: 0xd6dfeb
+  }
 }
 
 function buildHierarchy(object: THREE.Object3D): SceneHierarchyNode {
@@ -35,6 +65,8 @@ function buildHierarchy(object: THREE.Object3D): SceneHierarchyNode {
 export function GltfViewer({
   gltfUrl,
   environment,
+  viewportTheme = 'auto',
+  uiTheme = 'dark',
   onHierarchyChange,
   isFullscreen = false,
   onToggleFullscreen
@@ -52,13 +84,25 @@ export function GltfViewer({
   const loadTokenRef = useRef(0)
 
   const preset = useMemo(() => environmentPresets[environment], [environment])
+  const resolvedViewportTheme: UiTheme =
+    viewportTheme === 'auto' ? uiTheme : viewportTheme
+  const viewportPalette = useMemo(
+    () => viewportPalettes[resolvedViewportTheme],
+    [resolvedViewportTheme]
+  )
+  const viewportPaletteRef = useRef(viewportPalette)
+
+  useEffect(() => {
+    viewportPaletteRef.current = viewportPalette
+  }, [viewportPalette])
 
   useEffect(() => {
     if (!containerRef.current) return
 
     const container = containerRef.current
     const scene = new THREE.Scene()
-    scene.background = new THREE.Color(0x0f1117)
+    const palette = viewportPaletteRef.current
+    scene.background = new THREE.Color(palette.background)
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
     renderer.outputColorSpace = THREE.SRGBColorSpace
@@ -74,7 +118,12 @@ export function GltfViewer({
     directional.position.set(8, 14, 6)
     scene.add(ambient, directional)
 
-    const defaultGrid = new THREE.GridHelper(20, 40, 0x36425a, 0x1e2534)
+    const defaultGrid = new THREE.GridHelper(
+      20,
+      40,
+      palette.defaultGridMajor,
+      palette.defaultGridMinor
+    )
     defaultGrid.position.y = -0.01
     scene.add(defaultGrid)
 
@@ -139,6 +188,45 @@ export function GltfViewer({
 
   useEffect(() => {
     const scene = sceneRef.current
+    if (!scene) return
+
+    scene.background = new THREE.Color(viewportPalette.background)
+
+    if (gridRef.current) {
+      scene.remove(gridRef.current)
+    }
+
+    let nextGrid: THREE.GridHelper
+    if (modelRef.current) {
+      const box = new THREE.Box3().setFromObject(modelRef.current)
+      const size = new THREE.Vector3()
+      box.getSize(size)
+      const maxDim = Math.max(size.x, size.y, size.z, 0.1)
+      const gridSize = Math.max(20, Math.ceil(maxDim * 2))
+      const divisions = Math.max(20, Math.min(160, gridSize * 2))
+      nextGrid = new THREE.GridHelper(
+        gridSize,
+        divisions,
+        viewportPalette.modelGridMajor,
+        viewportPalette.modelGridMinor
+      )
+      nextGrid.position.y = box.min.y - 0.001
+    } else {
+      nextGrid = new THREE.GridHelper(
+        20,
+        40,
+        viewportPalette.defaultGridMajor,
+        viewportPalette.defaultGridMinor
+      )
+      nextGrid.position.y = -0.01
+    }
+
+    scene.add(nextGrid)
+    gridRef.current = nextGrid
+  }, [viewportPalette])
+
+  useEffect(() => {
+    const scene = sceneRef.current
     const camera = cameraRef.current
     const controls = controlsRef.current
     if (!scene || !camera || !controls) return
@@ -151,7 +239,13 @@ export function GltfViewer({
       if (gridRef.current) {
         scene.remove(gridRef.current)
       }
-      const nextGrid = new THREE.GridHelper(20, 40, 0x36425a, 0x1e2534)
+      const palette = viewportPaletteRef.current
+      const nextGrid = new THREE.GridHelper(
+        20,
+        40,
+        palette.defaultGridMajor,
+        palette.defaultGridMinor
+      )
       nextGrid.position.y = -0.01
       scene.add(nextGrid)
       gridRef.current = nextGrid
@@ -196,7 +290,13 @@ export function GltfViewer({
         }
         const gridSize = Math.max(20, Math.ceil(maxDim * 2))
         const divisions = Math.max(20, Math.min(160, gridSize * 2))
-        const nextGrid = new THREE.GridHelper(gridSize, divisions, 0x3a4865, 0x1e2534)
+        const palette = viewportPaletteRef.current
+        const nextGrid = new THREE.GridHelper(
+          gridSize,
+          divisions,
+          palette.modelGridMajor,
+          palette.modelGridMinor
+        )
         nextGrid.position.y = box.min.y - 0.001
         scene.add(nextGrid)
         gridRef.current = nextGrid
@@ -242,7 +342,7 @@ export function GltfViewer({
           )}
         </div>
       </div>
-      <div className="viewer">
+      <div className={`viewer viewport-${resolvedViewportTheme}`}>
         {!gltfUrl && <div className="viewer-placeholder">No model loaded</div>}
         <div className="viewer-canvas" ref={containerRef} />
       </div>

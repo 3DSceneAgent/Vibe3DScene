@@ -2,7 +2,7 @@
 Agent state definitions with LangGraph best practices.
 Uses TypedDict with Annotated reducers for proper state management.
 """
-from typing import TypedDict, Annotated, Sequence
+from typing import TypedDict, Annotated, Sequence, NotRequired
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from operator import add
@@ -84,6 +84,7 @@ class AgentState(TypedDict):
         reference_images: List of reference image metadata for verification
         diagnostics: Diagnostic metadata keyed by request id
         thread_id: Conversation/session identifier
+        enabled_tool_names: Optional runtime MCP tool allow-list for this request
         last_render_path: Latest render file path from tools
         last_verified_path: Latest render path verified by VLM
         last_render_signature: Signature for last render sent to VLM
@@ -115,6 +116,7 @@ class AgentState(TypedDict):
 
     # Session identifier
     thread_id: str
+    enabled_tool_names: NotRequired[list[str] | None]
 
     # Verification tracking
     last_render_path: str | None

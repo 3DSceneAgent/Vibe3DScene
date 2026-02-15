@@ -45,6 +45,7 @@ function App() {
   const [backendMode, setBackendMode] = useState<'headless' | 'local-client' | null>(null)
   const [examplePrompts, setExamplePrompts] = useState<string[]>([])
   const [mcpToolsByThread, setMcpToolsByThread] = useState<Record<string, string[]>>({})
+  const [mcpToolHintsByThread, setMcpToolHintsByThread] = useState<Record<string, Record<string, string>>>({})
   const [mcpToolsErrorByThread, setMcpToolsErrorByThread] = useState<Record<string, string | null>>({})
   const [mcpToolsLoadingThreadId, setMcpToolsLoadingThreadId] = useState<string | null>(null)
   const [vlmProviders, setVlmProviders] = useState<VlmProviderOption[]>([])
@@ -208,10 +209,12 @@ function App() {
         const toolInfo = await getMcpTools(settings.backendUrl, threadId, controller.signal)
         if (cancelled) return
         setMcpToolsByThread((prev) => ({ ...prev, [threadId]: toolInfo.tools }))
+        setMcpToolHintsByThread((prev) => ({ ...prev, [threadId]: toolInfo.tool_hints }))
         setMcpToolsErrorByThread((prev) => ({ ...prev, [threadId]: null }))
       } catch (error) {
         if (cancelled) return
         setMcpToolsByThread((prev) => ({ ...prev, [threadId]: [] }))
+        setMcpToolHintsByThread((prev) => ({ ...prev, [threadId]: {} }))
         setMcpToolsErrorByThread((prev) => ({
           ...prev,
           [threadId]:
@@ -276,7 +279,7 @@ function App() {
             ...thread,
             vlmProvider: selectedProvider,
             vlmModel: nextModel,
-            vlmLocked: false
+            vlmLocked: Boolean(modelInfo.thread_selection?.locked)
           }
         })
       } catch (error) {
@@ -314,6 +317,7 @@ function App() {
       title: 'New chat',
       createdAt: Date.now(),
       messages: [],
+      mcpToolEnabled: {},
       vlmProvider: initialProvider,
       vlmModel: initialModel,
       vlmLocked: false,
@@ -348,6 +352,11 @@ function App() {
     loadedReferenceImagesRef.current.delete(threadId)
     delete sceneChangeRef.current[threadId]
     setMcpToolsByThread((prev) => {
+      const next = { ...prev }
+      delete next[threadId]
+      return next
+    })
+    setMcpToolHintsByThread((prev) => {
       const next = { ...prev }
       delete next[threadId]
       return next
@@ -415,6 +424,20 @@ function App() {
     [activeThreadId, updateThread, vlmProviders]
   )
 
+  const handleMcpToolToggle = useCallback(
+    (toolName: string, enabled: boolean) => {
+      if (!activeThreadId) return
+      updateThread(activeThreadId, (thread) => ({
+        ...thread,
+        mcpToolEnabled: {
+          ...(thread.mcpToolEnabled ?? {}),
+          [toolName]: enabled
+        }
+      }))
+    },
+    [activeThreadId, updateThread]
+  )
+
   const handleSceneHierarchyChange = useCallback(
     (threadId: string, hierarchy: SceneHierarchyNode[]) => {
       updateThread(threadId, (thread) => ({
@@ -451,6 +474,13 @@ function App() {
       return false
     }
     const threadId = activeThread.id
+    const hasMcpToolSnapshot =
+      Object.prototype.hasOwnProperty.call(mcpToolsByThread, threadId) &&
+      !mcpToolsErrorByThread[threadId]
+    const availableMcpTools = mcpToolsByThread[threadId] ?? []
+    const enabledMcpTools = hasMcpToolSnapshot
+      ? availableMcpTools.filter((toolName) => activeThread.mcpToolEnabled?.[toolName] !== false)
+      : undefined
     const selectedProvider =
       activeThread.vlmProvider || vlmDefaultProvider || vlmProviders[0]?.provider || undefined
     const selectedProviderOption = selectedProvider
@@ -541,7 +571,7 @@ function App() {
         title,
         vlmProvider: selectedProvider || thread.vlmProvider,
         vlmModel: selectedModel || thread.vlmModel,
-        vlmLocked: false,
+        vlmLocked: thread.vlmLocked ?? false,
         messages: [...thread.messages, userMessage, assistantMessage]
       }
     })
@@ -749,6 +779,7 @@ function App() {
       baseUrl: settings.backendUrl,
       message: text,
       threadId,
+      enabledMcpTools,
       vlmProvider: selectedProvider,
       vlmModel: selectedModel,
       signal: abortController.signal,
@@ -1024,6 +1055,9 @@ function App() {
                   backendUrl={settings.backendUrl}
                   examplePrompts={examplePrompts}
                   mcpTools={mcpToolsByThread[activeThread.id] ?? []}
+                  mcpToolHints={mcpToolHintsByThread[activeThread.id] ?? {}}
+                  mcpToolEnabled={activeThread.mcpToolEnabled ?? {}}
+                  onMcpToolToggle={handleMcpToolToggle}
                   mcpToolsLoading={mcpToolsLoadingThreadId === activeThread.id}
                   mcpToolsError={mcpToolsErrorByThread[activeThread.id] ?? null}
                   vlmProviders={vlmProviders}
@@ -1042,6 +1076,8 @@ function App() {
                   gltfUrl={activeThread.gltfUrl ?? null}
                   sceneHierarchy={activeThread.sceneHierarchy ?? []}
                   environment={environment}
+                  viewportTheme={settings.viewportTheme}
+                  uiTheme={settings.theme}
                   autoFetch={settings.autoRefreshScene}
                   onAutoFetchChange={(enabled) =>
                     setSettings((prev) => ({ ...prev, autoRefreshScene: enabled }))

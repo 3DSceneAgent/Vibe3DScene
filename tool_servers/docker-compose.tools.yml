@@ -1,4 +1,23 @@
 services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg16}
+    container_name: ${POSTGRES_CONTAINER:-asset-retrieval-postgres}
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME_QWEN}
+    volumes:
+      - "${POSTGRES_DATA_DIR:-./cache/postgres}:/var/lib/postgresql/data"
+      - "${POSTGRES_INIT_DIR:-./postgres/init}:/docker-entrypoint-initdb.d:ro"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME_QWEN}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - tools
+    restart: unless-stopped
+
   trellis2:
     image: ${TRELLIS2_IMAGE}
     container_name: ${TRELLIS2_CONTAINER}
@@ -20,6 +39,9 @@ services:
     image: ${RETRIEVAL_IMAGE}
     container_name: ${RETRIEVAL_CONTAINER}
     command: ["uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "${RETRIEVAL_CONTAINER_PORT}"]
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "${RETRIEVAL_HOST}:${RETRIEVAL_PORT}:${RETRIEVAL_CONTAINER_PORT}"
     environment:
@@ -41,8 +63,6 @@ services:
       HF_HOME: /cache/huggingface
       HUGGINGFACE_HUB_CACHE: /cache/huggingface/hub
       TRANSFORMERS_CACHE: /cache/huggingface/hub
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       - "${RETRIEVAL_CACHE_DIR:-./cache/asset-retrieval}:/cache/asset-retrieval"
       - "${HUGGINGFACE_CACHE_DIR:-./cache/huggingface/hub}:/cache/huggingface/hub"

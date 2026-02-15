@@ -6,6 +6,8 @@ import { RenderGallery } from './RenderGallery'
 import { SceneInfoPanel } from './SceneInfoPanel'
 
 type EnvironmentPreset = 'studio' | 'warm' | 'cool'
+type ViewportTheme = 'auto' | 'dark' | 'light'
+type UiTheme = 'dark' | 'light'
 
 type SceneTabProps = {
   threadId: string
@@ -13,6 +15,8 @@ type SceneTabProps = {
   gltfUrl: string | null
   sceneHierarchy: SceneHierarchyNode[]
   environment: EnvironmentPreset
+  viewportTheme: ViewportTheme
+  uiTheme: UiTheme
   autoFetch: boolean
   onAutoFetchChange: (enabled: boolean) => void
   onEnvironmentChange: (preset: EnvironmentPreset) => void
@@ -87,6 +91,8 @@ export function SceneTab({
   gltfUrl,
   sceneHierarchy,
   environment,
+  viewportTheme,
+  uiTheme,
   autoFetch,
   onAutoFetchChange,
   onEnvironmentChange,
@@ -98,7 +104,7 @@ export function SceneTab({
   loading,
   canRunActions
 }: SceneTabProps) {
-  const [objectsCollapsed, setObjectsCollapsed] = useState(false)
+  const [objectsCollapsed, setObjectsCollapsed] = useState(true)
   const [isFullscreen, setIsFullscreen] = useState(false)
 
   useEffect(() => {
@@ -120,6 +126,8 @@ export function SceneTab({
         <GltfViewer
           gltfUrl={gltfUrl}
           environment={environment}
+          viewportTheme={viewportTheme}
+          uiTheme={uiTheme}
           onHierarchyChange={(hierarchy) => onHierarchyChange(threadId, hierarchy)}
           isFullscreen={fullscreen}
           onToggleFullscreen={() => setIsFullscreen((value) => !value)}
@@ -162,7 +170,7 @@ export function SceneTab({
             <span className="toggle-label">Auto-fetch</span>
           </label>
           <label className="select-label">
-            EnvLight
+            Environment
             <select
               className="styled-select"
               value={environment}

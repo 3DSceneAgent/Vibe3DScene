@@ -5,6 +5,7 @@ This folder provides one-click Docker Compose workflow for the three tool server
 - TRELLIS2
 - AssetRetrieval3D
 - PCGIntegrator3D
+- PostgreSQL (for AssetRetrieval3D)
 
 ## 1) Configure
 
@@ -39,6 +40,7 @@ If TRELLIS2 model pull requires Hugging Face auth, set:
 
 - `HUGGINGFACE_TOKEN=<your_token>`
 - `HUGGINGFACE_CACHE_DIR=./cache/huggingface/hub` (host cache mapped into containers to avoid repeated model downloads)
+- If host env has `HTTP_PROXY`/`HTTPS_PROXY`, `start_tool_servers.sh` injects TRELLIS2 proxy as `http://host.docker.internal:7890`; if host vars are empty, TRELLIS2 proxy vars are not set in the container.
 
 Compose files:
 
@@ -77,12 +79,15 @@ DOCKERHUB_NAMESPACE=<your_dockerhub_user> IMAGE_TAG=latest ./scripts/docker_buil
 
 If you are using OSS bootstrap for retrieval DB, set these in `tool_servers/.env`:
 
+- `DB_HOST=postgres`
 - `QWEN_DB_OSS_URL`
 - `QWEN_DB_DUMP_FORMAT`
 - `QWEN_DB_AUTO_BOOTSTRAP=true`
 - `QWEN_DB_DUMP_LOCAL_PATH=/cache/asset-retrieval/qwen_embeddings.dump.gz`
 - `QWEN_DB_REUSE_LOCAL_DUMP=true`
 - `RETRIEVAL_CACHE_DIR=./cache/asset-retrieval`
+- `POSTGRES_DATA_DIR=./cache/postgres`
+- `POSTGRES_INIT_DIR=./postgres/init`
 - `HUGGINGFACE_CACHE_DIR=./cache/huggingface/hub`
 
 Notes:
@@ -91,5 +96,8 @@ Notes:
 - Startup/stop scripts support both `docker compose` (v2) and `docker-compose`.
 - TRELLIS2 Docker support already exists in `tool_servers/TRELLIS.2`.
 - If you change ports in `tool_servers/.env`, update your root project `.env` (`TRELLIS2_PORT`, `RETRIEVAL_API_PORT`, `INFINIGEN_PORT`) to match.
-- Retrieval compose service now injects `host.docker.internal` via `host-gateway`, so Linux hosts can resolve it without extra manual DNS setup.
+- Retrieval defaults to the compose-managed PostgreSQL service (`DB_HOST=postgres`).
+- PostgreSQL data is persisted on host via `POSTGRES_DATA_DIR` and retrieval dump cache remains mapped via `RETRIEVAL_CACHE_DIR`.
+- `POSTGRES_INIT_DIR` is mounted to `/docker-entrypoint-initdb.d` and includes `CREATE EXTENSION vector` on first DB initialization.
+- PostgreSQL is internal-only by default (no host `5432` port publish), so it avoids host port conflicts.
 - TRELLIS2 and retrieval services mount `HUGGINGFACE_CACHE_DIR` into container HF cache path to reuse downloaded model artifacts.
