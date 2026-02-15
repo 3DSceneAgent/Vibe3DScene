@@ -1068,7 +1068,6 @@ function App() {
                 <div className="workspace-empty-badge">3D Scene Agent</div>
                 <div className="workspace-empty-title">Start Vibe Building 3D Scene</div>
                 <div className="workspace-empty-subtitle">
-                  Create a new chat from the left sidebar to begin.
                 </div>
                 <button className="primary-btn workspace-empty-cta" onClick={createThread}>
                   New Chat

@@ -47,8 +47,8 @@ Requirements:
     parser.add_argument(
         "--port",
         type=int,
-        default=8000,
-        help="API server port (default: 8000, only for api mode)"
+        default=None,
+        help="API server port (default: uses API_PORT env var or 8000, only for api mode)"
     )
 
     parser.add_argument(
@@ -74,9 +74,12 @@ Requirements:
         from scene_agent.interfaces.cli import main as cli_main
         cli_main()
     else:
-        print(f"Starting API server on {args.host}:{args.port}...")
+        from scene_agent.config import get_settings
+        settings = get_settings()
+        port = args.port if args.port is not None else settings.api_port
+        print(f"Starting API server on {args.host}:{port}...")
         from scene_agent.interfaces.api import run_api
-        run_api(host=args.host, port=args.port, workers=args.workers)
+        run_api(host=args.host, port=port, workers=args.workers)
 
 
 if __name__ == "__main__":

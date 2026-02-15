@@ -5,8 +5,13 @@ services:
     command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "${TRELLIS2_CONTAINER_PORT}"]
     environment:
       HUGGINGFACE_TOKEN: ${HUGGINGFACE_TOKEN}
+      HF_HOME: /cache/huggingface
+      HUGGINGFACE_HUB_CACHE: /cache/huggingface/hub
+      TRANSFORMERS_CACHE: /cache/huggingface/hub
     ports:
       - "${TRELLIS2_HOST}:${TRELLIS2_PORT}:${TRELLIS2_CONTAINER_PORT}"
+    volumes:
+      - "${HUGGINGFACE_CACHE_DIR:-./cache/huggingface/hub}:/cache/huggingface/hub"
     networks:
       - tools
     restart: unless-stopped
@@ -28,10 +33,19 @@ services:
       QWEN_DB_OSS_URL: ${QWEN_DB_OSS_URL}
       QWEN_DB_DUMP_FORMAT: ${QWEN_DB_DUMP_FORMAT}
       QWEN_DB_DUMP_LOCAL_PATH: ${QWEN_DB_DUMP_LOCAL_PATH}
+      QWEN_DB_REUSE_LOCAL_DUMP: ${QWEN_DB_REUSE_LOCAL_DUMP:-true}
       QWEN_DB_DOWNLOAD_TIMEOUT_SECONDS: ${QWEN_DB_DOWNLOAD_TIMEOUT_SECONDS}
       MAX_ASSETS: ${MAX_ASSETS}
       LOG_LEVEL: ${LOG_LEVEL}
       BASE_URL_TEMPLATE: ${BASE_URL_TEMPLATE}
+      HF_HOME: /cache/huggingface
+      HUGGINGFACE_HUB_CACHE: /cache/huggingface/hub
+      TRANSFORMERS_CACHE: /cache/huggingface/hub
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - "${RETRIEVAL_CACHE_DIR:-./cache/asset-retrieval}:/cache/asset-retrieval"
+      - "${HUGGINGFACE_CACHE_DIR:-./cache/huggingface/hub}:/cache/huggingface/hub"
     networks:
       - tools
     restart: unless-stopped

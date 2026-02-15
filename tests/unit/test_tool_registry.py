@@ -31,7 +31,20 @@ def _configure_runtime(
     sketchfab: bool = False,
     sketchfab_key: str = "",
 ) -> None:
+    switch_values = {
+        "ENABLE_HUNYUAN": hunyuan,
+        "ENABLE_RODIN": rodin,
+        "ENABLE_TRELLIS2": trellis2,
+        "ENABLE_RETRIEVAL": retrieval,
+        "ENABLE_INFINIGEN": infinigen,
+        "ENABLE_SKETCHFAB": sketchfab,
+    }
     monkeypatch.setattr(tool_registry.runtime, "get_blender_mode", lambda: mode)
+    monkeypatch.setattr(
+        tool_registry.runtime,
+        "parse_env_bool",
+        lambda name, default=False: switch_values.get(name, default),
+    )
     monkeypatch.setattr(tool_registry.runtime, "is_hunyuan_tool_enabled", lambda: hunyuan)
     monkeypatch.setattr(tool_registry.runtime, "is_rodin_tool_enabled", lambda: rodin)
     monkeypatch.setattr(tool_registry.runtime, "is_trellis2_tool_enabled", lambda: trellis2)
@@ -47,11 +60,25 @@ def _configure_runtime(
     )
 
 
-def test_register_mcp_tools_fails_on_hunyuan_trellis2_conflict(monkeypatch):
+@pytest.mark.parametrize(
+    ("hunyuan", "rodin", "trellis2"),
+    [
+        (True, False, True),
+        (True, True, False),
+        (False, True, True),
+        (True, True, True),
+    ],
+)
+def test_register_mcp_tools_fails_on_generator_conflict(
+    monkeypatch, hunyuan, rodin, trellis2
+):
     _reset_registry_state(monkeypatch)
-    _configure_runtime(monkeypatch, hunyuan=True, trellis2=True)
+    _configure_runtime(monkeypatch, hunyuan=hunyuan, rodin=rodin, trellis2=trellis2)
 
-    with pytest.raises(RuntimeError, match="ENABLE_HUNYUAN and ENABLE_TRELLIS2"):
+    with pytest.raises(
+        RuntimeError,
+        match="ENABLE_RODIN, ENABLE_TRELLIS2, and ENABLE_HUNYUAN are mutually exclusive",
+    ):
         tool_registry.register_mcp_tools(FakeMCP(), logging.getLogger(__name__))
 
 

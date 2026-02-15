@@ -42,6 +42,8 @@ fi
 : "${ENABLE_PCG:=true}"
 : "${TRELLIS2_ENABLE_GPU:=true}"
 : "${TRELLIS2_GPU:=all}"
+: "${HUGGINGFACE_CACHE_DIR:=./cache/huggingface/hub}"
+: "${RETRIEVAL_CACHE_DIR:=./cache/asset-retrieval}"
 
 COMPOSE_ARGS=(-f "$COMPOSE_FILE")
 if [[ "$TRELLIS2_ENABLE_GPU" == "true" ]]; then
@@ -65,6 +67,14 @@ if [[ ${#SERVICES[@]} -eq 0 ]]; then
 fi
 
 cd "$SCRIPT_DIR"
+
+if [[ "$ENABLE_TRELLIS2" == "true" || "$ENABLE_RETRIEVAL" == "true" ]]; then
+  mkdir -p "$HUGGINGFACE_CACHE_DIR"
+fi
+
+if [[ "$ENABLE_RETRIEVAL" == "true" ]]; then
+  mkdir -p "$RETRIEVAL_CACHE_DIR"
+fi
 
 if [[ "$TOOL_PULL_IMAGES" == "true" ]]; then
   echo "Pulling images from Docker Hub for: ${SERVICES[*]}"

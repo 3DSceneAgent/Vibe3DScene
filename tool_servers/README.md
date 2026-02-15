@@ -38,6 +38,7 @@ Default image refs are configured for Docker Hub user `fishwowater`:
 If TRELLIS2 model pull requires Hugging Face auth, set:
 
 - `HUGGINGFACE_TOKEN=<your_token>`
+- `HUGGINGFACE_CACHE_DIR=./cache/huggingface/hub` (host cache mapped into containers to avoid repeated model downloads)
 
 Compose files:
 
@@ -79,6 +80,10 @@ If you are using OSS bootstrap for retrieval DB, set these in `tool_servers/.env
 - `QWEN_DB_OSS_URL`
 - `QWEN_DB_DUMP_FORMAT`
 - `QWEN_DB_AUTO_BOOTSTRAP=true`
+- `QWEN_DB_DUMP_LOCAL_PATH=/cache/asset-retrieval/qwen_embeddings.dump.gz`
+- `QWEN_DB_REUSE_LOCAL_DUMP=true`
+- `RETRIEVAL_CACHE_DIR=./cache/asset-retrieval`
+- `HUGGINGFACE_CACHE_DIR=./cache/huggingface/hub`
 
 Notes:
 
@@ -86,3 +91,5 @@ Notes:
 - Startup/stop scripts support both `docker compose` (v2) and `docker-compose`.
 - TRELLIS2 Docker support already exists in `tool_servers/TRELLIS.2`.
 - If you change ports in `tool_servers/.env`, update your root project `.env` (`TRELLIS2_PORT`, `RETRIEVAL_API_PORT`, `INFINIGEN_PORT`) to match.
+- Retrieval compose service now injects `host.docker.internal` via `host-gateway`, so Linux hosts can resolve it without extra manual DNS setup.
+- TRELLIS2 and retrieval services mount `HUGGINGFACE_CACHE_DIR` into container HF cache path to reuse downloaded model artifacts.

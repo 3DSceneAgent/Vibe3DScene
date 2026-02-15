@@ -54,6 +54,11 @@ def register_mcp_tools(mcp, logger) -> list[str]:
     enable_sketchfab = runtime.is_sketchfab_tool_enabled()
     has_rodin_key = bool(runtime.get_rodin_api_key())
     has_sketchfab_key = bool(runtime.get_sketchfab_api_key())
+    generator_switches = {
+        "ENABLE_RODIN": runtime.parse_env_bool("ENABLE_RODIN", False),
+        "ENABLE_TRELLIS2": runtime.parse_env_bool("ENABLE_TRELLIS2", False),
+        "ENABLE_HUNYUAN": runtime.parse_env_bool("ENABLE_HUNYUAN", False),
+    }
 
     def _is_rodin_fully_enabled() -> bool:
         return runtime.is_rodin_tool_enabled() and bool(runtime.get_rodin_api_key())
@@ -61,9 +66,14 @@ def register_mcp_tools(mcp, logger) -> list[str]:
     def _is_sketchfab_fully_enabled() -> bool:
         return runtime.is_sketchfab_tool_enabled() and bool(runtime.get_sketchfab_api_key())
 
-    if enable_hunyuan and enable_trellis2:
+    enabled_generator_switches = [
+        name for name, is_enabled in generator_switches.items() if is_enabled
+    ]
+    if len(enabled_generator_switches) > 1:
         raise RuntimeError(
-            "Invalid tool configuration: ENABLE_HUNYUAN and ENABLE_TRELLIS2 cannot both be enabled."
+            "Invalid tool configuration: ENABLE_RODIN, ENABLE_TRELLIS2, and "
+            "ENABLE_HUNYUAN are mutually exclusive; enable only one. "
+            f"Currently enabled: {', '.join(enabled_generator_switches)}."
         )
     if enable_retrieval and _is_sketchfab_fully_enabled():
         raise RuntimeError(

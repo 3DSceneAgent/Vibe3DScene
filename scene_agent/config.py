@@ -90,6 +90,10 @@ class Settings(BaseSettings):
     )
 
     # API Runtime
+    api_port: int = Field(
+        default=8000,
+        description="Port for the main API service"
+    )
     api_workers: int = Field(
         default=1,
         description="Number of API worker processes to run"
