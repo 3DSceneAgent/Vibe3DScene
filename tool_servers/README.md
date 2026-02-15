@@ -15,6 +15,7 @@ cp .env.example .env
 ```
 
 Set ports/hosts and service env vars in `.env`.
+`start_tool_servers.sh` waits for HTTP health endpoints before returning.
 
 Per-service toggles:
 
@@ -40,7 +41,7 @@ If TRELLIS2 model pull requires Hugging Face auth, set:
 
 - `HUGGINGFACE_TOKEN=<your_token>`
 - `HUGGINGFACE_CACHE_DIR=./cache/huggingface/hub` (host cache mapped into containers to avoid repeated model downloads)
-- If host env has `HTTP_PROXY`/`HTTPS_PROXY`, `start_tool_servers.sh` injects TRELLIS2 proxy as `http://host.docker.internal:7890`; if host vars are empty, TRELLIS2 proxy vars are not set in the container.
+- If host env has `HTTP_PROXY`/`HTTPS_PROXY`, `start_tool_servers.sh` injects TRELLIS2 and retrieval proxy as `http://host.docker.internal:7890`; if host vars are empty, proxy vars are not set in containers.
 
 Compose files:
 
@@ -86,9 +87,11 @@ If you are using OSS bootstrap for retrieval DB, set these in `tool_servers/.env
 - `QWEN_DB_DUMP_LOCAL_PATH=/cache/asset-retrieval/qwen_embeddings.dump.gz`
 - `QWEN_DB_REUSE_LOCAL_DUMP=true`
 - `RETRIEVAL_CACHE_DIR=./cache/asset-retrieval`
+- `RETRIEVAL_HTTP_PROXY` / `RETRIEVAL_HTTPS_PROXY` / `RETRIEVAL_NO_PROXY` (optional manual overrides)
 - `POSTGRES_DATA_DIR=./cache/postgres`
 - `POSTGRES_INIT_DIR=./postgres/init`
 - `HUGGINGFACE_CACHE_DIR=./cache/huggingface/hub`
+- `WAIT_FOR_HEALTH_TIMEOUT_SECONDS=300` (max total wait time for TRELLIS2/retrieval/PCG health checks)
 
 Notes:
 
@@ -97,7 +100,9 @@ Notes:
 - TRELLIS2 Docker support already exists in `tool_servers/TRELLIS.2`.
 - If you change ports in `tool_servers/.env`, update your root project `.env` (`TRELLIS2_PORT`, `RETRIEVAL_API_PORT`, `INFINIGEN_PORT`) to match.
 - Retrieval defaults to the compose-managed PostgreSQL service (`DB_HOST=postgres`).
+- Retrieval service hardcodes `DB_HOST=postgres` in compose to avoid stale host-side env overrides.
 - PostgreSQL data is persisted on host via `POSTGRES_DATA_DIR` and retrieval dump cache remains mapped via `RETRIEVAL_CACHE_DIR`.
+- Default `POSTGRES_IMAGE` is `pgvector/pgvector:pg17` to maximize dump compatibility (for example `transaction_timeout` in newer dumps).
 - `POSTGRES_INIT_DIR` is mounted to `/docker-entrypoint-initdb.d` and includes `CREATE EXTENSION vector` on first DB initialization.
 - PostgreSQL is internal-only by default (no host `5432` port publish), so it avoids host port conflicts.
 - TRELLIS2 and retrieval services mount `HUGGINGFACE_CACHE_DIR` into container HF cache path to reuse downloaded model artifacts.

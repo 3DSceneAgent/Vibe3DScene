@@ -25,6 +25,7 @@ require_cmd() {
 }
 
 require_cmd docker
+require_cmd curl
 
 if docker compose version >/dev/null 2>&1; then
   COMPOSE_BIN=(docker compose)
@@ -41,11 +42,40 @@ fi
 : "${ENABLE_TRELLIS2:=true}"
 : "${ENABLE_RETRIEVAL:=true}"
 : "${ENABLE_PCG:=true}"
+: "${WAIT_FOR_HEALTH_TIMEOUT_SECONDS:=300}"
 : "${TRELLIS2_ENABLE_GPU:=true}"
 : "${TRELLIS2_GPU:=all}"
 : "${HUGGINGFACE_CACHE_DIR:=./cache/huggingface/hub}"
 : "${RETRIEVAL_CACHE_DIR:=./cache/asset-retrieval}"
 : "${POSTGRES_DATA_DIR:=./cache/postgres}"
+
+resolve_healthcheck_host() {
+  local host="$1"
+  if [[ -z "$host" || "$host" == "0.0.0.0" || "$host" == "::" || "$host" == "[::]" ]]; then
+    echo "127.0.0.1"
+    return
+  fi
+  echo "$host"
+}
+
+wait_for_http_health() {
+  local service_name="$1"
+  local url="$2"
+  local deadline="$3"
+
+  echo "Waiting for ${service_name} health: ${url}"
+  while true; do
+    if curl -fsS --max-time 5 "$url" >/dev/null 2>&1; then
+      echo "${service_name} is healthy."
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      echo "Timed out waiting for ${service_name} health: ${url}" >&2
+      return 1
+    fi
+    sleep 5
+  done
+}
 
 # If host shell has proxy variables, route TRELLIS2 downloads through host:7890.
 HOST_HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}"
@@ -54,38 +84,64 @@ HOST_NO_PROXY="${NO_PROXY:-${no_proxy:-}}"
 TRELLIS2_PROXY_HTTP=""
 TRELLIS2_PROXY_HTTPS=""
 TRELLIS2_PROXY_NO_PROXY=""
+RETRIEVAL_PROXY_HTTP=""
+RETRIEVAL_PROXY_HTTPS=""
+RETRIEVAL_PROXY_NO_PROXY=""
 USE_PROXY_OVERRIDE=false
 rm -f "$PROXY_COMPOSE_FILE"
 
 if [[ -n "$HOST_HTTP_PROXY" ]]; then
   TRELLIS2_PROXY_HTTP="${TRELLIS2_HTTP_PROXY:-http://host.docker.internal:7890}"
+  RETRIEVAL_PROXY_HTTP="${RETRIEVAL_HTTP_PROXY:-http://host.docker.internal:7890}"
 fi
 if [[ -n "$HOST_HTTPS_PROXY" ]]; then
   TRELLIS2_PROXY_HTTPS="${TRELLIS2_HTTPS_PROXY:-http://host.docker.internal:7890}"
+  RETRIEVAL_PROXY_HTTPS="${RETRIEVAL_HTTPS_PROXY:-http://host.docker.internal:7890}"
 fi
 if [[ -n "$HOST_NO_PROXY" ]]; then
   TRELLIS2_PROXY_NO_PROXY="${TRELLIS2_NO_PROXY:-localhost,127.0.0.1,host.docker.internal,postgres}"
+  RETRIEVAL_PROXY_NO_PROXY="${RETRIEVAL_NO_PROXY:-localhost,127.0.0.1,host.docker.internal,postgres}"
 fi
 
-if [[ -n "$TRELLIS2_PROXY_HTTP" || -n "$TRELLIS2_PROXY_HTTPS" || -n "$TRELLIS2_PROXY_NO_PROXY" ]]; then
+if [[ -n "$TRELLIS2_PROXY_HTTP" || -n "$TRELLIS2_PROXY_HTTPS" || -n "$TRELLIS2_PROXY_NO_PROXY" || -n "$RETRIEVAL_PROXY_HTTP" || -n "$RETRIEVAL_PROXY_HTTPS" || -n "$RETRIEVAL_PROXY_NO_PROXY" ]]; then
   USE_PROXY_OVERRIDE=true
   {
     echo "services:"
-    echo "  trellis2:"
-    echo "    extra_hosts:"
-    echo "      - \"host.docker.internal:host-gateway\""
-    echo "    environment:"
-    if [[ -n "$TRELLIS2_PROXY_HTTP" ]]; then
-      echo "      HTTP_PROXY: \"$TRELLIS2_PROXY_HTTP\""
-      echo "      http_proxy: \"$TRELLIS2_PROXY_HTTP\""
+    if [[ -n "$TRELLIS2_PROXY_HTTP" || -n "$TRELLIS2_PROXY_HTTPS" || -n "$TRELLIS2_PROXY_NO_PROXY" ]]; then
+      echo "  trellis2:"
+      echo "    extra_hosts:"
+      echo "      - \"host.docker.internal:host-gateway\""
+      echo "    environment:"
+      if [[ -n "$TRELLIS2_PROXY_HTTP" ]]; then
+        echo "      HTTP_PROXY: \"$TRELLIS2_PROXY_HTTP\""
+        echo "      http_proxy: \"$TRELLIS2_PROXY_HTTP\""
+      fi
+      if [[ -n "$TRELLIS2_PROXY_HTTPS" ]]; then
+        echo "      HTTPS_PROXY: \"$TRELLIS2_PROXY_HTTPS\""
+        echo "      https_proxy: \"$TRELLIS2_PROXY_HTTPS\""
+      fi
+      if [[ -n "$TRELLIS2_PROXY_NO_PROXY" ]]; then
+        echo "      NO_PROXY: \"$TRELLIS2_PROXY_NO_PROXY\""
+        echo "      no_proxy: \"$TRELLIS2_PROXY_NO_PROXY\""
+      fi
     fi
-    if [[ -n "$TRELLIS2_PROXY_HTTPS" ]]; then
-      echo "      HTTPS_PROXY: \"$TRELLIS2_PROXY_HTTPS\""
-      echo "      https_proxy: \"$TRELLIS2_PROXY_HTTPS\""
-    fi
-    if [[ -n "$TRELLIS2_PROXY_NO_PROXY" ]]; then
-      echo "      NO_PROXY: \"$TRELLIS2_PROXY_NO_PROXY\""
-      echo "      no_proxy: \"$TRELLIS2_PROXY_NO_PROXY\""
+    if [[ -n "$RETRIEVAL_PROXY_HTTP" || -n "$RETRIEVAL_PROXY_HTTPS" || -n "$RETRIEVAL_PROXY_NO_PROXY" ]]; then
+      echo "  retrieval:"
+      echo "    extra_hosts:"
+      echo "      - \"host.docker.internal:host-gateway\""
+      echo "    environment:"
+      if [[ -n "$RETRIEVAL_PROXY_HTTP" ]]; then
+        echo "      HTTP_PROXY: \"$RETRIEVAL_PROXY_HTTP\""
+        echo "      http_proxy: \"$RETRIEVAL_PROXY_HTTP\""
+      fi
+      if [[ -n "$RETRIEVAL_PROXY_HTTPS" ]]; then
+        echo "      HTTPS_PROXY: \"$RETRIEVAL_PROXY_HTTPS\""
+        echo "      https_proxy: \"$RETRIEVAL_PROXY_HTTPS\""
+      fi
+      if [[ -n "$RETRIEVAL_PROXY_NO_PROXY" ]]; then
+        echo "      NO_PROXY: \"$RETRIEVAL_PROXY_NO_PROXY\""
+        echo "      no_proxy: \"$RETRIEVAL_PROXY_NO_PROXY\""
+      fi
     fi
   } > "$PROXY_COMPOSE_FILE"
 fi
@@ -137,6 +193,32 @@ if [[ "$TOOL_RECREATE_CONTAINERS" == "true" ]]; then
 fi
 
 "${COMPOSE_BIN[@]}" "${COMPOSE_ARGS[@]}" "${UP_ARGS[@]}" "${SERVICES[@]}"
+
+HEALTH_DEADLINE=$((SECONDS + WAIT_FOR_HEALTH_TIMEOUT_SECONDS))
+health_failed=0
+
+if [[ "$ENABLE_TRELLIS2" == "true" ]]; then
+  trellis_host="$(resolve_healthcheck_host "${TRELLIS2_HOST:-0.0.0.0}")"
+  trellis_url="http://${trellis_host}:${TRELLIS2_PORT:-8001}/health"
+  wait_for_http_health "TRELLIS2" "$trellis_url" "$HEALTH_DEADLINE" || health_failed=1
+fi
+
+if [[ "$ENABLE_RETRIEVAL" == "true" ]]; then
+  retrieval_host="$(resolve_healthcheck_host "${RETRIEVAL_HOST:-0.0.0.0}")"
+  retrieval_url="http://${retrieval_host}:${RETRIEVAL_PORT:-8002}/health"
+  wait_for_http_health "AssetRetrieval3D" "$retrieval_url" "$HEALTH_DEADLINE" || health_failed=1
+fi
+
+if [[ "$ENABLE_PCG" == "true" ]]; then
+  pcg_host="$(resolve_healthcheck_host "${PCG_HOST:-0.0.0.0}")"
+  pcg_url="http://${pcg_host}:${PCG_PORT:-8003}/health"
+  wait_for_http_health "PCGIntegrator3D" "$pcg_url" "$HEALTH_DEADLINE" || health_failed=1
+fi
+
+if [[ "$health_failed" -ne 0 ]]; then
+  echo "One or more services did not become healthy within ${WAIT_FOR_HEALTH_TIMEOUT_SECONDS}s." >&2
+  exit 1
+fi
 
 echo ""
 echo "Tool servers started via docker compose."

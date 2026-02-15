@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg16}
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg17}
     container_name: ${POSTGRES_CONTAINER:-asset-retrieval-postgres}
     environment:
       POSTGRES_USER: ${DB_USER}
@@ -46,7 +46,7 @@ services:
       - "${RETRIEVAL_HOST}:${RETRIEVAL_PORT}:${RETRIEVAL_CONTAINER_PORT}"
     environment:
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY}
-      DB_HOST: ${DB_HOST}
+      DB_HOST: postgres
       DB_PORT: ${DB_PORT}
       DB_USER: ${DB_USER}
       DB_PASSWORD: ${DB_PASSWORD}
