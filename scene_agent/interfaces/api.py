@@ -3,7 +3,6 @@ FastAPI REST server for the 3D scene agent.
 Provides HTTP endpoints and WebSocket support with streaming.
 """
 import asyncio
-import base64
 import json
 import os
 import re
@@ -28,6 +27,7 @@ from scene_agent.blender.session_manager import (
     start_headless_process,
 )
 from scene_agent.config import get_settings
+from scene_agent.env import load_project_dotenv
 from scene_agent.memory.scene_memory import SceneMemory
 from scene_agent.memory.reference_image_memory import (
     ReferenceImage,
@@ -41,7 +41,7 @@ from scene_agent.utils.diagnostics import (
     within_target,
 )
 from scene_agent.utils.logging import log_event
-from scene_agent.utils.rendering import RENDERS_DIR
+from scene_agent.utils.rendering import RENDERS_DIR, process_and_save_render
 
 # Create FastAPI app
 app = FastAPI(
@@ -89,6 +89,37 @@ def _normalize_optional(value: str | None, *, lower: bool = False) -> str | None
     if not normalized:
         return None
     return normalized.lower() if lower else normalized
+
+
+def _headless_timeout_seconds_for_session(settings: Any, session: Any | None = None) -> float:
+    # Scene/render export operations are frequently heavier than tool RPCs.
+    base_timeout = max(30.0, float(getattr(settings, "headless_request_timeout_seconds", 15)))
+    if session is None:
+        return base_timeout
+    session_status = getattr(session, "status", None)
+    session_process = getattr(session, "process", None)
+    # Cold-start requests need extra budget for launching Blender/MCP.
+    if session_status != "ready" or session_process is None:
+        startup_timeout = max(1.0, float(getattr(settings, "blender_headless_startup_timeout", 10)))
+        return base_timeout + startup_timeout
+    return base_timeout
+
+
+def _restart_headless_session_after_timeout(thread_id: str) -> None:
+    try:
+        manager = get_session_manager()
+        manager.restart_session_processes(thread_id, timeout=3.0)
+        log_event(
+            "warning",
+            "headless_session_restarted_after_timeout",
+            {"thread_id": thread_id},
+        )
+    except Exception as exc:
+        log_event(
+            "warning",
+            "headless_session_restart_failed",
+            {"thread_id": thread_id, "error": str(exc)},
+        )
 
 
 def _build_vlm_provider_catalog() -> list[Dict[str, Any]]:
@@ -388,10 +419,25 @@ def send_blender_command_sync(
     global _blender_connection
     settings = get_settings()
     if settings.blender_mode == "headless" and thread_id:
-        # 移除外层锁，避免与 get_blender_connection_for_thread() 内部的锁嵌套导致死锁
-        # get_blender_connection_for_thread() 内部已经有 session.lock 保护
-        blender = get_blender_connection_for_thread(thread_id)
-        return blender.send_command(command_type, params)
+        manager = get_session_manager()
+        session = manager.ensure(thread_id, "headless")
+        last_error: Exception | None = None
+        for _attempt in range(2):
+            blender = get_blender_connection_for_thread(thread_id)
+            with session.lock:
+                try:
+                    return blender.send_command(command_type, params)
+                except Exception as exc:
+                    last_error = exc
+                    try:
+                        blender.disconnect()
+                    except Exception:
+                        pass
+                    session.connection = None
+                    manager.set_error(thread_id, f"{command_type} failed: {exc}")
+        if last_error is not None:
+            raise last_error
+        raise Exception(f"{command_type} failed unexpectedly")
 
     with _blender_lock:
         try:
@@ -416,6 +462,7 @@ def serialize_message(message: Any) -> Dict[str, Any]:
             "content": getattr(message, "content", None),
             "additional_kwargs": getattr(message, "additional_kwargs", None),
             "response_metadata": getattr(message, "response_metadata", None),
+            "tool_calls": getattr(message, "tool_calls", None),
             "name": getattr(message, "name", None),
             "id": getattr(message, "id", None),
         }
@@ -432,6 +479,46 @@ def serialize_event(event: Dict[str, Any]) -> Dict[str, Any]:
         else:
             payload[key] = value
     return payload
+
+
+def _looks_like_base64(value: str) -> bool:
+    if len(value) < 256:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9+/=\s]+", value))
+
+
+def _sanitize_stream_value(value: Any, *, depth: int = 0) -> Any:
+    if depth > 5:
+        return "[truncated]"
+    if isinstance(value, str):
+        if value.startswith("data:image/"):
+            return "[image data omitted]"
+        if len(value) > 12_000 and ("base64" in value.lower() or _looks_like_base64(value)):
+            return "[large payload omitted]"
+        if len(value) > 24_000:
+            return f"{value[:24_000]}...[truncated]"
+        return value
+    if isinstance(value, list):
+        return [_sanitize_stream_value(item, depth=depth + 1) for item in value[:64]]
+    if isinstance(value, dict):
+        sanitized: dict[Any, Any] = {}
+        for idx, (key, item) in enumerate(value.items()):
+            if idx >= 128:
+                sanitized["__truncated__"] = True
+                break
+            key_str = str(key).lower()
+            if key_str in {"base64", "image_base64"}:
+                sanitized[key] = "[image data omitted]"
+                continue
+            sanitized[key] = _sanitize_stream_value(item, depth=depth + 1)
+        return sanitized
+    return value
+
+
+def sanitize_message_for_stream(serialized: Dict[str, Any]) -> Dict[str, Any]:
+    sanitized = dict(serialized)
+    sanitized["content"] = _sanitize_stream_value(serialized.get("content"))
+    return sanitized
 
 
 def message_content_to_text(content: Any) -> str:
@@ -465,7 +552,7 @@ def message_content_to_text(content: Any) -> str:
                 parts.append(str(item))
         return "".join(parts)
     if isinstance(content, dict):
-        return json.dumps(content, ensure_ascii=False, default=str)
+        return json.dumps(_sanitize_stream_value(content), ensure_ascii=False, default=str)
     return str(content)
 
 
@@ -479,7 +566,11 @@ def message_has_tool_calls(serialized: Dict[str, Any]) -> bool:
     additional_kwargs = serialized.get("additional_kwargs")
     if isinstance(additional_kwargs, dict):
         tool_calls = additional_kwargs.get("tool_calls")
-        return isinstance(tool_calls, list) and len(tool_calls) > 0
+        if isinstance(tool_calls, list) and len(tool_calls) > 0:
+            return True
+    tool_calls = serialized.get("tool_calls")
+    if isinstance(tool_calls, list) and len(tool_calls) > 0:
+        return True
     return False
 
 
@@ -1060,19 +1151,20 @@ async def chat_stream(request: ChatRequest):
                         messages = [messages]
                     for message in messages:
                         serialized = serialize_message(message)
-                        message_type = serialized.get("type")
+                        serialized_stream = sanitize_message_for_stream(serialized)
+                        message_type = serialized_stream.get("type")
                         if message_has_tool_calls(serialized) or message_is_tool(serialized):
                             scene_has_change = True
                         if message_type in {"human", "system"}:
                             continue
                         if message_type == "tool":
-                            payload = {"messages": [serialized], "scene_has_change": scene_has_change}
+                            payload = {"messages": [serialized_stream], "scene_has_change": scene_has_change}
                             yield f"data: {json.dumps(payload, default=str)}\n\n"
                             continue
-                        message_id = serialized.get("id")
+                        message_id = serialized_stream.get("id")
                         if isinstance(message_id, str) and message_id in existing_message_ids:
                             continue
-                        delta = message_content_to_text(serialized.get("content"))
+                        delta = message_content_to_text(serialized_stream.get("content"))
                         if not delta:
                             continue
                         if (
@@ -1087,7 +1179,7 @@ async def chat_stream(request: ChatRequest):
                             event_payload = {"delta": delta, "message_id": message_id}
                             yield f"data: {json.dumps(event_payload, default=str)}\n\n"
                         else:
-                            payload = {"messages": [serialized]}
+                            payload = {"messages": [serialized_stream]}
                             yield f"data: {json.dumps(payload, default=str)}\n\n"
 
             done_payload = {"event": "done", "scene_has_change": scene_has_change}
@@ -1140,12 +1232,13 @@ async def get_scene(thread_id: str):
         if settings.blender_mode == "headless":
             manager = get_session_manager()
             session = manager.ensure(thread_id, "headless")
+            request_timeout_seconds = _headless_timeout_seconds_for_session(settings, session)
             request_id = new_request_id(thread_id)
             start_time = start_timer()
             try:
                 scene_info = await asyncio.wait_for(
                     asyncio.to_thread(send_blender_command_sync, "get_scene_info", None, thread_id),
-                    timeout=settings.headless_request_timeout_seconds,
+                    timeout=request_timeout_seconds,
                 )
             except asyncio.TimeoutError as exc:
                 elapsed_value = elapsed_ms(start_time)
@@ -1154,9 +1247,10 @@ async def get_scene(thread_id: str):
                     request_id=request_id,
                     elapsed_ms_value=elapsed_value,
                     status="timeout",
-                    target_ms=settings.headless_request_timeout_seconds * 1000,
+                    target_ms=int(request_timeout_seconds * 1000),
                 )
                 log_event("error", "headless_scene_timeout", diagnostics)
+                _restart_headless_session_after_timeout(thread_id)
                 raise HTTPException(
                     status_code=504,
                     detail={"error": "Headless scene request timed out.", **diagnostics},
@@ -1168,7 +1262,7 @@ async def get_scene(thread_id: str):
                     request_id=request_id,
                     elapsed_ms_value=elapsed_value,
                     status="error",
-                    target_ms=settings.headless_request_timeout_seconds * 1000,
+                    target_ms=int(request_timeout_seconds * 1000),
                 )
                 log_event("error", "headless_scene_failed", {**diagnostics, "error": str(exc)})
                 raise HTTPException(
@@ -1182,7 +1276,7 @@ async def get_scene(thread_id: str):
                     request_id=request_id,
                     elapsed_ms_value=elapsed_value,
                     status="ok",
-                    target_ms=settings.headless_request_timeout_seconds * 1000,
+                    target_ms=int(request_timeout_seconds * 1000),
                 )
                 log_event("info", "headless_scene_ok", diagnostics)
         else:
@@ -1211,7 +1305,7 @@ async def get_scene(thread_id: str):
 @app.get("/scene/{thread_id}/renders")
 async def get_scene_renders(thread_id: str, mode: str = "rgb"):
     """
-    Render all cameras in the current Blender scene and return base64 PNGs.
+    Render all cameras in the current Blender scene and return processed image URLs.
     """
     try:
         settings = get_settings()
@@ -1219,12 +1313,13 @@ async def get_scene_renders(thread_id: str, mode: str = "rgb"):
         if settings.blender_mode == "headless":
             manager = get_session_manager()
             session = manager.ensure(thread_id, "headless")
+            request_timeout_seconds = _headless_timeout_seconds_for_session(settings, session)
             request_id = new_request_id(thread_id)
             start_time = start_timer()
             try:
                 scene_info = await asyncio.wait_for(
                     asyncio.to_thread(send_blender_command_sync, "get_scene_info", None, thread_id),
-                    timeout=settings.headless_request_timeout_seconds,
+                    timeout=request_timeout_seconds,
                 )
             except asyncio.TimeoutError as exc:
                 elapsed_value = elapsed_ms(start_time)
@@ -1233,9 +1328,10 @@ async def get_scene_renders(thread_id: str, mode: str = "rgb"):
                     request_id=request_id,
                     elapsed_ms_value=elapsed_value,
                     status="timeout",
-                    target_ms=settings.headless_request_timeout_seconds * 1000,
+                    target_ms=int(request_timeout_seconds * 1000),
                 )
                 log_event("error", "headless_renders_scene_timeout", diagnostics)
+                _restart_headless_session_after_timeout(thread_id)
                 raise HTTPException(
                     status_code=504,
                     detail={"error": "Headless render request timed out.", **diagnostics},
@@ -1247,7 +1343,7 @@ async def get_scene_renders(thread_id: str, mode: str = "rgb"):
                     request_id=request_id,
                     elapsed_ms_value=elapsed_value,
                     status="error",
-                    target_ms=settings.headless_request_timeout_seconds * 1000,
+                    target_ms=int(request_timeout_seconds * 1000),
                 )
                 log_event("error", "headless_renders_scene_failed", {**diagnostics, "error": str(exc)})
                 raise HTTPException(
@@ -1280,36 +1376,45 @@ async def get_scene_renders(thread_id: str, mode: str = "rgb"):
                 thread_id
             )
             if settings.blender_mode == "headless":
-                remaining = settings.headless_request_timeout_seconds - (elapsed_ms(start_time) / 1000)
-                if remaining <= 0:
+                try:
+                    result = await asyncio.wait_for(render_call, timeout=request_timeout_seconds)
+                except asyncio.TimeoutError as exc:
                     elapsed_value = elapsed_ms(start_time)
                     diagnostics = build_headless_diagnostics(
                         session=session,
                         request_id=request_id,
                         elapsed_ms_value=elapsed_value,
                         status="timeout",
-                        target_ms=settings.headless_request_timeout_seconds * 1000,
+                        target_ms=int(request_timeout_seconds * 1000),
                     )
-                    log_event("error", "headless_renders_timeout", diagnostics)
+                    log_event(
+                        "error",
+                        "headless_renders_timeout",
+                        {**diagnostics, "camera_name": camera_name},
+                    )
+                    _restart_headless_session_after_timeout(thread_id)
                     raise HTTPException(
                         status_code=504,
                         detail={"error": "Headless render request timed out.", **diagnostics},
-                    )
-                result = await asyncio.wait_for(render_call, timeout=remaining)
+                    ) from exc
             else:
                 result = await render_call
             filepath = result.get("filepath") or temp_path
             if not os.path.exists(filepath):
                 continue
-            with open(filepath, "rb") as f:
-                image_b64 = base64.b64encode(f.read()).decode("ascii")
+            image_url = process_and_save_render(
+                filepath,
+                thread_id,
+                camera_name,
+                log_event=log_event,
+            )
             try:
                 os.remove(filepath)
             except OSError:
                 pass
             renders.append({
                 "camera_name": camera_name,
-                "image_base64": image_b64
+                "image_url": image_url
             })
 
         if settings.blender_mode == "headless":
@@ -1319,7 +1424,7 @@ async def get_scene_renders(thread_id: str, mode: str = "rgb"):
                 request_id=request_id,
                 elapsed_ms_value=elapsed_value,
                 status="ok",
-                target_ms=settings.headless_request_timeout_seconds * 1000,
+                target_ms=int(request_timeout_seconds * 1000),
             )
             log_event("info", "headless_renders_ok", diagnostics)
         return {"thread_id": thread_id, "renders": renders, "diagnostics": diagnostics}
@@ -1350,6 +1455,7 @@ async def get_scene_gltf(thread_id: str):
         if settings.blender_mode == "headless":
             manager = get_session_manager()
             session = manager.ensure(thread_id, "headless")
+            request_timeout_seconds = _headless_timeout_seconds_for_session(settings, session)
             request_id = new_request_id(thread_id)
             start_time = start_timer()
             try:
@@ -1360,7 +1466,7 @@ async def get_scene_gltf(thread_id: str):
                         {"code": export_code},
                         thread_id,
                     ),
-                    timeout=settings.headless_request_timeout_seconds,
+                    timeout=request_timeout_seconds,
                 )
             except asyncio.TimeoutError as exc:
                 elapsed_value = elapsed_ms(start_time)
@@ -1369,9 +1475,10 @@ async def get_scene_gltf(thread_id: str):
                     request_id=request_id,
                     elapsed_ms_value=elapsed_value,
                     status="timeout",
-                    target_ms=settings.headless_request_timeout_seconds * 1000,
+                    target_ms=int(request_timeout_seconds * 1000),
                 )
                 log_event("error", "headless_gltf_timeout", diagnostics)
+                _restart_headless_session_after_timeout(thread_id)
                 raise HTTPException(
                     status_code=504,
                     detail={"error": "Headless GLTF export timed out.", **diagnostics},
@@ -1383,7 +1490,7 @@ async def get_scene_gltf(thread_id: str):
                     request_id=request_id,
                     elapsed_ms_value=elapsed_value,
                     status="error",
-                    target_ms=settings.headless_request_timeout_seconds * 1000,
+                    target_ms=int(request_timeout_seconds * 1000),
                 )
                 log_event("error", "headless_gltf_failed", {**diagnostics, "error": str(exc)})
                 raise HTTPException(
@@ -1397,7 +1504,7 @@ async def get_scene_gltf(thread_id: str):
                     request_id=request_id,
                     elapsed_ms_value=elapsed_value,
                     status="ok",
-                    target_ms=settings.headless_request_timeout_seconds * 1000,
+                    target_ms=int(request_timeout_seconds * 1000),
                 )
                 log_event("info", "headless_gltf_ok", diagnostics)
         else:
@@ -1707,7 +1814,14 @@ def run_api(host: str = "0.0.0.0", port: int = 8000, workers: int | None = None)
         workers: Number of worker processes
     """
     import uvicorn
+    load_project_dotenv()
     settings = get_settings()
     worker_count = workers if workers is not None else settings.api_workers
     worker_count = max(1, worker_count)
+    if worker_count > 1:
+        print(
+            "Warning: API_WORKERS > 1 is not supported with in-memory thread/session state. "
+            "Forcing single worker to avoid cross-process timeout/race issues."
+        )
+        worker_count = 1
     uvicorn.run("scene_agent.interfaces.api:app", host=host, port=port, workers=worker_count)

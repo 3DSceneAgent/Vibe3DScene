@@ -5,11 +5,15 @@ Supports both CLI and API modes.
 import argparse
 import sys
 
+from scene_agent.env import load_project_dotenv
+
 
 def main():
     """
     Parse arguments and launch the appropriate interface.
     """
+    load_project_dotenv()
+
     parser = argparse.ArgumentParser(
         description="3D Scene Agent - LangGraph-based Blender scene manipulation",
         formatter_class=argparse.RawDescriptionHelpFormatter,

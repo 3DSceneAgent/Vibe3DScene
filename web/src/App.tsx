@@ -30,6 +30,32 @@ import {
 import { downloadBlob } from './utils/download'
 import './App.css'
 
+type ThreadLoadingState = {
+  scene: boolean
+  renders: boolean
+  gltf: boolean
+  download: boolean
+}
+
+function createThreadLoadingState(): ThreadLoadingState {
+  return {
+    scene: false,
+    renders: false,
+    gltf: false,
+    download: false
+  }
+}
+
+function formatSceneActionError(error: unknown, actionLabel: string): string {
+  if (error instanceof DOMException && error.name === 'AbortError') {
+    return `${actionLabel} timed out. Please try again.`
+  }
+  if (error instanceof Error && error.message.trim()) {
+    return `${actionLabel} failed: ${error.message}`
+  }
+  return `${actionLabel} failed.`
+}
+
 function App() {
   const REQUEST_TIMEOUT_MS = 35000
   const MCP_REQUEST_TIMEOUT_MS = 10000
@@ -53,17 +79,13 @@ function App() {
   const [vlmDefaultModel, setVlmDefaultModel] = useState<string>('')
   const [vlmErrorByThread, setVlmErrorByThread] = useState<Record<string, string | null>>({})
   const [vlmLoadingThreadId, setVlmLoadingThreadId] = useState<string | null>(null)
-  const [loading, setLoading] = useState({
-    scene: false,
-    renders: false,
-    gltf: false,
-    download: false
-  })
+  const [loadingByThread, setLoadingByThread] = useState<Record<string, ThreadLoadingState>>({})
+  const [sceneActionErrorByThread, setSceneActionErrorByThread] = useState<Record<string, string | null>>({})
   const streamAbortRef = useRef<AbortController | null>(null)
   const healthAbortRef = useRef<AbortController | null>(null)
-  const sceneAbortRef = useRef<AbortController | null>(null)
-  const rendersAbortRef = useRef<AbortController | null>(null)
-  const gltfAbortRef = useRef<AbortController | null>(null)
+  const sceneAbortRef = useRef<Record<string, AbortController>>({})
+  const rendersAbortRef = useRef<Record<string, AbortController>>({})
+  const gltfAbortRef = useRef<Record<string, AbortController>>({})
   const requestedSceneRef = useRef<Set<string>>(new Set())
   const previousAssistantContentRef = useRef<string | null>(null)
   const knownStreamIdsRef = useRef<Set<string>>(new Set())
@@ -74,13 +96,42 @@ function App() {
   const loadedReferenceImagesRef = useRef<Set<string>>(new Set())
   const currentStreamRef = useRef<{ threadId: string; assistantId: string } | null>(null)
   const messageIdMapRef = useRef<Map<string, string>>(new Map())
+  const saveThreadsTimerRef = useRef<number | null>(null)
+  const loadingRef = useRef<Record<string, ThreadLoadingState>>({})
+  const initialAutoFetchRef = useRef<Set<string>>(new Set())
+  const autoFetchLastRunRef = useRef<Record<string, number>>({})
 
   const activeThread = useMemo(
     () => threads.find((thread) => thread.id === activeThreadId) ?? null,
     [threads, activeThreadId]
   )
+  const activeThreadLoading = useMemo(
+    () => (activeThread ? loadingByThread[activeThread.id] ?? createThreadLoadingState() : createThreadLoadingState()),
+    [activeThread, loadingByThread]
+  )
+  const activeSceneActionError = useMemo(
+    () => (activeThread ? sceneActionErrorByThread[activeThread.id] ?? null : null),
+    [activeThread, sceneActionErrorByThread]
+  )
   const updateThread = useCallback((threadId: string, updater: (thread: Thread) => Thread) => {
     setThreads((prev) => prev.map((thread) => (thread.id === threadId ? updater(thread) : thread)))
+  }, [])
+
+  const setThreadLoading = useCallback((threadId: string, patch: Partial<ThreadLoadingState>) => {
+    setLoadingByThread((prev) => {
+      const current = prev[threadId] ?? createThreadLoadingState()
+      return {
+        ...prev,
+        [threadId]: {
+          ...current,
+          ...patch
+        }
+      }
+    })
+  }, [])
+
+  const setSceneActionError = useCallback((threadId: string, message: string | null) => {
+    setSceneActionErrorByThread((prev) => ({ ...prev, [threadId]: message }))
   }, [])
 
   // Load data from IndexedDB on mount
@@ -112,7 +163,19 @@ function App() {
   }, [threads, activeThreadId])
 
   useEffect(() => {
-    saveThreads(threads)
+    if (saveThreadsTimerRef.current !== null) {
+      window.clearTimeout(saveThreadsTimerRef.current)
+    }
+    saveThreadsTimerRef.current = window.setTimeout(() => {
+      saveThreads(threads)
+      saveThreadsTimerRef.current = null
+    }, 400)
+    return () => {
+      if (saveThreadsTimerRef.current !== null) {
+        window.clearTimeout(saveThreadsTimerRef.current)
+        saveThreadsTimerRef.current = null
+      }
+    }
   }, [threads])
 
   useEffect(() => {
@@ -120,6 +183,10 @@ function App() {
     document.documentElement.dataset.theme = settings.theme
     settingsRef.current = settings
   }, [settings])
+
+  useEffect(() => {
+    loadingRef.current = loadingByThread
+  }, [loadingByThread])
 
   useEffect(() => {
     let isActive = true
@@ -350,7 +417,31 @@ function App() {
     })
     requestedSceneRef.current.delete(threadId)
     loadedReferenceImagesRef.current.delete(threadId)
+    initialAutoFetchRef.current.delete(threadId)
+    delete autoFetchLastRunRef.current[threadId]
     delete sceneChangeRef.current[threadId]
+    if (sceneAbortRef.current[threadId]) {
+      sceneAbortRef.current[threadId].abort()
+      delete sceneAbortRef.current[threadId]
+    }
+    if (rendersAbortRef.current[threadId]) {
+      rendersAbortRef.current[threadId].abort()
+      delete rendersAbortRef.current[threadId]
+    }
+    if (gltfAbortRef.current[threadId]) {
+      gltfAbortRef.current[threadId].abort()
+      delete gltfAbortRef.current[threadId]
+    }
+    setLoadingByThread((prev) => {
+      const next = { ...prev }
+      delete next[threadId]
+      return next
+    })
+    setSceneActionErrorByThread((prev) => {
+      const next = { ...prev }
+      delete next[threadId]
+      return next
+    })
     setMcpToolsByThread((prev) => {
       const next = { ...prev }
       delete next[threadId]
@@ -659,9 +750,8 @@ function App() {
       if (typeof event.scene_has_change === 'boolean') {
         const nextSceneChange = updateSceneChange(event.scene_has_change, event.event === 'done')
         if (event.event === 'done') {
-          if (settingsRef.current.autoRefreshScene && nextSceneChange) {
-            void fetchRenders(threadId)
-            void fetchGltf(threadId)
+          if (nextSceneChange) {
+            triggerAutoFetch(threadId)
           }
           sceneChangeRef.current[threadId] = false
           updateThread(threadId, (thread) => ({
@@ -828,61 +918,66 @@ function App() {
   const refreshScene = useCallback(async (threadId?: string) => {
     const targetId = threadId ?? activeThread?.id
     if (!targetId) return
-    if (sceneAbortRef.current) {
-      sceneAbortRef.current.abort()
+    if (sceneAbortRef.current[targetId]) {
+      sceneAbortRef.current[targetId].abort()
     }
     const controller = new AbortController()
-    sceneAbortRef.current = controller
+    sceneAbortRef.current[targetId] = controller
     const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
-    setLoading((prev) => ({ ...prev, scene: true }))
+    setThreadLoading(targetId, { scene: true })
+    setSceneActionError(targetId, null)
     try {
       const scene = await getScene(settings.backendUrl, targetId, controller.signal)
       updateThread(targetId, (thread) => ({ ...thread, scene }))
     } catch (error) {
       console.error('Failed to refresh scene', error)
+      setSceneActionError(targetId, formatSceneActionError(error, 'Fetch scene'))
     } finally {
       window.clearTimeout(timeoutId)
-      if (sceneAbortRef.current === controller) {
-        sceneAbortRef.current = null
+      if (sceneAbortRef.current[targetId] === controller) {
+        delete sceneAbortRef.current[targetId]
       }
-      setLoading((prev) => ({ ...prev, scene: false }))
+      setThreadLoading(targetId, { scene: false })
     }
-  }, [activeThread, settings.backendUrl, updateThread])
+  }, [activeThread?.id, settings.backendUrl, setSceneActionError, setThreadLoading, updateThread])
 
   const fetchRenders = useCallback(async (threadId?: string) => {
     const targetId = threadId ?? activeThread?.id
     if (!targetId) return
-    if (rendersAbortRef.current) {
-      rendersAbortRef.current.abort()
+    if (rendersAbortRef.current[targetId]) {
+      rendersAbortRef.current[targetId].abort()
     }
     const controller = new AbortController()
-    rendersAbortRef.current = controller
+    rendersAbortRef.current[targetId] = controller
     const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
-    setLoading((prev) => ({ ...prev, renders: true }))
+    setThreadLoading(targetId, { renders: true })
+    setSceneActionError(targetId, null)
     try {
       const renders = await getSceneRenders(settings.backendUrl, targetId, controller.signal)
       updateThread(targetId, (thread) => ({ ...thread, renders }))
     } catch (error) {
       console.error('Failed to fetch renders', error)
+      setSceneActionError(targetId, formatSceneActionError(error, 'Fetch renders'))
     } finally {
       window.clearTimeout(timeoutId)
-      if (rendersAbortRef.current === controller) {
-        rendersAbortRef.current = null
+      if (rendersAbortRef.current[targetId] === controller) {
+        delete rendersAbortRef.current[targetId]
       }
-      setLoading((prev) => ({ ...prev, renders: false }))
+      setThreadLoading(targetId, { renders: false })
     }
-  }, [activeThread, settings.backendUrl, updateThread])
+  }, [activeThread?.id, settings.backendUrl, setSceneActionError, setThreadLoading, updateThread])
 
   const fetchGltf = useCallback(async (threadId?: string) => {
     const targetId = threadId ?? activeThread?.id
     if (!targetId) return
-    if (gltfAbortRef.current) {
-      gltfAbortRef.current.abort()
+    if (gltfAbortRef.current[targetId]) {
+      gltfAbortRef.current[targetId].abort()
     }
     const controller = new AbortController()
-    gltfAbortRef.current = controller
+    gltfAbortRef.current[targetId] = controller
     const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
-    setLoading((prev) => ({ ...prev, gltf: true }))
+    setThreadLoading(targetId, { gltf: true })
+    setSceneActionError(targetId, null)
     try {
       const blob = await getSceneGltf(settings.backendUrl, targetId, controller.signal)
       const nextUrl = URL.createObjectURL(blob)
@@ -894,14 +989,37 @@ function App() {
       })
     } catch (error) {
       console.error('Failed to load GLTF', error)
+      setSceneActionError(targetId, formatSceneActionError(error, 'Fetch scene'))
     } finally {
       window.clearTimeout(timeoutId)
-      if (gltfAbortRef.current === controller) {
-        gltfAbortRef.current = null
+      if (gltfAbortRef.current[targetId] === controller) {
+        delete gltfAbortRef.current[targetId]
       }
-      setLoading((prev) => ({ ...prev, gltf: false }))
+      setThreadLoading(targetId, { gltf: false })
     }
-  }, [activeThread, settings.backendUrl, updateThread])
+  }, [activeThread?.id, settings.backendUrl, setSceneActionError, setThreadLoading, updateThread])
+
+  const triggerAutoFetch = useCallback(
+    (threadId: string, force: boolean = false) => {
+      if (!settingsRef.current.autoRefreshScene || backendStatus !== 'online') return false
+      const currentLoading = loadingRef.current[threadId] ?? createThreadLoadingState()
+      if (currentLoading.renders || currentLoading.gltf) return false
+
+      const intervalSeconds = Math.max(1, Math.round(settingsRef.current.autoFetchIntervalSeconds || 10))
+      const intervalMs = intervalSeconds * 1000
+      const now = Date.now()
+      const lastRun = autoFetchLastRunRef.current[threadId] ?? 0
+      if (!force && now - lastRun < intervalMs) return false
+
+      autoFetchLastRunRef.current[threadId] = now
+      void (async () => {
+        await fetchRenders(threadId)
+        await fetchGltf(threadId)
+      })()
+      return true
+    },
+    [backendStatus, fetchRenders, fetchGltf]
+  )
 
   const refreshReferenceImages = useCallback(
     async (threadId: string) => {
@@ -921,36 +1039,38 @@ function App() {
 
   const downloadGltf = useCallback(async () => {
     if (!activeThread) return
-    setLoading((prev) => ({ ...prev, download: true }))
+    setThreadLoading(activeThread.id, { download: true })
+    setSceneActionError(activeThread.id, null)
     try {
       const blob = await getSceneGltf(settings.backendUrl, activeThread.id)
       const filename = `scene-${activeThread.id}.glb`
       downloadBlob(blob, filename)
     } catch (error) {
-      window.alert(`Failed to download GLTF: ${String(error)}`)
+      setSceneActionError(activeThread.id, formatSceneActionError(error, 'Download GLTF'))
     } finally {
-      setLoading((prev) => ({ ...prev, download: false }))
+      setThreadLoading(activeThread.id, { download: false })
     }
-  }, [activeThread, settings.backendUrl])
+  }, [activeThread, setSceneActionError, setThreadLoading, settings.backendUrl])
 
   const downloadBlend = useCallback(async () => {
     if (!activeThread) return
-    setLoading((prev) => ({ ...prev, download: true }))
+    setThreadLoading(activeThread.id, { download: true })
+    setSceneActionError(activeThread.id, null)
     try {
       const blob = await getSceneBlend(settings.backendUrl, activeThread.id)
       const filename = `scene-${activeThread.id}.blend`
       downloadBlob(blob, filename)
     } catch (error) {
-      window.alert(`Failed to download BLEND: ${String(error)}`)
+      setSceneActionError(activeThread.id, formatSceneActionError(error, 'Download BLEND'))
     } finally {
-      setLoading((prev) => ({ ...prev, download: false }))
+      setThreadLoading(activeThread.id, { download: false })
     }
-  }, [activeThread, settings.backendUrl])
+  }, [activeThread, setSceneActionError, setThreadLoading, settings.backendUrl])
 
   useEffect(() => {
     if (!activeThread) return
     const threadId = activeThread.id
-    if (!requestedSceneRef.current.has(threadId) && !loading.scene && !activeThread.scene) {
+    if (!requestedSceneRef.current.has(threadId) && !activeThreadLoading.scene && !activeThread.scene) {
       requestedSceneRef.current.add(threadId)
       refreshScene(threadId)
     }
@@ -958,8 +1078,35 @@ function App() {
     activeThread,
     activeThread?.id,
     activeThread?.scene,
-    loading.scene,
+    activeThreadLoading.scene,
     refreshScene
+  ])
+
+  useEffect(() => {
+    const threadId = activeThread?.id
+    if (!threadId) return
+    if (!settings.autoRefreshScene || backendStatus !== 'online' || !settings.backendUrl || isStreaming) return
+    if (initialAutoFetchRef.current.has(threadId)) return
+    if (activeThread?.gltfUrl || (activeThread?.renders?.length ?? 0) > 0) {
+      initialAutoFetchRef.current.add(threadId)
+      return
+    }
+    const started = triggerAutoFetch(threadId, true)
+    if (started) {
+      initialAutoFetchRef.current.add(threadId)
+    }
+  }, [
+    activeThread?.id,
+    activeThread?.gltfUrl,
+    activeThread?.renders,
+    settings.autoRefreshScene,
+    settings.autoFetchIntervalSeconds,
+    settings.backendUrl,
+    backendStatus,
+    isStreaming,
+    activeThreadLoading.renders,
+    activeThreadLoading.gltf,
+    triggerAutoFetch
   ])
 
   useEffect(() => {
@@ -984,6 +1131,8 @@ function App() {
         ? 'Local'
         : null
   const statusText = modeLabel ? `Server ${statusLabel} • ${modeLabel}` : `Server ${statusLabel}`
+  const projectWebsiteUrl = 'https://github.com/3DSceneAgent/3DSceneAgent#readme'
+  const projectGithubUrl = 'https://github.com/3DSceneAgent/3DSceneAgent'
 
   return (
     <div className="app-shell">
@@ -991,7 +1140,7 @@ function App() {
         <div className="sidebar-header">
           {!isSidebarCollapsed && (
             <div className="sidebar-titles">
-              <div className="app-title">3D Scene Agent</div>
+              <div className="app-title">Vibe 3D Scene</div>
               <div className="app-subtitle">Chat & Scene Console</div>
             </div>
           )}
@@ -1018,13 +1167,45 @@ function App() {
             <span className={`status-dot ${backendStatus}`} />
             {!isSidebarCollapsed && <span className="status-text">{statusText}</span>}
           </div>
-          <button
-            className={`ghost-btn ${isSidebarCollapsed ? 'icon-btn' : 'full-width'}`}
-            onClick={() => setShowSettings(true)}
-            title={isSidebarCollapsed ? 'Settings' : undefined}
-          >
-            {isSidebarCollapsed ? 'Cfg' : 'Settings'}
-          </button>
+          <div className="sidebar-shortcuts">
+            <button
+              className="ghost-btn sidebar-icon-btn"
+              type="button"
+              onClick={() => setShowSettings(true)}
+              title="Settings"
+              aria-label="Open settings"
+            >
+              <svg className="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12.22 2h-.44a2 2 0 0 0-1.99 1.82l-.2 2.09a7.5 7.5 0 0 0-1.67.96L6 5.74a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l1.8 1.04a7.5 7.5 0 0 0 0 1.92l-1.8 1.04a2 2 0 0 0-.73 2.73l.22.38A2 2 0 0 0 6 18.26l1.92-1.13a7.5 7.5 0 0 0 1.67.96l.2 2.09A2 2 0 0 0 11.78 22h.44a2 2 0 0 0 1.99-1.82l.2-2.09a7.5 7.5 0 0 0 1.67-.96L18 18.26a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-1.8-1.04a7.5 7.5 0 0 0 0-1.92l1.8-1.04a2 2 0 0 0 .73-2.73l-.22-.38A2 2 0 0 0 18 5.74l-1.92 1.13a7.5 7.5 0 0 0-1.67-.96l-.2-2.09A2 2 0 0 0 12.22 2z" />
+                <circle cx="12" cy="12" r="2.7" />
+              </svg>
+            </button>
+            <a
+              className="ghost-btn sidebar-icon-btn"
+              href={projectWebsiteUrl}
+              target="_blank"
+              rel="noreferrer"
+              title="Website"
+              aria-label="Open project website"
+            >
+              <svg className="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r="8.5" />
+                <path d="M3.5 12h17M12 3.5c2.3 2.1 3.5 5.3 3.5 8.5S14.3 18.4 12 20.5c-2.3-2.1-3.5-5.3-3.5-8.5S9.7 5.6 12 3.5" />
+              </svg>
+            </a>
+            <a
+              className="ghost-btn sidebar-icon-btn"
+              href={projectGithubUrl}
+              target="_blank"
+              rel="noreferrer"
+              title="GitHub"
+              aria-label="Open project GitHub"
+            >
+              <svg className="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M9 19c-4.7 1.4-4.7-2.2-6.6-2.6M15 21v-3.1a2.7 2.7 0 0 0-.8-2.1c2.8-.3 5.8-1.4 5.8-6.2a4.8 4.8 0 0 0-1.3-3.3a4.5 4.5 0 0 0-.1-3.2s-1.1-.3-3.6 1.3a12.5 12.5 0 0 0-6 0C6.5 2.8 5.4 3.1 5.4 3.1a4.5 4.5 0 0 0-.1 3.2A4.8 4.8 0 0 0 4 9.6c0 4.8 2.9 5.9 5.8 6.2a2.6 2.6 0 0 0-.8 2.1V21" />
+              </svg>
+            </a>
+          </div>
         </div>
       </aside>
 
@@ -1073,6 +1254,7 @@ function App() {
                 <SceneTab
                   threadId={activeThread.id}
                   renders={activeThread.renders ?? []}
+                  backendUrl={settings.backendUrl}
                   gltfUrl={activeThread.gltfUrl ?? null}
                   sceneHierarchy={activeThread.sceneHierarchy ?? []}
                   environment={environment}
@@ -1087,21 +1269,18 @@ function App() {
                   onFetchGltf={() => void fetchGltf()}
                   onDownloadGltf={() => void downloadGltf()}
                   onDownloadBlend={() => void downloadBlend()}
+                  actionError={activeSceneActionError}
+                  onClearActionError={() => setSceneActionError(activeThread.id, null)}
                   onHierarchyChange={handleSceneHierarchyChange}
-                  loading={{
-                    scene: loading.scene,
-                    renders: loading.renders,
-                    gltf: loading.gltf,
-                    download: loading.download
-                  }}
-                  canRunActions={Boolean(activeThread)}
+                  loading={activeThreadLoading}
+                  canRunActions={Boolean(activeThread) && !isStreaming}
                 />
               </section>
             </>
           ) : (
             <section className="workspace-empty">
               <div className="workspace-empty-card">
-                <div className="workspace-empty-badge">3D Scene Agent</div>
+                <div className="workspace-empty-badge">Vibe 3D Scene</div>
                 <div className="workspace-empty-title">Start Vibe Building 3D Scene</div>
                 <div className="workspace-empty-subtitle">
                 </div>

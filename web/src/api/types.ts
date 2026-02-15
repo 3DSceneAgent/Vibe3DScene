@@ -24,7 +24,7 @@ export type SceneInfo = {
 
 export type RenderImage = {
   camera_name: string
-  image_base64: string
+  image_url: string
 }
 
 export type ReferenceImage = {

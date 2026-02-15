@@ -3,37 +3,49 @@ from __future__ import annotations
 from typing import Any, Callable, Optional
 
 from mcp_server import runtime
-from mcp_server.tools.asset_tools import (
-    download_sketchfab_model,
-    generate_hunyuan3d_model,
+from mcp_server.tools.asset_gen.hunyuan3d import generate_hunyuan3d_model
+from mcp_server.tools.asset_gen.rodin import (
     generate_hyper3d_model_via_images,
     generate_hyper3d_model_via_text,
-    generate_infinigen_assets,
-    generate_trellis2_model,
-    get_infinigen_available_assets,
-    get_sketchfab_model_preview,
     import_generated_asset,
-    import_retrieved_asset,
     poll_rodin_job_status,
+)
+from mcp_server.tools.asset_gen.trellis2 import generate_trellis2_model
+from mcp_server.tools.asset_retrieval.objaverse_retrieval import (
+    import_retrieved_asset,
     search_3d_assets_by_text,
+)
+from mcp_server.tools.asset_retrieval.polyhaven import (
+    download_polyhaven_asset,
+    search_polyhaven_assets,
+    set_texture,
+)
+from mcp_server.tools.asset_retrieval.sketchfab import (
+    download_sketchfab_model,
+    get_sketchfab_model_preview,
     search_sketchfab_models,
 )
-from mcp_server.tools.core_blender_tools import (
-    camera_act,
-    camera_observe,
-    camera_set_pose,
-    download_polyhaven_asset,
+from mcp_server.tools.base import (
     execute_blender_code,
     get_object_info,
-    get_session_persistence_status,
     get_scene_info,
     get_viewport_screenshot,
     import_glb_model,
+)
+from mcp_server.tools.memory.session_tools import (
+    get_session_persistence_status,
+    undo_last_snapshot,
+)
+from mcp_server.tools.multimodal.camera_tools import (
+    camera_act,
+    camera_observe,
+    camera_set_pose,
     render_from_camera,
     render_from_objects,
-    search_polyhaven_assets,
-    set_texture,
-    undo_last_snapshot,
+)
+from mcp_server.tools.pcg.infinigen import (
+    generate_infinigen_assets,
+    get_infinigen_available_assets,
 )
 
 _tools_registered = False
@@ -131,25 +143,25 @@ def register_mcp_tools(mcp, logger) -> list[str]:
             generate_hyper3d_model_via_text,
             None,
             _is_rodin_fully_enabled,
-            "requires BLENDER_MODE=local-client and ENABLE_RODIN=true and RODIN_API_KEY configured",
+            "requires BLENDER_MODE in {local-client, headless} and ENABLE_RODIN=true and RODIN_API_KEY configured",
         ),
         (
             generate_hyper3d_model_via_images,
             None,
             _is_rodin_fully_enabled,
-            "requires BLENDER_MODE=local-client and ENABLE_RODIN=true and RODIN_API_KEY configured",
+            "requires BLENDER_MODE in {local-client, headless} and ENABLE_RODIN=true and RODIN_API_KEY configured",
         ),
         (
             poll_rodin_job_status,
             None,
             _is_rodin_fully_enabled,
-            "requires BLENDER_MODE=local-client and ENABLE_RODIN=true and RODIN_API_KEY configured",
+            "requires BLENDER_MODE in {local-client, headless} and ENABLE_RODIN=true and RODIN_API_KEY configured",
         ),
         (
             import_generated_asset,
             None,
             _is_rodin_fully_enabled,
-            "requires BLENDER_MODE=local-client and ENABLE_RODIN=true and RODIN_API_KEY configured",
+            "requires BLENDER_MODE in {local-client, headless} and ENABLE_RODIN=true and RODIN_API_KEY configured",
         ),
         (
             search_sketchfab_models,

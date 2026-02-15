@@ -90,7 +90,7 @@ def is_hunyuan_tool_enabled() -> bool:
 
 
 def is_rodin_tool_enabled() -> bool:
-    return get_blender_mode() == "local-client" and parse_env_bool("ENABLE_RODIN", False)
+    return get_blender_mode() in {"local-client", "headless"} and parse_env_bool("ENABLE_RODIN", False)
 
 
 def get_rodin_api_key() -> str:

@@ -88,7 +88,14 @@ class AgentState(TypedDict):
         last_render_path: Latest render file path from tools
         last_verified_path: Latest render path verified by VLM
         last_render_signature: Signature for last render sent to VLM
+        tool_round_count: Number of tool batches executed in current request loop
+        last_tool_batch_names: Tool names observed in latest tool batch
         agent_decision: Structured decision payload from agent responses
+        todo_check_gate: Runtime gate decision for whether to run todo_check
+        todo_check: Latest todo_check result payload
+        last_todo_check_round: Tool round index when todo_check last ran
+        last_todo_snapshot: Last status snapshot used for stagnation detection
+        stagnation_count: Consecutive todo_check rounds without todo status change
         current_task: Description of current user request
         iteration_count: Number of agent iterations
         last_error: Last error message if any
@@ -122,7 +129,14 @@ class AgentState(TypedDict):
     last_render_path: str | None
     last_verified_path: str | None
     last_render_signature: str | None
+    tool_round_count: NotRequired[int]
+    last_tool_batch_names: NotRequired[list[str]]
     agent_decision: dict
+    todo_check_gate: NotRequired[dict]
+    todo_check: NotRequired[dict]
+    last_todo_check_round: NotRequired[int]
+    last_todo_snapshot: NotRequired[dict[str, str]]
+    stagnation_count: NotRequired[int]
     
     # Simple fields (last write wins)
     current_task: str

@@ -5,12 +5,21 @@ Creates the agent graph following LangGraph best practices.
 import re
 from typing import Literal
 from langgraph.graph import StateGraph, START, END
-from langgraph.prebuilt import ToolNode, tools_condition
+from langchain_core.messages import AIMessage
+from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 
 
 from scene_agent.agent.state import AgentState
-from scene_agent.agent.nodes import agent_node, update_memory_node, verify_node
+from scene_agent.agent.nodes import (
+    agent_node,
+    checkpoint_gate_node,
+    finalize_node,
+    post_agent_node,
+    todo_check_node,
+    update_memory_node,
+    verify_node,
+)
 from scene_agent.config import get_settings
 from scene_agent.vlm import get_vlm_provider
 from scene_agent.tools import get_blender_tools
@@ -26,7 +35,7 @@ def _extract_tool_hint(tool: object) -> str | None:
     return normalized
 
 
-def _route_after_update(state: AgentState) -> Literal["verify", "agent"]:
+def _route_verify_or_agent(state: AgentState) -> Literal["verify", "agent"]:
     render_path = state.get("last_render_path")
     if not render_path:
         return "agent"
@@ -37,6 +46,61 @@ def _route_after_update(state: AgentState) -> Literal["verify", "agent"]:
     if isinstance(should_verify, bool) and should_verify:
         return "verify"
     return "agent"
+
+
+def _message_has_tool_calls(message: AIMessage) -> bool:
+    tool_calls = getattr(message, "tool_calls", None)
+    if isinstance(tool_calls, list) and len(tool_calls) > 0:
+        return True
+
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict):
+        additional_tool_calls = additional_kwargs.get("tool_calls")
+        if isinstance(additional_tool_calls, list) and len(additional_tool_calls) > 0:
+            return True
+    return False
+
+
+def _route_after_post_agent(state: AgentState) -> Literal["tools", "checkpoint_finalize"]:
+    messages = state.get("messages") or []
+    for message in reversed(list(messages)):
+        if isinstance(message, AIMessage):
+            return "tools" if _message_has_tool_calls(message) else "checkpoint_finalize"
+    return "checkpoint_finalize"
+
+
+def _should_run_todo_check(state: AgentState) -> bool:
+    gate = state.get("todo_check_gate")
+    if not isinstance(gate, dict):
+        return False
+    return bool(gate.get("should_run"))
+
+
+def _route_after_loop_checkpoint(
+    state: AgentState,
+) -> Literal["todo_check", "verify", "agent"]:
+    if _should_run_todo_check(state):
+        return "todo_check"
+    return _route_verify_or_agent(state)
+
+
+def _route_after_finalize_checkpoint(state: AgentState) -> Literal["todo_check", "finalize"]:
+    if _should_run_todo_check(state):
+        return "todo_check"
+    return "finalize"
+
+
+def _route_after_todo_check(state: AgentState) -> Literal["finalize", "verify", "agent"]:
+    gate = state.get("todo_check_gate")
+    if isinstance(gate, dict) and gate.get("stage") == "finalize":
+        todo_check = state.get("todo_check")
+        if isinstance(todo_check, dict):
+            status = todo_check.get("status")
+            if status in {"completed", "blocked", "not_applicable"}:
+                return "finalize"
+            return _route_verify_or_agent(state)
+        return "finalize"
+    return _route_verify_or_agent(state)
 
 
 async def create_agent_graph(
@@ -104,8 +168,18 @@ async def create_agent_graph(
     
     # Add nodes
     builder.add_node("agent", call_model)
+    builder.add_node("post_agent", post_agent_node)
     builder.add_node("tools", ToolNode(tools))
     builder.add_node("update_memory", update_memory_node)
+    builder.add_node(
+        "checkpoint_loop",
+        lambda state: checkpoint_gate_node(state, stage="loop"),
+    )
+    builder.add_node(
+        "checkpoint_finalize",
+        lambda state: checkpoint_gate_node(state, stage="finalize"),
+    )
+    builder.add_node("todo_check", todo_check_node)
     builder.add_node(
         "verify",
         lambda state: verify_node(
@@ -115,23 +189,35 @@ async def create_agent_graph(
             model=selected_model,
         ),
     )
+    builder.add_node("finalize", finalize_node)
     
     # Connect nodes
     builder.add_edge(START, "agent")
-    
-    # Conditional edge: agent -> tools if tool_calls exist
+
+    # Persist decision/todo after each assistant response, then branch.
+    builder.add_edge("agent", "post_agent")
     builder.add_conditional_edges(
-        "agent",
-        tools_condition,  # Built-in routing function
+        "post_agent",
+        _route_after_post_agent,
     )
     
-    # After tools, update memory then verify if needed
+    # After tools, update memory then pass sparse todo-check gate.
     builder.add_edge("tools", "update_memory")
+    builder.add_edge("update_memory", "checkpoint_loop")
     builder.add_conditional_edges(
-        "update_memory",
-        _route_after_update,
+        "checkpoint_loop",
+        _route_after_loop_checkpoint,
+    )
+    builder.add_conditional_edges(
+        "checkpoint_finalize",
+        _route_after_finalize_checkpoint,
+    )
+    builder.add_conditional_edges(
+        "todo_check",
+        _route_after_todo_check,
     )
     builder.add_edge("verify", "agent")
+    builder.add_edge("finalize", END)
     
     # Compile with checkpointing
     memory = MemorySaver()

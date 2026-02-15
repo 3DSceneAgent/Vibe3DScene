@@ -83,12 +83,23 @@ function parseInlineImages(text: string): string {
   
   return text.replace(imageJsonPattern, (match) => {
     try {
-      const parsed = JSON.parse(match)
-      if (parsed.type === 'image' && parsed.base64) {
-        const mimeType = parsed.mime_type || 'image/png'
-        const dataUrl = `data:${mimeType};base64,${parsed.base64}`
-        return `![image](${dataUrl})`
+      const parsed = JSON.parse(match) as {
+        type?: string
+        url?: string
+        image_url?: { url?: string }
+        base64?: string
       }
+      if (parsed.type !== 'image') return match
+      const directUrl = typeof parsed.url === 'string' ? parsed.url : undefined
+      const nestedUrl =
+        parsed.image_url && typeof parsed.image_url.url === 'string'
+          ? parsed.image_url.url
+          : undefined
+      const imageUrl = directUrl || nestedUrl
+      if (imageUrl && !imageUrl.startsWith('data:')) {
+        return `![image](${imageUrl})`
+      }
+      if (parsed.base64) return '[image data omitted]'
     } catch {
       // If parsing fails, return original match
     }
@@ -102,11 +113,28 @@ function normalizeContent(content: unknown): string {
     const parts = content.map((item) => {
       if (typeof item === 'string') return item
       if (item && typeof item === 'object') {
-        const maybe = item as { text?: unknown; content?: unknown; type?: string; base64?: string; mime_type?: string }
+        const maybe = item as {
+          text?: unknown
+          content?: unknown
+          type?: string
+          base64?: string
+          url?: string
+          image_url?: { url?: string }
+        }
         // Handle image objects directly
-        if (maybe.type === 'image' && maybe.base64) {
-          const mimeType = maybe.mime_type || 'image/png'
-          return `![image](data:${mimeType};base64,${maybe.base64})`
+        if (maybe.type === 'image') {
+          const directUrl = typeof maybe.url === 'string' ? maybe.url : undefined
+          const nestedUrl =
+            maybe.image_url && typeof maybe.image_url.url === 'string'
+              ? maybe.image_url.url
+              : undefined
+          const imageUrl = directUrl || nestedUrl
+          if (imageUrl && !imageUrl.startsWith('data:')) {
+            return `![image](${imageUrl})`
+          }
+          if (maybe.base64) {
+            return '[image data omitted]'
+          }
         }
         if (typeof maybe.text === 'string') return maybe.text
         if (typeof maybe.content === 'string') return maybe.content
@@ -117,11 +145,26 @@ function normalizeContent(content: unknown): string {
     return parseInlineImages(parts.join('\n'))
   }
   if (content && typeof content === 'object') {
-    const maybe = content as { type?: string; base64?: string; mime_type?: string }
+    const maybe = content as {
+      type?: string
+      base64?: string
+      url?: string
+      image_url?: { url?: string }
+    }
     // Handle image objects directly
-    if (maybe.type === 'image' && maybe.base64) {
-      const mimeType = maybe.mime_type || 'image/png'
-      return `![image](data:${mimeType};base64,${maybe.base64})`
+    if (maybe.type === 'image') {
+      const directUrl = typeof maybe.url === 'string' ? maybe.url : undefined
+      const nestedUrl =
+        maybe.image_url && typeof maybe.image_url.url === 'string'
+          ? maybe.image_url.url
+          : undefined
+      const imageUrl = directUrl || nestedUrl
+      if (imageUrl && !imageUrl.startsWith('data:')) {
+        return `![image](${imageUrl})`
+      }
+      if (maybe.base64) {
+        return '[image data omitted]'
+      }
     }
     return parseInlineImages(JSON.stringify(content))
   }
@@ -157,9 +200,11 @@ export function isToolMessage(message: unknown): boolean {
 
 function collectMediaReferences(value: unknown, results: ToolMedia[] = []): ToolMedia[] {
   if (typeof value === 'string') {
-    if (value.startsWith('data:image/')) {
-      results.push({ kind: 'data', value })
-    } else if (/^https?:\/\//i.test(value) && /\.(png|jpe?g|gif|webp)$/i.test(value)) {
+    if (
+      ((/^https?:\/\//i.test(value) &&
+        (/\.(png|jpe?g|gif|webp)(\?|$)/i.test(value) || value.includes('/renders/'))) ||
+        /^\/renders\//.test(value))
+    ) {
       results.push({ kind: 'url', value })
     }
     return results
@@ -173,12 +218,17 @@ function collectMediaReferences(value: unknown, results: ToolMedia[] = []): Tool
   if (value && typeof value === 'object') {
     const entries = Object.entries(value as Record<string, unknown>)
     for (const [key, entry] of entries) {
-      if (typeof entry === 'string' && key.toLowerCase().includes('image') && !entry.startsWith('data:image/')) {
-        if (/^https?:\/\//i.test(entry)) {
+      if (typeof entry === 'string' && key.toLowerCase().includes('image')) {
+        if (
+          ((/^https?:\/\//i.test(entry) &&
+            (/\.(png|jpe?g|gif|webp)(\?|$)/i.test(entry) || entry.includes('/renders/'))) ||
+            /^\/renders\//.test(entry))
+        ) {
           results.push({ kind: 'url', value: entry })
-        } else if (/^[A-Za-z0-9+/=]+$/.test(entry) && entry.length > 128) {
-          results.push({ kind: 'data', value: `data:image/png;base64,${entry}` })
         }
+      }
+      if (typeof entry === 'string' && (entry.startsWith('data:image/') || key.toLowerCase().includes('base64'))) {
+        continue
       }
       collectMediaReferences(entry, results)
     }

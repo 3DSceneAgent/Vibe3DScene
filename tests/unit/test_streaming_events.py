@@ -65,3 +65,13 @@ def test_message_has_tool_calls() -> None:
     message = AIMessage(content="hi", additional_kwargs={"tool_calls": [{"id": "tool-1"}]})
     data = serialize_message(message)
     assert message_has_tool_calls(data) is True
+
+
+def test_message_has_tool_calls_from_top_level_field() -> None:
+    message = AIMessage(
+        content="hi",
+        tool_calls=[{"name": "get_scene_info", "args": {}, "id": "tool-1", "type": "tool_call"}],
+    )
+    data = serialize_message(message)
+    assert isinstance(data.get("tool_calls"), list)
+    assert message_has_tool_calls(data) is True

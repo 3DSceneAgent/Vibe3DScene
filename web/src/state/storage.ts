@@ -10,11 +10,13 @@ import {
 const THREADS_KEY = 'sceneAgentThreads'
 const SETTINGS_KEY = 'sceneAgentSettings'
 const MAX_MESSAGES_PER_THREAD = 100
+const MAX_STORED_MESSAGE_CHARS = 24000
 
 export const defaultSettings: Settings = {
   backendUrl: 'http://localhost:8000',
   theme: 'dark',
   autoRefreshScene: true,
+  autoFetchIntervalSeconds: 10,
   viewportTheme: 'auto'
 }
 
@@ -22,10 +24,31 @@ const legacyDarkThemes = new Set(['midnight', 'slate', 'warm'])
 const viewportThemes = new Set<Settings['viewportTheme']>(['auto', 'dark', 'light'])
 const useIndexedDB = isIndexedDBSupported()
 
+function sanitizeMessageContent(content: string): string {
+  if (!content) return ''
+  let next = content.replace(
+    /data:image\/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g,
+    '[image data omitted]'
+  )
+  if (next.length > MAX_STORED_MESSAGE_CHARS) {
+    next = `${next.slice(0, MAX_STORED_MESSAGE_CHARS)}\n...[truncated for storage]`
+  }
+  return next
+}
+
 function sanitizeThreads(threads: Thread[]): Thread[] {
   return threads.map((thread) => {
     // Limit messages per thread to avoid storage overflow
-    const messages = thread.messages.slice(-MAX_MESSAGES_PER_THREAD)
+    const messages = thread.messages.slice(-MAX_MESSAGES_PER_THREAD).map((message) => {
+      const nextMessage = { ...message }
+      delete nextMessage.raw
+      delete nextMessage.toolPayload
+      delete nextMessage.toolMedia
+      return {
+        ...nextMessage,
+        content: sanitizeMessageContent(nextMessage.content)
+      }
+    })
     
     return {
       ...thread,
@@ -153,11 +176,17 @@ function normalizeSettings(settings: Partial<Settings> | null | undefined): Sett
     typeof rawViewportTheme === 'string' && viewportThemes.has(rawViewportTheme as Settings['viewportTheme'])
       ? (rawViewportTheme as Settings['viewportTheme'])
       : defaultSettings.viewportTheme
+  const rawAutoFetchIntervalSeconds = Number(settings?.autoFetchIntervalSeconds)
+  const nextAutoFetchIntervalSeconds =
+    Number.isFinite(rawAutoFetchIntervalSeconds) && rawAutoFetchIntervalSeconds > 0
+      ? Math.min(300, Math.max(1, Math.round(rawAutoFetchIntervalSeconds)))
+      : defaultSettings.autoFetchIntervalSeconds
 
   return {
     backendUrl: settings?.backendUrl || defaultSettings.backendUrl,
     theme: nextTheme,
     autoRefreshScene: settings?.autoRefreshScene ?? defaultSettings.autoRefreshScene,
+    autoFetchIntervalSeconds: nextAutoFetchIntervalSeconds,
     viewportTheme: nextViewportTheme
   }
 }

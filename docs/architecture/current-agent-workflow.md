@@ -29,22 +29,47 @@ flowchart TD
 
     J --> K["agent.ainvoke / agent.astream"]
     K --> L["Node: agent"]
-    L --> M{"has tool calls?"}
-    M -- "Yes" --> N["Node: tools(ToolNode)"]
-    N --> O["Node: update_memory"]
-    O --> P{"need verify?"}
-    P -- "Yes" --> Q["Node: verify"]
-    Q --> L
-    P -- "No" --> L
-    M -- "No" --> R["END/return response"]
+    L --> M["Node: post_agent(decision/todo extract)"]
+    M --> N{"has tool calls?"}
+    N -- "Yes" --> O["Node: tools(ToolNode)"]
+    O --> P["Node: update_memory"]
+    P --> Q["Node: checkpoint_loop"]
+    Q --> R{"run todo_check?"}
+    R -- "Yes" --> S["Node: todo_check"]
+    R -- "No" --> T{"need verify?"}
+    T -- "Yes" --> U["Node: verify"]
+    U --> L
+    T -- "No" --> L
 
-    N --> S["MCP Server tools"]
-    S --> T["Blender socket addon server"]
-    T --> U["Scene mutate/render/export"]
+    N -- "No" --> V["Node: checkpoint_finalize"]
+    V --> W{"run todo_check?"}
+    W -- "Yes" --> S
+    W -- "No" --> X["Node: finalize"]
+    S --> Y{"stage == finalize?"}
+    Y -- "Yes" --> X
+    Y -- "No" --> T
+    X --> Z["END/return response"]
 
-    V["Idle sweeper / shutdown"] --> W["persist .blend"]
-    W --> X["terminate headless Blender + MCP process"]
+    O --> BA["MCP Server tools"]
+    BA --> BB["Blender socket addon server"]
+    BB --> BC["Scene mutate/render/export"]
+    
+    AA[("LangGraph State\nMemorySaver checkpoint")]
+    M -. "write agent_decision/todos/iteration_count" .-> AA
+    P -. "write scene_objects/render metadata/tool_round_count" .-> AA
+    Q -. "write todo_check_gate (sparse trigger decision)" .-> AA
+    S -. "write todo_check result/snapshot/stagnation" .-> AA
+    X -. "write workflow_status/finish_reason" .-> AA
+
+    CA["Idle sweeper / shutdown"] --> CB["persist .blend"]
+    CB --> CC["terminate headless Blender + MCP process"]
 ```
+
+行为说明（当前实现）：
+- `post_agent` 在每次 assistant 响应后执行，负责提取并落库 `agent_decision` / `todos`（不再依赖 tool path）。
+- `todo_check` 采用 checkpoint 稀疏触发，不会在每次工具调用后都执行（支持 interval + milestone + pre-final guard）。
+- 当 assistant 未产生 tool call 时，会走 `checkpoint_finalize`，仅在存在 todo 时做一次 `todo_check` 兜底后再 `finalize`。
+- `verify` 聚焦结果质量校验，`todo_check` 聚焦计划进度/停滞检测，两者职责分离。
 
 关键实现：
 - Agent 获取与线程缓存：`scene_agent/interfaces/api.py`
@@ -194,4 +219,3 @@ sequenceDiagram
 - 当前系统已经具备：线程级图实例、线程级 VLM 切换、双层 MCP 工具限制、headless 场景文件持久化。  
 - 当前系统尚未具备：跨进程统一状态、重启可恢复对话 state、完整线程资源生命周期清理。  
 - 若进入生产多实例/多 worker 场景，建议优先推进统一状态后端（如 Redis checkpointer + session coordinator）。
-

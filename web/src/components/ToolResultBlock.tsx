@@ -46,7 +46,7 @@ export function ToolResultBlock({ message, backendUrl }: ToolResultBlockProps) {
           ) : (
             <pre className="tool-block-body">{formattedContent}</pre>
           )}
-          {media.length > 0 && (
+          {!hasMarkdownImage && media.length > 0 && (
             <div className="tool-block-media">
               {media.map((item, index) => {
                 const src = resolveMediaUrl(item.value, backendUrl)

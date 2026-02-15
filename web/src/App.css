@@ -56,6 +56,37 @@
   gap: 10px;
 }
 
+.sidebar-shortcuts {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sidebar-icon-btn {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+a.sidebar-icon-btn {
+  text-decoration: none;
+}
+
+.sidebar-icon {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .sidebar-status-card {
   display: inline-flex;
   align-items: center;
@@ -75,6 +106,15 @@
   min-height: 40px;
   padding: 0;
   border-radius: 12px;
+}
+
+.sidebar.collapsed .sidebar-shortcuts {
+  flex-direction: column;
+}
+
+.sidebar.collapsed .sidebar-icon-btn {
+  width: 46px;
+  height: 46px;
 }
 
 .main {
@@ -1143,11 +1183,16 @@
 .scene-tab {
   display: flex;
   flex-direction: column;
+  flex: 1;
   min-height: 0;
   gap: 12px;
+  overflow: hidden;
 }
 
 .scene-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
   min-height: 0;
 }
 
@@ -1171,6 +1216,19 @@
   flex-wrap: wrap;
 }
 
+.scene-action-error {
+  border: 1px solid rgba(248, 113, 113, 0.5);
+  background: rgba(248, 113, 113, 0.12);
+  color: #fecaca;
+  border-radius: 12px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+
 .scene-renders-panel {
   border: 1px solid var(--color-border);
   border-radius: 14px;
@@ -1179,20 +1237,36 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  min-height: 190px;
-  max-height: 230px;
+  flex-shrink: 0;
+}
+
+.scene-renders-panel.has-renders {
+  min-height: 170px;
+  max-height: clamp(170px, 30vh, 340px);
+}
+
+.scene-renders-panel.is-empty {
+  min-height: auto;
+}
+
+.scene-renders-panel.is-empty .muted {
+  margin: 0;
 }
 
 .render-scroll {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding-right: 6px;
+  padding-bottom: 4px;
 }
 
 .render-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+  align-content: start;
 }
 
 .render-card {
@@ -1231,15 +1305,19 @@
 
 .scene-core-shell {
   flex: 1;
+  display: flex;
   min-height: 0;
+  overflow: hidden;
 }
 
 .scene-core {
+  flex: 1;
   height: 100%;
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 80%) minmax(0, 20%);
   gap: 12px;
+  overflow: hidden;
 }
 
 .scene-core.objects-collapsed {
@@ -1247,15 +1325,18 @@
 }
 
 .scene-core-viewport {
+  height: 100%;
   min-height: 0;
   border: 1px solid var(--color-border);
   border-radius: 16px;
   background: var(--color-surface);
   padding: 10px;
   display: flex;
+  overflow: hidden;
 }
 
 .scene-objects-panel {
+  height: 100%;
   min-height: 0;
   border: 1px solid var(--color-border);
   border-radius: 16px;
@@ -1264,6 +1345,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  overflow: hidden;
 }
 
 .scene-objects-panel.collapsed {
@@ -1294,6 +1376,7 @@
 }
 
 .scene-object-scroll {
+  flex: 1;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -1394,7 +1477,7 @@
 .viewer {
   position: relative;
   flex: 1;
-  min-height: 280px;
+  min-height: 0;
   border-radius: 14px;
   overflow: hidden;
   border: 1px solid var(--color-border);

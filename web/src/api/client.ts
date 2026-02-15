@@ -21,6 +21,20 @@ type StreamChatArgs = {
   signal?: AbortSignal
 }
 
+function parseRenderImages(payload: unknown): RenderImage[] {
+  if (!payload || typeof payload !== 'object') return []
+  const renders = (payload as { renders?: unknown }).renders
+  if (!Array.isArray(renders)) return []
+  return renders.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return []
+    const maybe = entry as { camera_name?: unknown; image_url?: unknown }
+    if (typeof maybe.camera_name !== 'string' || typeof maybe.image_url !== 'string') {
+      return []
+    }
+    return [{ camera_name: maybe.camera_name, image_url: maybe.image_url }]
+  })
+}
+
 export async function streamChat({
   baseUrl,
   message,
@@ -134,8 +148,8 @@ export async function getSceneRenders(
   if (!response.ok) {
     throw new Error(`Failed to load renders (${response.status})`)
   }
-  const data = (await response.json()) as { renders?: RenderImage[] }
-  return data.renders ?? []
+  const data = (await response.json()) as unknown
+  return parseRenderImages(data)
 }
 
 export async function getSceneGltf(

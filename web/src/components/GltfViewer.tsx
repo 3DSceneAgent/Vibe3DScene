@@ -62,6 +62,36 @@ function buildHierarchy(object: THREE.Object3D): SceneHierarchyNode {
   }
 }
 
+function disposeMaterial(material: THREE.Material | THREE.Material[]): void {
+  if (Array.isArray(material)) {
+    material.forEach((entry) => disposeMaterial(entry))
+    return
+  }
+  Object.values(material as Record<string, unknown>).forEach((entry: unknown) => {
+    if (entry && typeof entry === 'object') {
+      const maybeTexture = entry as { isTexture?: boolean; dispose?: () => void }
+      if (maybeTexture.isTexture && typeof maybeTexture.dispose === 'function') {
+        maybeTexture.dispose()
+      }
+    }
+  })
+  material.dispose()
+}
+
+function disposeObject3D(object: THREE.Object3D | null): void {
+  if (!object) return
+  object.traverse((entry: THREE.Object3D) => {
+    const geometry = (entry as { geometry?: THREE.BufferGeometry }).geometry
+    if (geometry) {
+      geometry.dispose()
+    }
+    const material = (entry as { material?: THREE.Material | THREE.Material[] }).material
+    if (material) {
+      disposeMaterial(material)
+    }
+  })
+}
+
 export function GltfViewer({
   gltfUrl,
   environment,
@@ -82,6 +112,8 @@ export function GltfViewer({
     null
   )
   const loadTokenRef = useRef(0)
+  const hasLoadedModelRef = useRef(false)
+  const cameraViewRef = useRef<{ position: THREE.Vector3; target: THREE.Vector3 } | null>(null)
 
   const preset = useMemo(() => environmentPresets[environment], [environment])
   const resolvedViewportTheme: UiTheme =
@@ -91,10 +123,15 @@ export function GltfViewer({
     [resolvedViewportTheme]
   )
   const viewportPaletteRef = useRef(viewportPalette)
+  const onHierarchyChangeRef = useRef(onHierarchyChange)
 
   useEffect(() => {
     viewportPaletteRef.current = viewportPalette
   }, [viewportPalette])
+
+  useEffect(() => {
+    onHierarchyChangeRef.current = onHierarchyChange
+  }, [onHierarchyChange])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -108,7 +145,7 @@ export function GltfViewer({
     renderer.outputColorSpace = THREE.SRGBColorSpace
     renderer.toneMapping = THREE.ACESFilmicToneMapping
     renderer.toneMappingExposure = 1.15
-    renderer.setPixelRatio(window.devicePixelRatio)
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
 
     const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 4000)
     camera.position.set(9, 7, 9)
@@ -132,6 +169,14 @@ export function GltfViewer({
     controls.dampingFactor = 0.08
     controls.target.set(0, 0.5, 0)
     controls.update()
+    const syncViewState = () => {
+      cameraViewRef.current = {
+        position: camera.position.clone(),
+        target: controls.target.clone()
+      }
+    }
+    syncViewState()
+    controls.addEventListener('change', syncViewState)
 
     const resizeRenderer = () => {
       const width = container.clientWidth
@@ -168,12 +213,19 @@ export function GltfViewer({
     return () => {
       window.cancelAnimationFrame(animationFrame)
       resizeObserver.disconnect()
+      controls.removeEventListener('change', syncViewState)
       controls.dispose()
+      disposeObject3D(modelRef.current)
+      modelRef.current = null
+      disposeObject3D(gridRef.current)
+      gridRef.current = null
       renderer.dispose()
       if (renderer.domElement.parentElement) {
         renderer.domElement.parentElement.removeChild(renderer.domElement)
       }
       scene.clear()
+      hasLoadedModelRef.current = false
+      cameraViewRef.current = null
     }
   }, [])
 
@@ -193,6 +245,7 @@ export function GltfViewer({
     scene.background = new THREE.Color(viewportPalette.background)
 
     if (gridRef.current) {
+      disposeObject3D(gridRef.current)
       scene.remove(gridRef.current)
     }
 
@@ -233,10 +286,12 @@ export function GltfViewer({
 
     const resetToDefault = () => {
       if (modelRef.current) {
+        disposeObject3D(modelRef.current)
         scene.remove(modelRef.current)
         modelRef.current = null
       }
       if (gridRef.current) {
+        disposeObject3D(gridRef.current)
         scene.remove(gridRef.current)
       }
       const palette = viewportPaletteRef.current
@@ -255,7 +310,12 @@ export function GltfViewer({
       camera.updateProjectionMatrix()
       controls.target.set(0, 0.5, 0)
       controls.update()
-      onHierarchyChange?.([])
+      hasLoadedModelRef.current = false
+      cameraViewRef.current = {
+        position: camera.position.clone(),
+        target: controls.target.clone()
+      }
+      onHierarchyChangeRef.current?.([])
     }
 
     if (!gltfUrl) {
@@ -266,6 +326,7 @@ export function GltfViewer({
     const loader = new GLTFLoader()
     const loadToken = loadTokenRef.current + 1
     loadTokenRef.current = loadToken
+    const preservedView = hasLoadedModelRef.current ? cameraViewRef.current : null
 
     loader.load(
       gltfUrl,
@@ -273,6 +334,7 @@ export function GltfViewer({
         if (loadTokenRef.current !== loadToken) return
 
         if (modelRef.current) {
+          disposeObject3D(modelRef.current)
           scene.remove(modelRef.current)
         }
         modelRef.current = gltf.scene
@@ -286,6 +348,7 @@ export function GltfViewer({
         const maxDim = Math.max(size.x, size.y, size.z, 0.1)
 
         if (gridRef.current) {
+          disposeObject3D(gridRef.current)
           scene.remove(gridRef.current)
         }
         const gridSize = Math.max(20, Math.ceil(maxDim * 2))
@@ -301,33 +364,48 @@ export function GltfViewer({
         scene.add(nextGrid)
         gridRef.current = nextGrid
 
-        const fov = (camera.fov * Math.PI) / 180
-        const fitHeightDistance = maxDim / (2 * Math.tan(fov / 2))
-        const fitWidthDistance = fitHeightDistance / Math.max(camera.aspect, 0.5)
-        const distance = Math.max(fitHeightDistance, fitWidthDistance) * 1.45
-        const direction = new THREE.Vector3(1, 0.65, 1).normalize()
-        camera.position.copy(center).addScaledVector(direction, distance)
-        camera.near = Math.max(distance / 1000, 0.05)
-        camera.far = Math.max(distance * 25, 1000)
-        camera.updateProjectionMatrix()
-        controls.target.copy(center)
-        controls.update()
+        if (preservedView) {
+          camera.position.copy(preservedView.position)
+          controls.target.copy(preservedView.target)
+          const distance = camera.position.distanceTo(controls.target)
+          camera.near = Math.max(distance / 1000, 0.05)
+          camera.far = Math.max(distance * 25, 1000)
+          camera.updateProjectionMatrix()
+          controls.update()
+        } else {
+          const fov = (camera.fov * Math.PI) / 180
+          const fitHeightDistance = maxDim / (2 * Math.tan(fov / 2))
+          const fitWidthDistance = fitHeightDistance / Math.max(camera.aspect, 0.5)
+          const distance = Math.max(fitHeightDistance, fitWidthDistance) * 1.45
+          const direction = new THREE.Vector3(1, 0.65, 1).normalize()
+          camera.position.copy(center).addScaledVector(direction, distance)
+          camera.near = Math.max(distance / 1000, 0.05)
+          camera.far = Math.max(distance * 25, 1000)
+          camera.updateProjectionMatrix()
+          controls.target.copy(center)
+          controls.update()
+        }
+        hasLoadedModelRef.current = true
+        cameraViewRef.current = {
+          position: camera.position.clone(),
+          target: controls.target.clone()
+        }
 
         const roots =
           gltf.scene.children.length > 0
             ? gltf.scene.children.map((child: THREE.Object3D) => buildHierarchy(child))
             : [buildHierarchy(gltf.scene)]
-        onHierarchyChange?.(roots)
+        onHierarchyChangeRef.current?.(roots)
       },
       undefined,
       (error: unknown) => {
         console.error('Failed to load GLTF', error)
         if (loadTokenRef.current === loadToken) {
-          onHierarchyChange?.([])
+          onHierarchyChangeRef.current?.([])
         }
       }
     )
-  }, [gltfUrl, onHierarchyChange])
+  }, [gltfUrl])
 
   return (
     <div className={`viewer-shell ${isFullscreen ? 'is-fullscreen' : ''}`}>

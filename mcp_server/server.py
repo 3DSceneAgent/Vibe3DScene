@@ -15,9 +15,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from scene_agent.env import load_project_dotenv
+
+load_project_dotenv()
+
 from mcp_server import runtime
 from mcp_server.tool_registry import register_mcp_tools
-from mcp_server.tools.asset_tools import asset_creation_strategy_text
+from mcp_server.tools.strategy import asset_creation_strategy_text
 
 logging.basicConfig(
     level=logging.INFO,

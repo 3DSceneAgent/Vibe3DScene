@@ -63,7 +63,7 @@ TBD.
    - At least one API key: `VLM_API_KEY` or provider-specific (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`)
    - `BLENDER_MODE` (`local-client` or `headless`)
    - Optional provider model lists: `VLM_OPENAI_MODELS`, `VLM_ANTHROPIC_MODELS`, `VLM_GEMINI_MODELS`
-   - If using Rodin tools: `ENABLE_RODIN=true` and `RODIN_API_KEY`
+   - If using Rodin tools: `ENABLE_RODIN=true`, `RODIN_API_KEY`, and `BLENDER_MODE` set to `local-client` or `headless`
 
 ### Start Services with `scripts/start_services.sh`
 

@@ -55,5 +55,6 @@ export type Settings = {
   backendUrl: string
   theme: ThemeId
   autoRefreshScene: boolean
+  autoFetchIntervalSeconds: number
   viewportTheme: ViewportThemeId
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { RenderImage } from '../api/types'
 import type { SceneHierarchyNode } from '../state/types'
 import { GltfViewer } from './GltfViewer'
@@ -12,6 +12,7 @@ type UiTheme = 'dark' | 'light'
 type SceneTabProps = {
   threadId: string
   renders: RenderImage[]
+  backendUrl: string
   gltfUrl: string | null
   sceneHierarchy: SceneHierarchyNode[]
   environment: EnvironmentPreset
@@ -24,6 +25,8 @@ type SceneTabProps = {
   onFetchGltf: () => void
   onDownloadGltf: () => void
   onDownloadBlend: () => void
+  actionError?: string | null
+  onClearActionError?: () => void
   onHierarchyChange: (threadId: string, hierarchy: SceneHierarchyNode[]) => void
   loading: {
     scene: boolean
@@ -65,7 +68,7 @@ function DownloadDropdown({
   return (
     <div className="dropdown" ref={dropdownRef}>
       <button
-        className="ghost-btn dropdown-trigger"
+        className="primary-btn dropdown-trigger"
         onClick={() => setIsOpen((open) => !open)}
         disabled={disabled || loading}
       >
@@ -88,6 +91,7 @@ function DownloadDropdown({
 export function SceneTab({
   threadId,
   renders,
+  backendUrl,
   gltfUrl,
   sceneHierarchy,
   environment,
@@ -100,12 +104,19 @@ export function SceneTab({
   onFetchGltf,
   onDownloadGltf,
   onDownloadBlend,
+  actionError,
+  onClearActionError,
   onHierarchyChange,
   loading,
   canRunActions
 }: SceneTabProps) {
   const [objectsCollapsed, setObjectsCollapsed] = useState(true)
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const isSceneActionBusy = loading.scene || loading.renders || loading.gltf
+  const handleHierarchyChange = useCallback(
+    (hierarchy: SceneHierarchyNode[]) => onHierarchyChange(threadId, hierarchy),
+    [onHierarchyChange, threadId]
+  )
 
   useEffect(() => {
     if (!isFullscreen) return
@@ -128,7 +139,7 @@ export function SceneTab({
           environment={environment}
           viewportTheme={viewportTheme}
           uiTheme={uiTheme}
-          onHierarchyChange={(hierarchy) => onHierarchyChange(threadId, hierarchy)}
+          onHierarchyChange={handleHierarchyChange}
           isFullscreen={fullscreen}
           onToggleFullscreen={() => setIsFullscreen((value) => !value)}
         />
@@ -146,10 +157,10 @@ export function SceneTab({
     <div className="scene-tab scene-pane">
       <div className="scene-action-bar">
         <div className="scene-actions-left">
-          <button className="ghost-btn" onClick={onFetchRenders} disabled={loading.renders || !canRunActions}>
+          <button className="primary-btn" onClick={onFetchRenders} disabled={isSceneActionBusy || !canRunActions}>
             Fetch Renders
           </button>
-          <button className="primary-btn" onClick={onFetchGltf} disabled={loading.gltf || !canRunActions}>
+          <button className="primary-btn" onClick={onFetchGltf} disabled={isSceneActionBusy || !canRunActions}>
             Fetch Scene
           </button>
           <DownloadDropdown
@@ -170,7 +181,7 @@ export function SceneTab({
             <span className="toggle-label">Auto-fetch</span>
           </label>
           <label className="select-label">
-            Environment
+            EnvLight
             <select
               className="styled-select"
               value={environment}
@@ -183,8 +194,18 @@ export function SceneTab({
           </label>
         </div>
       </div>
+      {actionError && (
+        <div className="scene-action-error" role="alert">
+          <span>{actionError}</span>
+          {onClearActionError && (
+            <button className="text-btn" type="button" onClick={onClearActionError}>
+              Dismiss
+            </button>
+          )}
+        </div>
+      )}
 
-      <RenderGallery renders={renders} isLoading={loading.renders} />
+      <RenderGallery renders={renders} isLoading={loading.renders} backendUrl={backendUrl} />
 
       <div className="scene-core-shell">{coreLayout(false)}</div>
 

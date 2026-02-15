@@ -12,7 +12,7 @@ from PIL import Image as PILImage
 RENDERS_DIR = Path(tempfile.gettempdir()) / "scene_agent_renders"
 RENDERS_DIR.mkdir(parents=True, exist_ok=True)
 
-MAX_IMAGE_SIZE = (1920, 1080)  # Max resolution
+MAX_IMAGE_SIZE = (960, 540)  # Max resolution
 JPEG_QUALITY = 85  # Compression quality
 
 LogEvent = Callable[[str, str, Mapping[str, Any] | None], None]

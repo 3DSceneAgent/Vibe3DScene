@@ -13,16 +13,29 @@ This causes high coupling and increases maintenance cost.
 
 Use capability-oriented module split while keeping one `FastMCP` process and one port:
 
-- `mcp_server/tools/core_blender_tools.py`
+- `mcp_server/tools/base.py`
   - Scene/object/screenshot/code execution
-  - Camera/render
-  - PolyHaven
-- `mcp_server/tools/asset_tools.py`
-  - Retrieval
+  - GLB import primitives used by other tool domains
+- `mcp_server/tools/multimodal/camera_tools.py`
+  - Camera control and rendering tools
+- `mcp_server/tools/asset_retrieval/polyhaven.py`
+  - PolyHaven search/download/material assignment
+- `mcp_server/tools/asset_retrieval/sketchfab.py`
+  - Sketchfab retrieval + server-side import flow
+- `mcp_server/tools/asset_retrieval/objaverse_retrieval.py`
+  - Retrieval database search/import
+- `mcp_server/tools/asset_gen/trellis2.py`
   - TRELLIS2 (headless)
+- `mcp_server/tools/asset_gen/rodin.py`
   - Rodin bridge tools (local-client)
+- `mcp_server/tools/asset_gen/hunyuan3d.py`
   - Hunyuan official API tool (headless, server-side polling)
+- `mcp_server/tools/pcg/infinigen.py`
   - Infinigen/PCG integrations
+- `mcp_server/tools/memory/session_tools.py`
+  - Session persistence status and rollback
+- `mcp_server/tools/strategy.py`
+  - Asset-creation strategy prompt text
 - `mcp_server/tool_registry.py`
   - `register_mcp_tools()` and conditional registration
   - Mode + env gates (`BLENDER_MODE`, `ENABLE_RODIN`, `ENABLE_HUNYUAN`, `ENABLE_TRELLIS2`)

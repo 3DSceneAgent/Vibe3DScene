@@ -48,6 +48,12 @@ Compose files:
 - `docker-compose.tools.yml`
 - `docker-compose.tools.gpu.yml` (optional TRELLIS2 GPU override)
 
+GPU selection notes for TRELLIS2:
+
+- Keep `TRELLIS2_GPU=all` (required by current compose schema validation).
+- Use `TRELLIS2_VISIBLE_DEVICES` to choose cards:
+- `TRELLIS2_VISIBLE_DEVICES=1` means only the second GPU is visible in container.
+
 ## 2) Start all three services
 
 ```bash

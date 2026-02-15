@@ -14,6 +14,12 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
     onChange({ ...settings, viewportTheme })
   }
 
+  const updateAutoFetchIntervalSeconds = (value: string) => {
+    const parsed = Number.parseInt(value, 10)
+    const nextInterval = Number.isFinite(parsed) ? Math.min(300, Math.max(1, parsed)) : 10
+    onChange({ ...settings, autoFetchIntervalSeconds: nextInterval })
+  }
+
   return (
     <div className="settings-panel">
       <div className="panel">
@@ -56,6 +62,17 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
         <div className="panel-header">
           <div className="panel-title">Viewport</div>
         </div>
+        <label className="field">
+          Auto-fetch Interval (seconds)
+          <input
+            type="number"
+            min={1}
+            max={300}
+            step={1}
+            value={settings.autoFetchIntervalSeconds}
+            onChange={(event) => updateAutoFetchIntervalSeconds(event.target.value)}
+          />
+        </label>
         <div className="field">
           <span>Viewport Theme</span>
           <div className="viewport-theme-options" role="radiogroup" aria-label="Viewport Theme">

@@ -10,13 +10,23 @@ import os
 import re
 import tempfile
 import time
-from typing import Any, Dict
+from datetime import datetime
+from typing import Any, Dict, Literal
 from langchain_core.messages import ToolMessage, AIMessage, SystemMessage, HumanMessage
-from scene_agent.agent.state import AgentState, TodoItem, create_todo, update_todo_status
+from scene_agent.agent.state import AgentState, TodoItem, create_todo
 from scene_agent.config import get_settings
 from scene_agent.memory.scene_memory import SceneMemory
 from scene_agent.memory.reference_image_memory import get_reference_image_memory
 from scene_agent.vlm.verification import verify_render_with_references
+
+TODO_CHECK_INTERVAL_ROUNDS = 3
+TODO_STAGNATION_LIMIT = 2
+TODO_MILESTONE_TOOL_MARKERS = (
+    "render_from_camera",
+    "render_from_objects",
+    "camera_observe",
+    "camera_act",
+)
 
 
 def agent_node(
@@ -58,6 +68,66 @@ def agent_node(
             )
     
     return {"messages": [response]}
+
+
+def post_agent_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Post-agent node: persist structured control signals after every assistant turn.
+
+    This node runs after each agent response so that decision/todo state is captured
+    even when the response does not include tool calls.
+    """
+    last_messages = state["messages"][-10:]
+    latest_ai_message = _find_last_ai_message(last_messages)
+    result: Dict[str, Any] = {}
+
+    if latest_ai_message is not None:
+        todo_updates = extract_todo_updates([latest_ai_message])
+        aligned_todos = _align_todo_updates_with_existing(state.get("todos"), todo_updates)
+        if aligned_todos:
+            result["todos"] = aligned_todos
+        result["agent_decision"] = _extract_agent_decision([latest_ai_message])
+    else:
+        result["agent_decision"] = {}
+
+    current_iteration = state.get("iteration_count")
+    if isinstance(current_iteration, int) and current_iteration >= 0:
+        result["iteration_count"] = current_iteration + 1
+    else:
+        result["iteration_count"] = 1
+
+    return result
+
+
+def finalize_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Finalize node: mark workflow-level finish metadata before END.
+    """
+    decision = state.get("agent_decision")
+    normalized = dict(decision) if isinstance(decision, dict) else {}
+    normalized["workflow_status"] = "finished"
+
+    todo_check = state.get("todo_check")
+    if isinstance(todo_check, dict):
+        todo_status = todo_check.get("status")
+        if todo_status == "completed":
+            normalized["finish_reason"] = "todos_completed"
+            return {"agent_decision": normalized}
+        if todo_status == "blocked":
+            normalized["finish_reason"] = "todo_check_blocked"
+            return {"agent_decision": normalized}
+
+    should_call_tools = normalized.get("should_call_tools")
+    if isinstance(should_call_tools, bool):
+        normalized["finish_reason"] = (
+            "tool_calls_exhausted"
+            if not should_call_tools
+            else "model_requested_tools_but_none_emitted"
+        )
+    else:
+        normalized["finish_reason"] = "no_tool_calls"
+
+    return {"agent_decision": normalized}
 
 
 def _resolve_effective_available_tools(
@@ -145,17 +215,25 @@ def _filter_unavailable_tool_calls(
 def update_memory_node(state: AgentState) -> Dict[str, Any]:
     """
     Update memory node: Parse tool results and update scene state.
-    Extracts scene_objects from get_scene_info results and todos from messages.
+    Extracts scene_objects/render artifacts from tool results.
     
     Args:
         state: Current agent state
         
     Returns:
-        Partial state update with scene_objects and todos
+        Partial state update with scene_objects and render metadata
     """
     last_messages = state["messages"][-10:]  # Look at recent messages
     
     result: Dict[str, Any] = {}
+    latest_tool_batch_names = _collect_latest_tool_batch_names(last_messages)
+    if latest_tool_batch_names:
+        result["last_tool_batch_names"] = latest_tool_batch_names
+        current_tool_round = state.get("tool_round_count")
+        if isinstance(current_tool_round, int) and current_tool_round >= 0:
+            result["tool_round_count"] = current_tool_round + 1
+        else:
+            result["tool_round_count"] = 1
     
     # Parse scene_objects from get_scene_info results
     for msg in last_messages:
@@ -166,13 +244,6 @@ def update_memory_node(state: AgentState) -> Dict[str, Any]:
                     result["scene_objects"] = scene_updates
                     break
     
-    # Extract todo updates from assistant messages
-    todo_updates = extract_todo_updates(last_messages)
-    if todo_updates:
-        result["todos"] = todo_updates
-
-    result["agent_decision"] = _extract_agent_decision(last_messages)
-
     render_message = _find_last_render_message(last_messages)
     last_render_path = _extract_render_path(render_message) if render_message else None
     render_image = _extract_render_image_payload(render_message) if render_message else None
@@ -194,6 +265,135 @@ def update_memory_node(state: AgentState) -> Dict[str, Any]:
     return result
 
 
+def checkpoint_gate_node(
+    state: AgentState,
+    *,
+    stage: Literal["loop", "finalize"],
+) -> Dict[str, Any]:
+    """
+    Decide whether todo_check should run at the current checkpoint.
+
+    Strategy:
+    - Run only when todos exist.
+    - In loop stage, run sparsely (interval or milestone tool batch).
+    - In finalize stage, run once as a pre-final guard.
+    """
+    todos = _coerce_todos(state.get("todos"))
+    has_todos = len(todos) > 0
+    tool_round_count = _coerce_non_negative_int(state.get("tool_round_count"))
+    last_check_round = _coerce_non_negative_int(state.get("last_todo_check_round"), default=-1)
+    latest_tool_batch_names = state.get("last_tool_batch_names")
+    milestone_hit = _is_milestone_tool_batch(latest_tool_batch_names)
+
+    should_run = False
+    reason = "no_todos"
+
+    if has_todos:
+        if stage == "finalize":
+            should_run = True
+            reason = "pre_finalize_guard"
+        elif milestone_hit:
+            should_run = True
+            reason = "milestone_tool_batch"
+        elif last_check_round < 0:
+            should_run = True
+            reason = "first_check"
+        elif tool_round_count - last_check_round >= TODO_CHECK_INTERVAL_ROUNDS:
+            should_run = True
+            reason = "interval_reached"
+        else:
+            should_run = False
+            reason = "interval_not_reached"
+
+    return {
+        "todo_check_gate": {
+            "stage": stage,
+            "should_run": should_run,
+            "reason": reason,
+            "has_todos": has_todos,
+            "tool_round_count": tool_round_count,
+            "last_todo_check_round": last_check_round,
+        }
+    }
+
+
+def todo_check_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Check todo progress and detect stagnation.
+    """
+    gate = state.get("todo_check_gate")
+    stage = "loop"
+    if isinstance(gate, dict):
+        stage_value = gate.get("stage")
+        if stage_value in {"loop", "finalize"}:
+            stage = stage_value
+
+    todos = _coerce_todos(state.get("todos"))
+    tool_round_count = _coerce_non_negative_int(state.get("tool_round_count"))
+    if not todos:
+        return {
+            "todo_check": {
+                "status": "not_applicable",
+                "reason": "no_todos",
+                "stage": stage,
+                "pending_count": 0,
+                "in_progress_count": 0,
+                "completed_count": 0,
+                "failed_count": 0,
+                "tool_round_count": tool_round_count,
+                "stagnation_count": 0,
+            },
+            "last_todo_check_round": tool_round_count,
+            "last_todo_snapshot": {},
+            "stagnation_count": 0,
+        }
+
+    latest_by_description = _latest_todos_by_description(todos)
+    effective_todos = list(latest_by_description.values())
+    pending_count = sum(1 for todo in effective_todos if todo.get("status") == "pending")
+    in_progress_count = sum(1 for todo in effective_todos if todo.get("status") == "in_progress")
+    completed_count = sum(1 for todo in effective_todos if todo.get("status") == "completed")
+    failed_count = sum(1 for todo in effective_todos if todo.get("status") == "failed")
+
+    snapshot = {
+        key: str(todo.get("status", "pending"))
+        for key, todo in latest_by_description.items()
+    }
+    previous_snapshot = state.get("last_todo_snapshot")
+    previous_stagnation = _coerce_non_negative_int(state.get("stagnation_count"))
+    stagnation_count = 0
+
+    status = "continue"
+    reason = "pending_todos"
+    if pending_count == 0 and in_progress_count == 0:
+        status = "completed"
+        reason = "all_todos_terminal"
+    elif isinstance(previous_snapshot, dict) and previous_snapshot == snapshot:
+        stagnation_count = previous_stagnation + 1
+        if stagnation_count >= TODO_STAGNATION_LIMIT:
+            status = "blocked"
+            reason = "todo_progress_stagnant"
+    else:
+        stagnation_count = 0
+
+    return {
+        "todo_check": {
+            "status": status,
+            "reason": reason,
+            "stage": stage,
+            "pending_count": pending_count,
+            "in_progress_count": in_progress_count,
+            "completed_count": completed_count,
+            "failed_count": failed_count,
+            "tool_round_count": tool_round_count,
+            "stagnation_count": stagnation_count,
+        },
+        "last_todo_check_round": tool_round_count,
+        "last_todo_snapshot": snapshot,
+        "stagnation_count": stagnation_count,
+    }
+
+
 def _message_content_to_text(content: Any) -> str:
     if content is None:
         return ""
@@ -212,6 +412,136 @@ def _message_content_to_text(content: Any) -> str:
     if isinstance(content, dict):
         return json.dumps(content, ensure_ascii=False, default=str)
     return str(content)
+
+
+def _collect_latest_tool_batch_names(messages: list) -> list[str]:
+    names_reversed: list[str] = []
+    for msg in reversed(messages):
+        if isinstance(msg, ToolMessage):
+            if isinstance(msg.name, str) and msg.name:
+                names_reversed.append(msg.name)
+            continue
+        if names_reversed:
+            break
+    if not names_reversed:
+        return []
+    names = list(reversed(names_reversed))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        if name in seen:
+            continue
+        seen.add(name)
+        deduped.append(name)
+    return deduped
+
+
+def _align_todo_updates_with_existing(
+    existing_todos_raw: Any,
+    todo_updates: list[TodoItem],
+) -> list[TodoItem]:
+    if not todo_updates:
+        return []
+
+    existing_todos = _coerce_todos(existing_todos_raw)
+    if not existing_todos:
+        return todo_updates
+
+    existing_by_description: dict[str, TodoItem] = _latest_todos_by_description(existing_todos)
+    aligned: list[TodoItem] = []
+    for todo in todo_updates:
+        description = str(todo.get("description", ""))
+        key = _normalize_todo_description(description)
+        existing = existing_by_description.get(key)
+        if not existing:
+            aligned.append(todo)
+            continue
+
+        merged = dict(todo)
+        merged["id"] = existing["id"]
+        merged["created_at"] = existing["created_at"]
+        if merged.get("status") == "completed":
+            previous_completed_at = existing.get("completed_at")
+            merged["completed_at"] = (
+                previous_completed_at
+                if isinstance(previous_completed_at, str) and previous_completed_at
+                else datetime.now().isoformat()
+            )
+        else:
+            merged["completed_at"] = None
+        aligned.append(TodoItem(**merged))
+    return aligned
+
+
+def _normalize_todo_description(description: str) -> str:
+    return re.sub(r"\s+", " ", description).strip().lower()
+
+
+def _latest_todos_by_description(todos: list[TodoItem]) -> dict[str, TodoItem]:
+    latest: dict[str, TodoItem] = {}
+    for todo in todos:
+        description = str(todo.get("description", ""))
+        key = _normalize_todo_description(description)
+        if not key:
+            continue
+        latest[key] = todo
+    return latest
+
+
+def _coerce_todos(raw: Any) -> list[TodoItem]:
+    if not isinstance(raw, list):
+        return []
+    todos: list[TodoItem] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        description = item.get("description")
+        status = item.get("status")
+        todo_id = item.get("id")
+        created_at = item.get("created_at")
+        completed_at = item.get("completed_at")
+        if not (
+            isinstance(description, str)
+            and description
+            and isinstance(status, str)
+            and isinstance(todo_id, str)
+            and todo_id
+            and isinstance(created_at, str)
+            and created_at
+            and (isinstance(completed_at, str) or completed_at is None)
+        ):
+            continue
+        todos.append(
+            TodoItem(
+                id=todo_id,
+                description=description,
+                status=status,
+                created_at=created_at,
+                completed_at=completed_at,
+            )
+        )
+    return todos
+
+
+def _coerce_non_negative_int(value: Any, *, default: int = 0) -> int:
+    if isinstance(value, int) and value >= 0:
+        return value
+    return default
+
+
+def _is_milestone_tool_batch(names: Any) -> bool:
+    if not isinstance(names, list):
+        return False
+    for raw_name in names:
+        if not isinstance(raw_name, str):
+            continue
+        name = raw_name.strip()
+        if not name:
+            continue
+        for marker in TODO_MILESTONE_TOOL_MARKERS:
+            if marker in name:
+                return True
+    return False
 
 
 def _extract_render_path(message: ToolMessage | None) -> str | None:
@@ -264,6 +594,13 @@ def _extract_agent_decision(messages: list) -> dict[str, Any]:
             if isinstance(decision, dict):
                 return decision
     return {}
+
+
+def _find_last_ai_message(messages: list) -> AIMessage | None:
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            return msg
+    return None
 
 
 def _extract_tagged_json(text: str, tag: str) -> dict[str, Any] | None:
