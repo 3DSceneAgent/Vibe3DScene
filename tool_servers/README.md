@@ -41,7 +41,7 @@ If TRELLIS2 model pull requires Hugging Face auth, set:
 
 - `HUGGINGFACE_TOKEN=<your_token>`
 - `HUGGINGFACE_CACHE_DIR=./cache/huggingface/hub` (host cache mapped into containers to avoid repeated model downloads)
-- If host env has `HTTP_PROXY`/`HTTPS_PROXY`, `start_tool_servers.sh` injects TRELLIS2 and retrieval proxy as `http://host.docker.internal:7890`; if host vars are empty, proxy vars are not set in containers.
+- If host env has `HTTP_PROXY`/`HTTPS_PROXY`, `start_tool_servers.sh` passes the same proxy values into TRELLIS2/retrieval containers; if host vars are empty, proxy vars are not set in containers.
 
 Compose files:
 

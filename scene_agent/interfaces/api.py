@@ -1,6 +1,6 @@
 """
 FastAPI REST server for the 3D scene agent.
-Provides HTTP endpoints and WebSocket support with streaming.
+Provides HTTP endpoints and streaming support.
 """
 import asyncio
 import json
@@ -11,8 +11,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Dict, Any
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
-from fastapi.responses import StreamingResponse, Response, FileResponse
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request
+from fastapi.responses import StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -33,6 +33,8 @@ from scene_agent.memory.reference_image_memory import (
     ReferenceImage,
     get_reference_image_memory,
 )
+from scene_agent.session import get_session_coordinator
+from scene_agent.session.owner_proxy import OwnerProxyError, forward_request_to_owner
 from scene_agent.utils.diagnostics import (
     build_diagnostic_record,
     elapsed_ms,
@@ -93,13 +95,15 @@ def _normalize_optional(value: str | None, *, lower: bool = False) -> str | None
 
 def _headless_timeout_seconds_for_session(settings: Any, session: Any | None = None) -> float:
     # Scene/render export operations are frequently heavier than tool RPCs.
-    base_timeout = max(30.0, float(getattr(settings, "headless_request_timeout_seconds", 15)))
+    base_timeout = max(1.0, float(getattr(settings, "headless_request_timeout_seconds", 15)))
     if session is None:
         return base_timeout
     session_status = getattr(session, "status", None)
     session_process = getattr(session, "process", None)
     # Cold-start requests need extra budget for launching Blender/MCP.
     if session_status != "ready" or session_process is None:
+        if base_timeout < 10:
+            return base_timeout
         startup_timeout = max(1.0, float(getattr(settings, "blender_headless_startup_timeout", 10)))
         return base_timeout + startup_timeout
     return base_timeout
@@ -191,6 +195,23 @@ def _resolve_vlm_selection(
 
 
 def _ensure_thread_vlm_config(thread_id: str) -> Dict[str, Any]:
+    coordinator = get_session_coordinator()
+    stored = coordinator.get_thread_vlm(thread_id)
+    if stored is not None:
+        locked_raw = stored.get("locked", "0")
+        locked = locked_raw in {"1", "true", "True"}
+        with _thread_vlm_lock:
+            _thread_vlm_configs[thread_id] = {
+                "provider": stored["provider"],
+                "model": stored["model"],
+                "locked": locked,
+            }
+        return {
+            "provider": str(stored["provider"]),
+            "model": str(stored["model"]),
+            "locked": locked,
+        }
+
     with _thread_vlm_lock:
         existing = _thread_vlm_configs.get(thread_id)
     if existing is None:
@@ -203,6 +224,12 @@ def _ensure_thread_vlm_config(thread_id: str) -> Dict[str, Any]:
                     "model": resolved["model"],
                 }
                 _thread_vlm_configs[thread_id] = current
+                coordinator.set_thread_vlm(
+                    thread_id=thread_id,
+                    provider=resolved["provider"],
+                    model=resolved["model"],
+                    locked=bool(current.get("locked", False)),
+                )
             existing = current
     return {
         "provider": str(existing["provider"]),
@@ -216,6 +243,7 @@ def _resolve_thread_vlm_for_chat(
     requested_provider: str | None,
     requested_model: str | None,
 ) -> Dict[str, str]:
+    coordinator = get_session_coordinator()
     normalized_provider = _normalize_optional(requested_provider, lower=True)
     normalized_model = _normalize_optional(requested_model)
     state = _ensure_thread_vlm_config(thread_id)
@@ -242,6 +270,12 @@ def _resolve_thread_vlm_for_chat(
         else:
             current["provider"] = resolved["provider"]
             current["model"] = resolved["model"]
+    coordinator.set_thread_vlm(
+        thread_id=thread_id,
+        provider=resolved["provider"],
+        model=resolved["model"],
+        locked=bool(current.get("locked", False)),
+    )
     return resolved
 
 
@@ -311,6 +345,7 @@ def get_blender_connection_for_thread(thread_id: str) -> BlenderConnection:
     if settings.blender_mode == "local-client":
         return get_blender_connection()
 
+    coordinator = get_session_coordinator()
     manager = get_session_manager()
     session = manager.ensure(thread_id, "headless")
     manager.ensure_session_storage(thread_id)
@@ -318,13 +353,23 @@ def get_blender_connection_for_thread(thread_id: str) -> BlenderConnection:
     base_port = int(os.getenv("BLENDER_HEADLESS_BASE_PORT", "9876"))
     port_range = int(os.getenv("BLENDER_HEADLESS_PORT_RANGE", "16"))
     if session.port is None:
-        used_ports = {item.port for item in manager.list_sessions() if item.port}
-        port = allocate_headless_port(
-            thread_id,
-            base_port,
-            port_range,
-            used_ports=used_ports,
+        reserved_port = coordinator.reserve_port(
+            host=host,
+            kind="headless",
+            base_port=base_port,
+            range_size=port_range,
+            seed=thread_id,
         )
+        if reserved_port is None:
+            used_ports = {item.port for item in manager.list_sessions() if item.port}
+            port = allocate_headless_port(
+                thread_id,
+                base_port,
+                port_range,
+                used_ports=used_ports,
+            )
+        else:
+            port = reserved_port
         manager.set_endpoint(thread_id, host, port)
     else:
         port = session.port
@@ -406,6 +451,18 @@ def get_blender_connection_for_thread(thread_id: str) -> BlenderConnection:
             raise Exception(error_message)
 
         manager.set_ready(thread_id, connection)
+        coordinator.touch_activity(thread_id)
+        coordinator.update_session_runtime_fields(
+            thread_id,
+            {
+                "host": host,
+                "blender_port": port,
+                "storage_dir": session.storage_dir,
+                "blend_path": session.blend_path,
+                "snapshot_dir": session.snapshot_dir,
+                "status": "ready",
+            },
+        )
         print(f"Session ready for thread: {thread_id}")
 
     return connection
@@ -419,6 +476,7 @@ def send_blender_command_sync(
     global _blender_connection
     settings = get_settings()
     if settings.blender_mode == "headless" and thread_id:
+        coordinator = get_session_coordinator()
         manager = get_session_manager()
         session = manager.ensure(thread_id, "headless")
         last_error: Exception | None = None
@@ -426,7 +484,9 @@ def send_blender_command_sync(
             blender = get_blender_connection_for_thread(thread_id)
             with session.lock:
                 try:
-                    return blender.send_command(command_type, params)
+                    result = blender.send_command(command_type, params)
+                    coordinator.touch_activity(thread_id)
+                    return result
                 except Exception as exc:
                     last_error = exc
                     try:
@@ -435,6 +495,10 @@ def send_blender_command_sync(
                         pass
                     session.connection = None
                     manager.set_error(thread_id, f"{command_type} failed: {exc}")
+                    coordinator.update_session_runtime_fields(
+                        thread_id,
+                        {"status": "error"},
+                    )
         if last_error is not None:
             raise last_error
         raise Exception(f"{command_type} failed unexpectedly")
@@ -825,20 +889,96 @@ def build_headless_diagnostics(
     return payload
 
 
+def _set_owner_headers(response: Response, resolution: Any | None) -> None:
+    if resolution is None:
+        return
+    owner = getattr(resolution, "owner_worker_id", "") or ""
+    epoch = getattr(resolution, "lease_epoch", None)
+    if owner:
+        response.headers["X-Session-Owner"] = owner
+    if epoch is not None:
+        response.headers["X-Session-Lease-Epoch"] = str(epoch)
+
+
+async def _claim_or_proxy_request(
+    *,
+    request: Request,
+    thread_id: str,
+) -> tuple[Any, Response | None]:
+    coordinator = get_session_coordinator()
+    settings = get_settings()
+    resolution = coordinator.claim_or_get_owner(thread_id)
+    if resolution.is_owner:
+        return resolution, None
+
+    if not resolution.owner_url:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Session owner URL is missing for thread '{thread_id}'.",
+        )
+
+    try:
+        proxied = await forward_request_to_owner(
+            request=request,
+            owner_url=resolution.owner_url,
+            timeout_seconds=max(
+                settings.api_stream_timeout_seconds + 30,
+                settings.headless_request_timeout_seconds + 30,
+            ),
+        )
+        _set_owner_headers(proxied, resolution)
+        return resolution, proxied
+    except OwnerProxyError as exc:
+        if not coordinator.should_attempt_takeover(resolution):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Owner worker '{resolution.owner_worker_id}' is unavailable; "
+                    f"lease still active, skipping takeover. Error: {exc}"
+                ),
+            ) from exc
+        takeover = coordinator.force_takeover(thread_id)
+        if not takeover.is_owner:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Failed to proxy and failed to take over thread '{thread_id}'. "
+                    f"Current owner: {takeover.owner_worker_id}"
+                ),
+            ) from exc
+        return takeover, None
+
+
 async def _idle_session_sweeper() -> None:
     while True:
         settings = get_settings()
         interval = max(1, settings.session_sweep_interval_seconds)
         await asyncio.sleep(interval)
+        coordinator = get_session_coordinator()
         manager = get_session_manager()
         idle_sessions = manager.get_idle_sessions()
         for session in idle_sessions:
+            if not coordinator.is_owned_by_current_worker(session.session_id):
+                continue
             stopped, persisted = await asyncio.to_thread(
                 manager.shutdown_if_idle,
                 session.session_id,
             )
             if not stopped:
                 continue
+            coordinator.update_session_runtime_fields(
+                session.session_id,
+                {
+                    "status": "closed",
+                    "last_active_ms": int(time.time() * 1000),
+                },
+            )
+            coordinator.release_port(host=session.host or settings.blender_host, kind="headless", port=session.port)
+            coordinator.release_port(
+                host=session.mcp_host or os.getenv("BLENDER_MCP_HOST", "localhost"),
+                kind="mcp",
+                port=session.mcp_port,
+            )
             log_event(
                 "info",
                 "headless_session_idle_stopped",
@@ -858,6 +998,8 @@ async def startup_event():
     global _idle_sweeper_task
     try:
         settings = get_settings()
+        coordinator = get_session_coordinator()
+        coordinator.register_worker()
         if settings.blender_mode == "headless":
             if _idle_sweeper_task is None or _idle_sweeper_task.done():
                 _idle_sweeper_task = asyncio.create_task(_idle_session_sweeper())
@@ -882,6 +1024,7 @@ async def shutdown_event():
     """Ensure headless processes are cleaned up on shutdown."""
     global _idle_sweeper_task
     try:
+        coordinator = get_session_coordinator()
         if _idle_sweeper_task is not None:
             _idle_sweeper_task.cancel()
             try:
@@ -898,10 +1041,25 @@ async def shutdown_event():
                     manager.persist_session_blend(session.session_id)
                 except Exception:
                     pass
+                coordinator.update_session_runtime_fields(
+                    session.session_id,
+                    {"status": "closed"},
+                )
+                coordinator.release_port(
+                    host=session.host or get_settings().blender_host,
+                    kind="headless",
+                    port=session.port,
+                )
+                coordinator.release_port(
+                    host=session.mcp_host or os.getenv("BLENDER_MCP_HOST", "localhost"),
+                    kind="mcp",
+                    port=session.mcp_port,
+                )
         manager.shutdown_all()
         _agent_graphs_by_thread.clear()
         with _thread_vlm_lock:
             _thread_vlm_configs.clear()
+        coordinator.unregister_worker()
     except Exception as e:
         log_event("error", "shutdown_cleanup_failed", {"error": str(e)})
 
@@ -924,8 +1082,7 @@ async def root():
             "vlm_models": "GET /vlm/models",
             "mcp_tools": "GET /threads/{thread_id}/mcp-tools",
             "todos": "GET /todos/{thread_id}",
-            "threads": "GET /threads",
-            "websocket": "WS /ws"
+            "threads": "GET /threads"
         }
     }
 
@@ -934,10 +1091,15 @@ async def root():
 async def healthcheck():
     """Healthcheck endpoint."""
     settings = get_settings()
+    coordinator = get_session_coordinator()
+    redis_ok, redis_latency_ms = coordinator.redis_health()
     return {
         "status": "ok",
         "timestamp": time.time(),
         "blender_mode": settings.blender_mode,
+        "worker_id": settings.api_worker_id,
+        "redis_ok": redis_ok,
+        "redis_latency_ms": redis_latency_ms,
     }
 
 
@@ -974,8 +1136,11 @@ async def get_vlm_models(thread_id: str | None = None):
 
 
 @app.get("/threads/{thread_id}/mcp-tools", response_model=MCPToolsResponse)
-async def get_mcp_tools(thread_id: str):
+async def get_mcp_tools(thread_id: str, request: Request, response: Response):
     settings = get_settings()
+    resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
+    if proxied is not None:
+        return proxied
     try:
         agent = await get_agent(thread_id)
     except Exception as exc:
@@ -990,7 +1155,7 @@ async def get_mcp_tools(thread_id: str):
         name: tool_hints_raw.get(name, build_default_tool_hint(name))
         for name in tools
     }
-    return MCPToolsResponse(
+    payload = MCPToolsResponse(
         thread_id=thread_id,
         loaded=len(tools) > 0,
         tool_count=len(tools),
@@ -998,10 +1163,12 @@ async def get_mcp_tools(thread_id: str):
         tool_hints=tool_hints,
         blender_mode=settings.blender_mode,
     )
+    _set_owner_headers(response, resolution)
+    return payload
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, request_http: Request, response: Response):
     """
     Chat with the agent (non-streaming).
     
@@ -1011,6 +1178,12 @@ async def chat(request: ChatRequest):
     Returns:
         ChatResponse with agent's response and todos
     """
+    resolution, proxied = await _claim_or_proxy_request(
+        request=request_http,
+        thread_id=request.thread_id,
+    )
+    if proxied is not None:
+        return proxied
     try:
         _resolve_thread_vlm_for_chat(
             request.thread_id,
@@ -1033,16 +1206,19 @@ async def chat(request: ChatRequest):
             },
             config=config
         )
+        get_session_coordinator().touch_activity(request.thread_id)
         
         # Extract response
         last_message = result["messages"][-1]
         response_text = last_message.content if hasattr(last_message, "content") else str(last_message)
         
-        return ChatResponse(
+        payload = ChatResponse(
             response=response_text,
             thread_id=request.thread_id,
             todos=result.get("todos", [])
         )
+        _set_owner_headers(response, resolution)
+        return payload
 
     except HTTPException:
         raise
@@ -1051,7 +1227,7 @@ async def chat(request: ChatRequest):
 
 
 @app.post("/chat/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, request_http: Request):
     """
     Chat with the agent (streaming via Server-Sent Events).
     
@@ -1061,6 +1237,13 @@ async def chat_stream(request: ChatRequest):
     Returns:
         StreamingResponse with SSE events
     """
+    resolution, proxied = await _claim_or_proxy_request(
+        request=request_http,
+        thread_id=request.thread_id,
+    )
+    if proxied is not None:
+        return proxied
+
     async def event_generator():
         import time 
         settings = get_settings()
@@ -1081,6 +1264,7 @@ async def chat_stream(request: ChatRequest):
                 request.vlm_model,
             )
             agent = await get_agent(request.thread_id)
+            get_session_coordinator().touch_activity(request.thread_id)
             enabled_tool_names = resolve_enabled_tool_names(
                 agent,
                 normalize_requested_tool_names(request.enabled_mcp_tools),
@@ -1183,6 +1367,7 @@ async def chat_stream(request: ChatRequest):
                             yield f"data: {json.dumps(payload, default=str)}\n\n"
 
             done_payload = {"event": "done", "scene_has_change": scene_has_change}
+            get_session_coordinator().touch_activity(request.thread_id)
         except HTTPException as e:
             detail = e.detail if isinstance(e.detail, str) else json.dumps(e.detail, ensure_ascii=False)
             error_event = {"error": detail, "status_code": e.status_code}
@@ -1205,19 +1390,27 @@ async def chat_stream(request: ChatRequest):
             if done_payload is not None:
                 yield f"data: {json.dumps(done_payload)}\n\n"
     
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    owner = getattr(resolution, "owner_worker_id", "") or ""
+    epoch = getattr(resolution, "lease_epoch", None)
+    if owner:
+        headers["X-Session-Owner"] = owner
+    if epoch is not None:
+        headers["X-Session-Lease-Epoch"] = str(epoch)
+
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=headers,
     )
 
 
 @app.get("/scene/{thread_id}")
-async def get_scene(thread_id: str):
+async def get_scene(thread_id: str, request: Request, response: Response):
     """
     Get current scene state for a thread.
     
@@ -1227,6 +1420,9 @@ async def get_scene(thread_id: str):
     Returns:
         Scene objects and metadata
     """
+    resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
+    if proxied is not None:
+        return proxied
     try:
         settings = get_settings()
         if settings.blender_mode == "headless":
@@ -1284,12 +1480,14 @@ async def get_scene(thread_id: str):
         scene_objects = SceneMemory.parse_scene_info(scene_info)
         objects = scene_info.get("objects", []) if isinstance(scene_info, dict) else []
         cameras = [obj.get("name") for obj in objects if obj.get("type") == "CAMERA" and obj.get("name")]
-        return {
+        payload = {
             "thread_id": thread_id,
             "scene_objects": scene_objects,
             "persistent_cameras": cameras,
             "iteration_count": 0
         }
+        _set_owner_headers(response, resolution)
+        return payload
     except Exception as e:
         if isinstance(e, HTTPException):
             raise
@@ -1303,10 +1501,18 @@ async def get_scene(thread_id: str):
 
 
 @app.get("/scene/{thread_id}/renders")
-async def get_scene_renders(thread_id: str, mode: str = "rgb"):
+async def get_scene_renders(
+    thread_id: str,
+    request: Request,
+    response: Response,
+    mode: str = "rgb",
+):
     """
     Render all cameras in the current Blender scene and return processed image URLs.
     """
+    resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
+    if proxied is not None:
+        return proxied
     try:
         settings = get_settings()
         diagnostics = None
@@ -1427,7 +1633,9 @@ async def get_scene_renders(thread_id: str, mode: str = "rgb"):
                 target_ms=int(request_timeout_seconds * 1000),
             )
             log_event("info", "headless_renders_ok", diagnostics)
-        return {"thread_id": thread_id, "renders": renders, "diagnostics": diagnostics}
+        payload = {"thread_id": thread_id, "renders": renders, "diagnostics": diagnostics}
+        _set_owner_headers(response, resolution)
+        return payload
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1437,10 +1645,13 @@ async def get_scene_renders(thread_id: str, mode: str = "rgb"):
 
 
 @app.get("/scene/{thread_id}/gltf")
-async def get_scene_gltf(thread_id: str):
+async def get_scene_gltf(thread_id: str, request: Request):
     """
     Export current Blender scene to GLB and return the binary.
     """
+    resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
+    if proxied is not None:
+        return proxied
     try:
         settings = get_settings()
         temp_path = os.path.join(
@@ -1570,11 +1781,13 @@ async def get_scene_gltf(thread_id: str):
             pass
 
         filename = f"scene-{thread_id}.glb"
-        return Response(
+        result = Response(
             content=glb_data,
             media_type="model/gltf-binary",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'}
         )
+        _set_owner_headers(result, resolution)
+        return result
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1582,10 +1795,13 @@ async def get_scene_gltf(thread_id: str):
 
 
 @app.get("/scene/{thread_id}/blend")
-async def get_scene_blend(thread_id: str):
+async def get_scene_blend(thread_id: str, request: Request):
     """
     Export current Blender scene to .blend file and return the binary.
     """
+    resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
+    if proxied is not None:
+        return proxied
     try:
         settings = get_settings()
         temp_path = os.path.join(
@@ -1675,11 +1891,13 @@ async def get_scene_blend(thread_id: str):
             pass
 
         filename = f"scene-{thread_id}.blend"
-        return Response(
+        result = Response(
             content=blend_data,
             media_type="application/x-blender",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'}
         )
+        _set_owner_headers(result, resolution)
+        return result
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1687,10 +1905,18 @@ async def get_scene_blend(thread_id: str):
 
 
 @app.post("/threads/{thread_id}/reference-images", response_model=ReferenceImageListResponse)
-async def upload_reference_images(thread_id: str, images: list[UploadFile] = File(...)):
+async def upload_reference_images(
+    thread_id: str,
+    request: Request,
+    response: Response,
+    images: list[UploadFile] = File(...),
+):
     """
     Upload reference images for a thread.
     """
+    resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
+    if proxied is not None:
+        return proxied
     settings = get_settings()
     if not images:
         raise HTTPException(status_code=400, detail="No images provided.")
@@ -1708,27 +1934,34 @@ async def upload_reference_images(thread_id: str, images: list[UploadFile] = Fil
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return ReferenceImageListResponse(
+    payload = ReferenceImageListResponse(
         thread_id=thread_id,
         images=[serialize_reference_image(image) for image in stored],
     )
+    _set_owner_headers(response, resolution)
+    return payload
 
 
 @app.get("/threads/{thread_id}/reference-images", response_model=ReferenceImageListResponse)
-async def list_reference_images(thread_id: str):
+async def list_reference_images(thread_id: str, request: Request, response: Response):
     """
     List reference images for a thread.
     """
+    resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
+    if proxied is not None:
+        return proxied
     memory = get_reference_image_memory()
     images = memory.list_images(thread_id)
-    return ReferenceImageListResponse(
+    payload = ReferenceImageListResponse(
         thread_id=thread_id,
         images=[serialize_reference_image(image) for image in images],
     )
+    _set_owner_headers(response, resolution)
+    return payload
 
 
 @app.get("/todos/{thread_id}")
-async def get_todos(thread_id: str):
+async def get_todos(thread_id: str, request: Request, response: Response):
     """
     Get current todos for a thread.
     
@@ -1738,16 +1971,21 @@ async def get_todos(thread_id: str):
     Returns:
         List of todos with their status
     """
+    resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
+    if proxied is not None:
+        return proxied
     try:
         agent = await get_agent(thread_id)
         config = {"configurable": {"thread_id": thread_id}}
         
         state = await agent.aget_state(config)
         
-        return {
+        payload = {
             "thread_id": thread_id,
             "todos": state.values.get("todos", [])
         }
+        _set_owner_headers(response, resolution)
+        return payload
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1761,47 +1999,9 @@ async def list_threads():
     Returns:
         List of thread IDs
     """
-    # TODO: Implement thread listing from checkpointer
-    return {
-        "threads": [],
-        "message": "Thread listing not yet implemented"
-    }
-
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """
-    WebSocket endpoint for real-time bidirectional communication.
-    
-    Args:
-        websocket: WebSocket connection
-    """
-    await websocket.accept()
-    thread_id = "websocket-session"
-    
-    try:
-        agent = await get_agent(thread_id)
-        config = {"configurable": {"thread_id": thread_id}}
-        
-        while True:
-            # Receive message from client
-            data = await websocket.receive_text()
-            message_data = json.loads(data)
-            
-            if "message" in message_data:
-                # Stream response back to client
-                async for event in agent.astream(
-                    {"messages": [HumanMessage(content=message_data["message"])], "thread_id": thread_id},
-                    config=config,
-                    stream_mode=["messages", "values"]
-                ):
-                    await websocket.send_json(serialize_event(event), default=str)
-            
-    except WebSocketDisconnect:
-        print(f"WebSocket disconnected: {thread_id}")
-    except Exception as e:
-        await websocket.send_json({"error": str(e)})
-        await websocket.close()
+    coordinator = get_session_coordinator()
+    threads = coordinator.list_threads(limit=1000)
+    return {"threads": threads}
 
 
 def run_api(host: str = "0.0.0.0", port: int = 8000, workers: int | None = None):
@@ -1820,8 +2020,9 @@ def run_api(host: str = "0.0.0.0", port: int = 8000, workers: int | None = None)
     worker_count = max(1, worker_count)
     if worker_count > 1:
         print(
-            "Warning: API_WORKERS > 1 is not supported with in-memory thread/session state. "
-            "Forcing single worker to avoid cross-process timeout/race issues."
+            "Warning: A single API process must run with workers=1. "
+            "Use multiple processes on different ports (and set unique API_WORKER_ADVERTISE_URL) "
+            "for multiprocess session routing."
         )
         worker_count = 1
     uvicorn.run("scene_agent.interfaces.api:app", host=host, port=port, workers=worker_count)

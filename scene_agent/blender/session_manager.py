@@ -344,7 +344,7 @@ class SessionManager:
         return safe or "session"
 
     def _ensure_storage_paths(self, session: BlenderSession) -> None:
-        root = os.getenv("SESSION_BLEND_ROOT")
+        root = os.getenv("SESSION_SHARED_STORAGE_ROOT") or os.getenv("SESSION_BLEND_ROOT")
         max_snapshots_raw = os.getenv("SESSION_MAX_SNAPSHOTS")
         idle_timeout_raw = os.getenv("SESSION_IDLE_TIMEOUT_SECONDS")
         if root is None or max_snapshots_raw is None or idle_timeout_raw is None:
@@ -511,7 +511,7 @@ def start_headless_process(
             session.process = subprocess.Popen(
                 [command, *args],
                 stdout=log_file,
-                stderr=subprocess.STDOUT,
+                stderr=log_file,
                 env=proc_env,
             )
         

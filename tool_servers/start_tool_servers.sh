@@ -77,7 +77,8 @@ wait_for_http_health() {
   done
 }
 
-# If host shell has proxy variables, route TRELLIS2 downloads through host:7890.
+# Optional proxy inheritance: if host shell has proxy variables, pass them through
+# to selected containers (with per-service overrides still supported).
 HOST_HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}"
 HOST_HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}"
 HOST_NO_PROXY="${NO_PROXY:-${no_proxy:-}}"
@@ -91,16 +92,16 @@ USE_PROXY_OVERRIDE=false
 rm -f "$PROXY_COMPOSE_FILE"
 
 if [[ -n "$HOST_HTTP_PROXY" ]]; then
-  TRELLIS2_PROXY_HTTP="${TRELLIS2_HTTP_PROXY:-http://host.docker.internal:7890}"
-  RETRIEVAL_PROXY_HTTP="${RETRIEVAL_HTTP_PROXY:-http://host.docker.internal:7890}"
+  TRELLIS2_PROXY_HTTP="${TRELLIS2_HTTP_PROXY:-$HOST_HTTP_PROXY}"
+  RETRIEVAL_PROXY_HTTP="${RETRIEVAL_HTTP_PROXY:-$HOST_HTTP_PROXY}"
 fi
 if [[ -n "$HOST_HTTPS_PROXY" ]]; then
-  TRELLIS2_PROXY_HTTPS="${TRELLIS2_HTTPS_PROXY:-http://host.docker.internal:7890}"
-  RETRIEVAL_PROXY_HTTPS="${RETRIEVAL_HTTPS_PROXY:-http://host.docker.internal:7890}"
+  TRELLIS2_PROXY_HTTPS="${TRELLIS2_HTTPS_PROXY:-$HOST_HTTPS_PROXY}"
+  RETRIEVAL_PROXY_HTTPS="${RETRIEVAL_HTTPS_PROXY:-$HOST_HTTPS_PROXY}"
 fi
 if [[ -n "$HOST_NO_PROXY" ]]; then
-  TRELLIS2_PROXY_NO_PROXY="${TRELLIS2_NO_PROXY:-localhost,127.0.0.1,host.docker.internal,postgres}"
-  RETRIEVAL_PROXY_NO_PROXY="${RETRIEVAL_NO_PROXY:-localhost,127.0.0.1,host.docker.internal,postgres}"
+  TRELLIS2_PROXY_NO_PROXY="${TRELLIS2_NO_PROXY:-$HOST_NO_PROXY}"
+  RETRIEVAL_PROXY_NO_PROXY="${RETRIEVAL_NO_PROXY:-$HOST_NO_PROXY}"
 fi
 
 if [[ -n "$TRELLIS2_PROXY_HTTP" || -n "$TRELLIS2_PROXY_HTTPS" || -n "$TRELLIS2_PROXY_NO_PROXY" || -n "$RETRIEVAL_PROXY_HTTP" || -n "$RETRIEVAL_PROXY_HTTPS" || -n "$RETRIEVAL_PROXY_NO_PROXY" ]]; then

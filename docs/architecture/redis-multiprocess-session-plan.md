@@ -49,6 +49,39 @@ For each request with `thread_id`:
 3. If another worker owns it: proxy request to owner worker.
 4. If owner unavailable and lease expired: claim takeover and execute locally.
 
+### 3.3 Client Request Forwarding Flow (Plain Version)
+
+This section answers one question only: after a client request arrives, how do workers decide who executes it.
+
+```mermaid
+flowchart TD
+    A["Client sends request (/chat, /chat/stream, /scene/*)"] --> B["Any API worker receives request"]
+    B --> C["Use thread_id to read owner + lease from Redis"]
+    C --> D{"Is current worker the owner?"}
+
+    D -- "Yes" --> E["Run locally: ensure Blender + MCP runtime is ready"]
+    E --> F["Execute agent/scene operation"]
+    F --> G["Return JSON or SSE to client"]
+
+    D -- "No" --> H["Forward request to owner worker"]
+    H --> I{"Can owner be reached?"}
+    I -- "Yes" --> J["Owner executes and returns response"]
+    J --> G
+
+    I -- "No" --> K{"Is lease expired?"}
+    K -- "No" --> L["Return retryable error (avoid dual-writes)"]
+    K -- "Yes" --> M["Current worker takes over ownership (new fence + lease)"]
+    M --> N["Recover runtime from shared .blend storage"]
+    N --> E
+```
+
+Plain rules:
+
+1. Every `thread_id` has exactly one owner worker at a time.
+2. Non-owner workers do not execute session mutations locally.
+3. If owner is down and lease is expired, takeover is allowed.
+4. Takeover always recovers from shared persisted `.blend`.
+
 ## 4. Redis Data Model
 
 All keys use prefix `sa` (configurable via `REDIS_KEY_PREFIX`) and session hash-tags for future cluster compatibility.
@@ -99,37 +132,45 @@ All keys use prefix `sa` (configurable via `REDIS_KEY_PREFIX`) and session hash-
 - `sa:ckpt_blob:<thread_id>:<ns>:<channel>:<version>` (STRING)
 - `sa:writes:<thread_id>:<ns>:<checkpoint_id>` (HASH/ZSET)
 
-## 5. Core Runtime Flows
+## 5. Core Runtime Flows (Plain Steps)
 
-### 5.1 Claim / Renew / Get Owner
+### 5.1 Request Entry
 
-`SessionCoordinator.claim_or_get_owner(thread_id)`:
+1. A client request comes in with `thread_id`.
+2. The ingress worker checks Redis for current owner + lease.
+3. If ingress worker is owner, execute locally.
+4. If ingress worker is not owner, proxy to owner.
+5. If owner is unreachable and lease is expired, ingress worker takes over and executes locally.
 
-- If no lease: atomically claim ownership and issue lease token.
-- If lease belongs to self: renew lease and touch activity.
-- If lease belongs to another worker: return owner info for proxy routing.
+### 5.2 Owner Path
 
-Atomicity is guaranteed with Lua/CAS semantics in Redis.
+1. Ensure local Blender/MCP runtime exists for that `thread_id`.
+2. If runtime is missing, start runtime and load persisted `.blend`.
+3. Execute request (`/chat`, `/chat/stream`, `/scene/*`).
+4. Persist checkpoint and activity metadata in Redis.
+5. Return response directly to caller.
 
-### 5.2 Owner Execution vs Proxy
+### 5.3 Non-Owner Path
 
-- Owner path: ensure local runtime exists, then execute command.
-- Non-owner path: internal HTTP proxy to owner worker.
-- Loop prevention: request header `X-Session-Proxy-Hop` with max hop 1.
+1. Build internal HTTP proxy request to `owner_url`.
+2. Copy request payload and required headers.
+3. Add `X-Session-Proxy-Hop: 1` to prevent loops.
+4. Stream owner response back to client as-is (JSON/SSE).
 
-### 5.3 Takeover
+### 5.4 Takeover Path
 
-- Detect owner unreachability.
-- Verify lease expiration.
-- Claim with incremented fencing epoch.
-- Restart runtime and load persisted `blend_path` from shared storage.
+1. Detect owner is unreachable.
+2. Confirm lease is truly expired in Redis.
+3. Atomically claim ownership with a new fencing epoch.
+4. Start local runtime and recover from shared persisted `.blend`.
+5. Continue processing request as new owner.
 
-### 5.4 Idle Sweeper
+### 5.5 Idle Sweeper Path
 
-- Every worker runs sweeper.
-- Sweeper only processes sessions owned by that worker.
-- Before shutdown, re-check lease token and `last_active_ms`.
-- Persist `.blend`, terminate runtime, mark session closed.
+1. Every worker runs a sweeper loop.
+2. Sweeper only handles sessions currently owned by that worker.
+3. Before shutdown, re-check lease token and last activity.
+4. Persist `.blend`, stop runtime, mark session closed in Redis.
 
 ## 6. Code Change Plan
 
@@ -261,6 +302,7 @@ Assumptions:
 - Workers are mutually reachable through `API_WORKER_ADVERTISE_URL`.
 - Shared POSIX storage has consistent path and RW permissions across workers.
 - HTTP/SSE is primary traffic path for session workloads.
+- Single-host deployment is valid: run multiple API processes on different ports, each process with one worker.
 
 Defaults:
 
@@ -269,4 +311,3 @@ Defaults:
 - `SESSION_OWNER_UNREACHABLE_GRACE_SECONDS=10`
 - `REDIS_KEY_PREFIX=sa`
 - `SESSION_SHARED_STORAGE_ROOT=/tmp/scene_agent_sessions` (replace in production).
-

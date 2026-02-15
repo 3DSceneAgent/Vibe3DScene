@@ -1,0 +1,48 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+ARG INSTALL_BLENDER=false
+ARG BLENDER_VERSION=4.2.15
+
+COPY scripts/download_blender_4_2.py /tmp/download_blender_4_2.py
+RUN set -eux; \
+    rm -f /etc/apt/sources.list.d/yarn.list || true; \
+    if [ "$INSTALL_BLENDER" = "true" ]; then \
+      arch="$(dpkg --print-architecture)"; \
+      if [ "$arch" != "amd64" ]; then \
+        echo "Docker Blender install supports linux-x86-64 only (current arch=$arch)."; \
+        echo "Use an amd64 Docker platform (for example: platform: linux/amd64)."; \
+        exit 1; \
+      fi; \
+      apt-get update; \
+      apt-get install -y --no-install-recommends ca-certificates xz-utils; \
+      rm -rf /var/lib/apt/lists/*; \
+      python /tmp/download_blender_4_2.py \
+        --platform "linux-x86-64" \
+        --version "$BLENDER_VERSION" \
+        --cache-dir /var/cache/blender/packages \
+        --install-dir /opt/blender; \
+      ln -sf /opt/blender/blender /usr/local/bin/blender; \
+      rm -f /var/cache/blender/packages/blender-"$BLENDER_VERSION"-*.tar.xz \
+            /var/cache/blender/packages/blender-"$BLENDER_VERSION"-*.dmg || true; \
+    fi
+
+WORKDIR /app
+
+COPY requirements.txt /app/requirements.txt
+RUN pip install -r /app/requirements.txt
+
+COPY . /app
+
+RUN mkdir -p \
+    /var/lib/scene_agent/sessions \
+    /var/lib/scene_agent/reference_images \
+    /var/log/scene_agent/headless \
+    /var/log/scene_agent/mcp
+
+EXPOSE 8000
+
+CMD ["python", "main.py", "--mode", "api", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

@@ -3,7 +3,9 @@ Configuration management using Pydantic Settings.
 Loads configuration from environment variables with validation.
 """
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, field_validator
+import os
+import socket
+from pydantic import AliasChoices, Field, field_validator
 
 
 class Settings(BaseSettings):
@@ -106,11 +108,42 @@ class Settings(BaseSettings):
         default=15,
         description="Max seconds to allow a single headless scene/render request"
     )
+    api_worker_id: str = Field(
+        default_factory=lambda: f"{socket.gethostname()}-{os.getpid()}",
+        description="Unique worker ID used for Redis ownership and diagnostics"
+    )
+    api_worker_advertise_url: str | None = Field(
+        default=None,
+        description="Worker base URL used for owner proxy routing between API workers"
+    )
+
+    # Redis control plane
+    redis_url: str = Field(
+        default="redis://localhost:6379/0",
+        description="Redis URL for session control plane and checkpointer"
+    )
+    redis_key_prefix: str = Field(
+        default="sa",
+        description="Redis key prefix"
+    )
+    session_lease_ttl_seconds: int = Field(
+        default=20,
+        description="Lease TTL for session ownership"
+    )
+    session_heartbeat_interval_seconds: int = Field(
+        default=5,
+        description="Heartbeat interval for lease/activity refresh"
+    )
+    session_owner_unreachable_grace_seconds: int = Field(
+        default=10,
+        description="Grace seconds before takeover after owner unreachable"
+    )
 
     # Session durability (headless mode)
-    session_blend_root: str = Field(
+    session_shared_storage_root: str = Field(
         default="/tmp/scene_agent_sessions",
-        description="Root directory for per-session .blend persistence"
+        validation_alias=AliasChoices("SESSION_SHARED_STORAGE_ROOT", "SESSION_BLEND_ROOT"),
+        description="Shared root directory for per-session .blend persistence"
     )
     session_idle_timeout_seconds: int = Field(
         default=600,
@@ -262,6 +295,11 @@ class Settings(BaseSettings):
             "gemini": self.gemini_api_key,
         }
         return provider_keys.get(provider_lower) or self.vlm_api_key
+
+    @property
+    def session_blend_root(self) -> str:
+        # Backward-compatible alias for existing call-sites.
+        return self.session_shared_storage_root
 
 
 # Global settings instance

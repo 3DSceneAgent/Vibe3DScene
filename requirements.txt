@@ -30,6 +30,7 @@ rich
 # Utilities
 requests
 aiohttp
+redis>=5.0.0
 
 # Async backend 
 trio

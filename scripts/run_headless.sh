@@ -98,8 +98,15 @@ fi
 if [ -z "${BLENDER_HEADLESS_LOG_DIR:-}" ]; then
     export BLENDER_HEADLESS_LOG_DIR="/tmp/scene_agent_headless_logs"
 fi
+if [ -z "${SESSION_SHARED_STORAGE_ROOT:-}" ]; then
+    if [ -n "${SESSION_BLEND_ROOT:-}" ]; then
+        export SESSION_SHARED_STORAGE_ROOT="$SESSION_BLEND_ROOT"
+    else
+        export SESSION_SHARED_STORAGE_ROOT="/tmp/scene_agent_sessions"
+    fi
+fi
 if [ -z "${SESSION_BLEND_ROOT:-}" ]; then
-    export SESSION_BLEND_ROOT="/tmp/scene_agent_sessions"
+    export SESSION_BLEND_ROOT="$SESSION_SHARED_STORAGE_ROOT"
 fi
 if [ -z "${SESSION_IDLE_TIMEOUT_SECONDS:-}" ]; then
     export SESSION_IDLE_TIMEOUT_SECONDS="600"
@@ -114,6 +121,25 @@ if [ -z "${SESSION_PERSISTENCE_ENABLED:-}" ]; then
     export SESSION_PERSISTENCE_ENABLED="1"
 fi
 
+# Optional proxy inheritance: if host has proxy env configured, normalize and export
+# both upper/lowercase variants for child processes.
+HOST_HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}"
+HOST_HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}"
+HOST_NO_PROXY="${NO_PROXY:-${no_proxy:-}}"
+
+if [ -n "$HOST_HTTP_PROXY" ]; then
+    export HTTP_PROXY="$HOST_HTTP_PROXY"
+    export http_proxy="$HOST_HTTP_PROXY"
+fi
+if [ -n "$HOST_HTTPS_PROXY" ]; then
+    export HTTPS_PROXY="$HOST_HTTPS_PROXY"
+    export https_proxy="$HOST_HTTPS_PROXY"
+fi
+if [ -n "$HOST_NO_PROXY" ]; then
+    export NO_PROXY="$HOST_NO_PROXY"
+    export no_proxy="$HOST_NO_PROXY"
+fi
+
 echo -e "${GREEN}Starting 3D Scene Agent services...${NC}"
 echo -e "${YELLOW}Press Ctrl+C to stop all services${NC}"
 echo ""
@@ -123,11 +149,17 @@ echo "  API_WORKERS=$API_WORKERS"
 echo "  BLENDER_HEADLESS_CMD=$BLENDER_HEADLESS_CMD"
 echo "  BLENDER_HEADLESS_ARGS=$BLENDER_HEADLESS_ARGS"
 echo "  BLENDER_HEADLESS_LOG_DIR=$BLENDER_HEADLESS_LOG_DIR"
+echo "  SESSION_SHARED_STORAGE_ROOT=$SESSION_SHARED_STORAGE_ROOT"
 echo "  SESSION_BLEND_ROOT=$SESSION_BLEND_ROOT"
 echo "  SESSION_IDLE_TIMEOUT_SECONDS=$SESSION_IDLE_TIMEOUT_SECONDS"
 echo "  SESSION_SWEEP_INTERVAL_SECONDS=$SESSION_SWEEP_INTERVAL_SECONDS"
 echo "  SESSION_MAX_SNAPSHOTS=$SESSION_MAX_SNAPSHOTS"
 echo "  SESSION_PERSISTENCE_ENABLED=$SESSION_PERSISTENCE_ENABLED"
+if [ -n "${HTTP_PROXY:-}" ] || [ -n "${HTTPS_PROXY:-}" ]; then
+    echo "  PROXY=enabled (inherited from host environment)"
+else
+    echo "  PROXY=disabled"
+fi
 echo ""
 
 cleanup() {

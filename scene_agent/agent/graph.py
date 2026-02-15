@@ -7,10 +7,10 @@ from typing import Literal
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import AIMessage
 from langgraph.prebuilt import ToolNode
-from langgraph.checkpoint.memory import MemorySaver
 
 
 from scene_agent.agent.state import AgentState
+from scene_agent.agent.redis_checkpointer import get_graph_checkpointer
 from scene_agent.agent.nodes import (
     agent_node,
     checkpoint_gate_node,
@@ -220,8 +220,8 @@ async def create_agent_graph(
     builder.add_edge("finalize", END)
     
     # Compile with checkpointing
-    memory = MemorySaver()
-    app = builder.compile(checkpointer=memory)
+    checkpointer = get_graph_checkpointer()
+    app = builder.compile(checkpointer=checkpointer)
     setattr(app, "_available_tool_names", available_tool_names)
     setattr(app, "_available_tool_hints", available_tool_hints)
     setattr(app, "_vlm_provider", selected_provider)

@@ -328,7 +328,7 @@ function App() {
         setVlmErrorByThread((prev) => ({ ...prev, [threadId]: null }))
         updateThread(threadId, (thread) => {
           const fallbackProvider =
-            modelInfo.default_provider || modelInfo.providers[0]?.provider || thread.vlmProvider || 'openai'
+            modelInfo.default_provider || modelInfo.providers[0]?.provider || thread.vlmProvider || 'gemini'
           const preferredProvider = thread.vlmProvider || modelInfo.thread_selection?.provider || fallbackProvider
           const selectedProvider =
             modelInfo.providers.find((item) => item.provider === preferredProvider)?.provider || fallbackProvider

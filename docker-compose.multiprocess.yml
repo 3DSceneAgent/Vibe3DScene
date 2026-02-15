@@ -1,0 +1,115 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+
+  api_worker_1:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+      args:
+        - INSTALL_BLENDER=${INSTALL_BLENDER:-false}
+        - BLENDER_VERSION=${BLENDER_VERSION:-4.2.15}
+        - HTTP_PROXY
+        - HTTPS_PROXY
+        - NO_PROXY
+        - http_proxy
+        - https_proxy
+        - no_proxy
+    env_file:
+      - docker/.env.multiprocess
+    environment:
+      - API_PORT=8000
+      - API_WORKERS=1
+      - API_WORKER_ID=worker-1
+      - API_WORKER_ADVERTISE_URL=http://api_worker_1:8000
+      - REDIS_URL=redis://redis:6379/0
+      - SESSION_SHARED_STORAGE_ROOT=/var/lib/scene_agent/sessions
+      - SESSION_BLEND_ROOT=/var/lib/scene_agent/sessions
+      - REFERENCE_IMAGE_STORAGE_DIR=/var/lib/scene_agent/reference_images
+      - BLENDER_HEADLESS_LOG_DIR=/var/log/scene_agent/headless
+      - BLENDER_MCP_LOG_DIR=/var/log/scene_agent/mcp
+      - HTTP_PROXY
+      - HTTPS_PROXY
+      - NO_PROXY
+      - http_proxy
+      - https_proxy
+      - no_proxy
+    command: ["python", "main.py", "--mode", "api", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    restart: unless-stopped
+    depends_on:
+      - redis
+    volumes:
+      - session_storage:/var/lib/scene_agent/sessions
+      - reference_images:/var/lib/scene_agent/reference_images
+      - worker_1_logs:/var/log/scene_agent
+    expose:
+      - "8000"
+
+  api_worker_2:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+      args:
+        - INSTALL_BLENDER=${INSTALL_BLENDER:-false}
+        - BLENDER_VERSION=${BLENDER_VERSION:-4.2.15}
+        - HTTP_PROXY
+        - HTTPS_PROXY
+        - NO_PROXY
+        - http_proxy
+        - https_proxy
+        - no_proxy
+    env_file:
+      - docker/.env.multiprocess
+    environment:
+      - API_PORT=8000
+      - API_WORKERS=1
+      - API_WORKER_ID=worker-2
+      - API_WORKER_ADVERTISE_URL=http://api_worker_2:8000
+      - REDIS_URL=redis://redis:6379/0
+      - SESSION_SHARED_STORAGE_ROOT=/var/lib/scene_agent/sessions
+      - SESSION_BLEND_ROOT=/var/lib/scene_agent/sessions
+      - REFERENCE_IMAGE_STORAGE_DIR=/var/lib/scene_agent/reference_images
+      - BLENDER_HEADLESS_LOG_DIR=/var/log/scene_agent/headless
+      - BLENDER_MCP_LOG_DIR=/var/log/scene_agent/mcp
+      - HTTP_PROXY
+      - HTTPS_PROXY
+      - NO_PROXY
+      - http_proxy
+      - https_proxy
+      - no_proxy
+    command: ["python", "main.py", "--mode", "api", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    restart: unless-stopped
+    depends_on:
+      - redis
+    volumes:
+      - session_storage:/var/lib/scene_agent/sessions
+      - reference_images:/var/lib/scene_agent/reference_images
+      - worker_2_logs:/var/log/scene_agent
+    expose:
+      - "8000"
+
+  gateway:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - api_worker_1
+      - api_worker_2
+    volumes:
+      - ./docker/nginx/multiprocess.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "8000:80"
+
+volumes:
+  redis_data:
+  session_storage:
+  reference_images:
+  worker_1_logs:
+  worker_2_logs:

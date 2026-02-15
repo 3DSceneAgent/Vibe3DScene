@@ -17,6 +17,7 @@ build/
 coverage/
 
 .env
+docker/.env.multiprocess
 .vscode/
 .idea/
 

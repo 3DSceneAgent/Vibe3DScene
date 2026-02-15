@@ -9,6 +9,7 @@ import socket
 import time
 from typing import List, Any
 from scene_agent.config import get_settings
+from scene_agent.session import get_session_coordinator
 from scene_agent.blender.session_manager import (
     allocate_headless_port,
     allocate_mcp_port,
@@ -38,6 +39,7 @@ async def get_blender_tools(session_id: str | None = None) -> List[Any]:
     headless_session = None
 
     if settings.blender_mode == "headless" and session_id:
+        coordinator = get_session_coordinator()
         manager = get_session_manager()
         session = manager.ensure(session_id, "headless")
         headless_session = session
@@ -46,13 +48,23 @@ async def get_blender_tools(session_id: str | None = None) -> List[Any]:
         base_port = int(os.getenv("BLENDER_HEADLESS_BASE_PORT", "9876"))
         port_range = int(os.getenv("BLENDER_HEADLESS_PORT_RANGE", "16"))
         if session.port is None:
-            used_ports = {item.port for item in manager.list_sessions() if item.port}
-            port = allocate_headless_port(
-                session_id,
-                base_port,
-                port_range,
-                used_ports=used_ports,
+            reserved_port = coordinator.reserve_port(
+                host=host,
+                kind="headless",
+                base_port=base_port,
+                range_size=port_range,
+                seed=session_id,
             )
+            if reserved_port is None:
+                used_ports = {item.port for item in manager.list_sessions() if item.port}
+                port = allocate_headless_port(
+                    session_id,
+                    base_port,
+                    port_range,
+                    used_ports=used_ports,
+                )
+            else:
+                port = reserved_port
             manager.set_endpoint(session_id, host, port)
         else:
             port = session.port
@@ -83,13 +95,23 @@ async def get_blender_tools(session_id: str | None = None) -> List[Any]:
         mcp_base_port = int(os.getenv("BLENDER_MCP_BASE_PORT", "9877"))
         mcp_range = int(os.getenv("BLENDER_MCP_PORT_RANGE", "16"))
         if session.mcp_port is None:
-            used_mcp_ports = {item.mcp_port for item in manager.list_sessions() if item.mcp_port}
-            mcp_port = allocate_mcp_port(
-                session_id,
-                mcp_base_port,
-                mcp_range,
-                used_ports=used_mcp_ports,
+            reserved_mcp_port = coordinator.reserve_port(
+                host=mcp_host,
+                kind="mcp",
+                base_port=mcp_base_port,
+                range_size=mcp_range,
+                seed=session_id,
             )
+            if reserved_mcp_port is None:
+                used_mcp_ports = {item.mcp_port for item in manager.list_sessions() if item.mcp_port}
+                mcp_port = allocate_mcp_port(
+                    session_id,
+                    mcp_base_port,
+                    mcp_range,
+                    used_ports=used_mcp_ports,
+                )
+            else:
+                mcp_port = reserved_mcp_port
             manager.set_mcp_endpoint(session_id, mcp_host, mcp_port)
         else:
             mcp_port = session.mcp_port
@@ -174,6 +196,19 @@ async def get_blender_tools(session_id: str | None = None) -> List[Any]:
 
         if headless_session is not None:
             _assert_headless_runtime_processes(headless_session)
+            coordinator.touch_activity(session_id)
+            coordinator.update_session_runtime_fields(
+                session_id,
+                {
+                    "host": host,
+                    "blender_port": port,
+                    "mcp_port": mcp_port,
+                    "storage_dir": session.storage_dir,
+                    "blend_path": session.blend_path,
+                    "snapshot_dir": session.snapshot_dir,
+                    "status": "ready",
+                },
+            )
         
         print(f"✓ Loaded {len(tools)} tools from Blender MCP server")
         return tools
