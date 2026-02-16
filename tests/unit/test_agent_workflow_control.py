@@ -1,6 +1,6 @@
 from langchain_core.messages import AIMessage
 
-from scene_agent.agent.graph import _route_after_todo_check
+from scene_agent.agent.graph import _route_after_post_agent, _route_after_todo_check
 from scene_agent.agent.nodes import (
     checkpoint_gate_node,
     post_agent_node,
@@ -136,3 +136,25 @@ def test_route_after_todo_check_finalizes_when_finalize_stage_terminal():
         }
     )
     assert next_node == "finalize"
+
+
+def test_route_after_post_agent_retries_once_when_tools_expected_but_missing():
+    next_node = _route_after_post_agent(
+        {
+            "messages": [AIMessage(content="Continuing with tool calls.")],
+            "agent_decision": {"should_call_tools": True},
+            "iteration_count": 1,
+        }
+    )
+    assert next_node == "agent"
+
+
+def test_route_after_post_agent_finalizes_after_retry_budget_exhausted():
+    next_node = _route_after_post_agent(
+        {
+            "messages": [AIMessage(content="Continuing with tool calls.")],
+            "agent_decision": {"should_call_tools": True},
+            "iteration_count": 2,
+        }
+    )
+    assert next_node == "checkpoint_finalize"

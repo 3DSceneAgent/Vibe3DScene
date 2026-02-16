@@ -171,17 +171,17 @@ def _build_blender_import_code(import_path: str, target_size: float) -> str:
                 [all_max.x, all_max.y, all_max.z],
             ]
 
-        result = {
-            "success": True,
-            "imported_objects": imported_names,
-            "num_objects": len(imported_names),
-            "world_bounding_box": world_bounding_box,
-            "dimensions": [round(d, 4) for d in dimensions] if dimensions else None,
-            "normalized": normalized,
-            "scale_applied": round(scale_applied, 6),
-            "target_size": target_size,
-            "import_path": import_path,
-        }
+        result = dict(
+            success=True,
+            imported_objects=imported_names,
+            num_objects=len(imported_names),
+            world_bounding_box=world_bounding_box,
+            dimensions=[round(d, 4) for d in dimensions] if dimensions else None,
+            normalized=normalized,
+            scale_applied=round(scale_applied, 6),
+            target_size=target_size,
+            import_path=import_path,
+        )
         print(marker + json.dumps(result, ensure_ascii=False))
         """
     ).strip()

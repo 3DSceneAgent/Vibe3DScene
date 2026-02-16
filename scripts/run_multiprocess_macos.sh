@@ -100,6 +100,25 @@ if [ -z "${SESSION_BLEND_ROOT:-}" ]; then
     export SESSION_BLEND_ROOT="$SESSION_SHARED_STORAGE_ROOT"
 fi
 
+normalize_proxy_env() {
+    local http_proxy_value="${SCENE_AGENT_HTTP_PROXY:-${HTTP_PROXY:-${http_proxy:-}}}"
+    local https_proxy_value="${SCENE_AGENT_HTTPS_PROXY:-${HTTPS_PROXY:-${https_proxy:-${http_proxy_value:-}}}}"
+    local all_proxy_value="${SCENE_AGENT_ALL_PROXY:-${ALL_PROXY:-${all_proxy:-}}}"
+
+    if [ -n "${http_proxy_value:-}" ]; then
+        export HTTP_PROXY="$http_proxy_value"
+        export http_proxy="$http_proxy_value"
+    fi
+    if [ -n "${https_proxy_value:-}" ]; then
+        export HTTPS_PROXY="$https_proxy_value"
+        export https_proxy="$https_proxy_value"
+    fi
+    if [ -n "${all_proxy_value:-}" ]; then
+        export ALL_PROXY="$all_proxy_value"
+        export all_proxy="$all_proxy_value"
+    fi
+}
+
 ensure_no_proxy_contains_localhost() {
     local current="${NO_PROXY:-${no_proxy:-}}"
     local merged="$current"
@@ -117,6 +136,7 @@ ensure_no_proxy_contains_localhost() {
     export no_proxy="$merged"
 }
 
+normalize_proxy_env
 ensure_no_proxy_contains_localhost
 
 for cmd in python nginx curl; do
@@ -245,11 +265,16 @@ wait_redis_local() {
     return 1
 }
 
-if [ "$REDIS_URL" = "redis://127.0.0.1:6379/0" ] || [ "$REDIS_URL" = "redis://localhost:6379/0" ]; then
-    if redis_ping_local; then
-        echo -e "${YELLOW}Using existing local Redis on 127.0.0.1:6379${NC}"
-    else
-        if command -v redis-server >/dev/null 2>&1; then
+case "$REDIS_URL" in
+    redis://127.0.0.1:6379/*|redis://localhost:6379/*)
+        if redis_ping_local; then
+            echo -e "${YELLOW}Using existing local Redis on 127.0.0.1:6379${NC}"
+        else
+            if ! command -v redis-server >/dev/null 2>&1; then
+                echo -e "${RED}macOS local startup requires local redis-server on 127.0.0.1:6379.${NC}"
+                echo "Install Redis (e.g. 'brew install redis') and rerun."
+                exit 1
+            fi
             echo -e "${GREEN}Starting local Redis (redis-server)...${NC}"
             redis-server \
                 --port 6379 \
@@ -259,36 +284,19 @@ if [ "$REDIS_URL" = "redis://127.0.0.1:6379/0" ] || [ "$REDIS_URL" = "redis://lo
                 --pidfile "$PID_DIR/redis.pid" \
                 --logfile "$LOG_DIR/redis.log"
             echo "1" > "$PID_DIR/redis.managed"
-        elif command -v docker >/dev/null 2>&1; then
-            redis_container_name="${SCENE_AGENT_REDIS_CONTAINER_NAME:-scene_agent_local_redis}"
-            if docker ps --format '{{.Names}}' | grep -Fxq "$redis_container_name"; then
-                echo -e "${YELLOW}Using existing Docker Redis container: ${redis_container_name}${NC}"
-            else
-                if docker ps -a --format '{{.Names}}' | grep -Fxq "$redis_container_name"; then
-                    docker rm -f "$redis_container_name" >/dev/null 2>&1 || true
-                fi
-                echo -e "${GREEN}Starting local Redis (docker: ${redis_container_name})...${NC}"
-                docker run -d \
-                    --name "$redis_container_name" \
-                    -p 6379:6379 \
-                    redis:7-alpine \
-                    redis-server --save "" --appendonly no \
-                    >/dev/null
+            if ! wait_redis_local 40; then
+                echo -e "${RED}Local Redis failed health check on 127.0.0.1:6379${NC}"
+                exit 1
             fi
-            echo "$redis_container_name" > "$PID_DIR/redis.docker.managed"
-        else
-            echo -e "${RED}REDIS_URL points to local Redis, but neither redis-server nor docker is available.${NC}"
-            echo "Install Redis or set REDIS_URL to an external instance."
-            exit 1
         fi
-        if ! wait_redis_local 40; then
-            echo -e "${RED}Local Redis failed health check on 127.0.0.1:6379${NC}"
-            exit 1
-        fi
-    fi
-else
-    echo -e "${YELLOW}Using external REDIS_URL: $REDIS_URL${NC}"
-fi
+        ;;
+    *)
+        echo -e "${RED}macOS local startup requires REDIS_URL to point to local Redis on 127.0.0.1:6379.${NC}"
+        echo "Current REDIS_URL: ${REDIS_URL}"
+        echo "Set REDIS_URL=redis://127.0.0.1:6379/0 (or localhost equivalent)."
+        exit 1
+        ;;
+esac
 
 cleanup_stale_session_ports() {
     if ! command -v lsof >/dev/null 2>&1; then
@@ -427,6 +435,9 @@ echo -e "${CYAN}Gateway:${NC} http://127.0.0.1:${GATEWAY_PORT}"
 echo -e "${CYAN}Worker-1:${NC} http://127.0.0.1:${WORKER_1_PORT}"
 echo -e "${CYAN}Worker-2:${NC} http://127.0.0.1:${WORKER_2_PORT}"
 echo -e "${CYAN}Blender cmd:${NC} $BLENDER_HEADLESS_CMD"
+if [ -n "${HTTP_PROXY:-${http_proxy:-}}" ]; then
+    echo -e "${CYAN}HTTP proxy:${NC} ${HTTP_PROXY:-${http_proxy}}"
+fi
 echo -e "${CYAN}Logs:${NC} ${LOG_DIR}"
 echo ""
 echo -e "${YELLOW}Stop command:${NC} $SCRIPT_DIR/stop_multiprocess_nginx_local.sh"

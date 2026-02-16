@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage
 
 from scene_agent.config import reload_settings
 from scene_agent.interfaces import api as api_module
@@ -148,6 +149,41 @@ def test_chat_endpoint_passes_enabled_tool_names(monkeypatch):
     assert response.status_code == 200
     assert captured_payloads
     assert captured_payloads[0]["enabled_tool_names"] == ["camera_observe"]
+
+
+def test_chat_endpoint_serializes_list_content_to_string(monkeypatch):
+    class DummyAgent:
+        _available_tool_names = []
+
+        async def ainvoke(self, payload, config=None):
+            _ = (payload, config)
+            return {
+                "messages": [AIMessage(content=[{"type": "text", "text": "hello from list content"}])],
+                "todos": [],
+            }
+
+    async def fake_get_agent(thread_id: str):
+        assert thread_id == "thread-list-content"
+        return DummyAgent()
+
+    monkeypatch.setattr(api_module, "get_agent", fake_get_agent)
+    monkeypatch.setattr(
+        api_module,
+        "_resolve_thread_vlm_for_chat",
+        lambda *_args, **_kwargs: {"provider": "openai", "model": "gpt-4o", "api_key": "test"},
+    )
+
+    with TestClient(api_module.app) as client:
+        response = client.post(
+            "/chat",
+            json={
+                "message": "hello",
+                "thread_id": "thread-list-content",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["response"] == "hello from list content"
 
 
 def test_chat_stream_passes_enabled_tool_names(monkeypatch):

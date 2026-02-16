@@ -27,6 +27,14 @@ export type RenderImage = {
   image_url: string
 }
 
+export type BlendFileEntry = {
+  relative_path: string
+  filename: string
+  size_bytes: number
+  modified_at: string
+  category: string
+}
+
 export type ReferenceImage = {
   id: string
   thread_id: string

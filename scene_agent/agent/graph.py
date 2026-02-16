@@ -61,11 +61,20 @@ def _message_has_tool_calls(message: AIMessage) -> bool:
     return False
 
 
-def _route_after_post_agent(state: AgentState) -> Literal["tools", "checkpoint_finalize"]:
+def _route_after_post_agent(state: AgentState) -> Literal["tools", "checkpoint_finalize", "agent"]:
     messages = state.get("messages") or []
     for message in reversed(list(messages)):
         if isinstance(message, AIMessage):
-            return "tools" if _message_has_tool_calls(message) else "checkpoint_finalize"
+            if _message_has_tool_calls(message):
+                return "tools"
+            decision = state.get("agent_decision")
+            should_call_tools = decision.get("should_call_tools") if isinstance(decision, dict) else None
+            iteration_count = state.get("iteration_count")
+            # If the model explicitly says tools should be called but emitted none,
+            # retry once before finalizing to avoid premature exits.
+            if should_call_tools is True and isinstance(iteration_count, int) and iteration_count < 2:
+                return "agent"
+            return "checkpoint_finalize"
     return "checkpoint_finalize"
 
 

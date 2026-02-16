@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, type ReactNode } from 'react'
 // @ts-expect-error project does not include three type declarations in this workspace.
 import * as THREE from 'three'
 // @ts-expect-error project does not include three example type declarations in this workspace.
@@ -19,6 +19,8 @@ type GltfViewerProps = {
   onHierarchyChange?: (nodes: SceneHierarchyNode[]) => void
   isFullscreen?: boolean
   onToggleFullscreen?: () => void
+  headerControls?: ReactNode
+  alwaysAutoFrameCamera?: boolean
 }
 
 const environmentPresets: Record<EnvironmentPreset, { ambient: number; directional: number; color: string }> = {
@@ -99,7 +101,9 @@ export function GltfViewer({
   uiTheme = 'dark',
   onHierarchyChange,
   isFullscreen = false,
-  onToggleFullscreen
+  onToggleFullscreen,
+  headerControls,
+  alwaysAutoFrameCamera = false
 }: GltfViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
@@ -124,6 +128,7 @@ export function GltfViewer({
   )
   const viewportPaletteRef = useRef(viewportPalette)
   const onHierarchyChangeRef = useRef(onHierarchyChange)
+  const alwaysAutoFrameCameraRef = useRef(alwaysAutoFrameCamera)
 
   useEffect(() => {
     viewportPaletteRef.current = viewportPalette
@@ -132,6 +137,10 @@ export function GltfViewer({
   useEffect(() => {
     onHierarchyChangeRef.current = onHierarchyChange
   }, [onHierarchyChange])
+
+  useEffect(() => {
+    alwaysAutoFrameCameraRef.current = alwaysAutoFrameCamera
+  }, [alwaysAutoFrameCamera])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -326,7 +335,8 @@ export function GltfViewer({
     const loader = new GLTFLoader()
     const loadToken = loadTokenRef.current + 1
     loadTokenRef.current = loadToken
-    const preservedView = hasLoadedModelRef.current ? cameraViewRef.current : null
+    const preservedView =
+      hasLoadedModelRef.current && !alwaysAutoFrameCameraRef.current ? cameraViewRef.current : null
 
     loader.load(
       gltfUrl,
@@ -412,7 +422,8 @@ export function GltfViewer({
       <div className="viewer-header">
         <div className="panel-title">3D Viewport</div>
         <div className="viewer-header-right">
-          <div className="panel-subtitle"> </div> 
+          <div className="panel-subtitle"> </div>
+          {headerControls}
           {onToggleFullscreen && (
             <button className="ghost-btn viewer-fullscreen-btn" onClick={onToggleFullscreen}>
               {isFullscreen ? 'Exit' : 'Fullscreen'}

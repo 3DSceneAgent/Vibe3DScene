@@ -68,7 +68,7 @@ flowchart TD
 行为说明（当前实现）：
 - `post_agent` 在每次 assistant 响应后执行，负责提取并落库 `agent_decision` / `todos`（不再依赖 tool path）。
 - `todo_check` 采用 checkpoint 稀疏触发，不会在每次工具调用后都执行（支持 interval + milestone + pre-final guard）。
-- 当 assistant 未产生 tool call 时，会走 `checkpoint_finalize`，仅在存在 todo 时做一次 `todo_check` 兜底后再 `finalize`。
+- 当 assistant 未产生 tool call 时：若 `agent_decision.should_call_tools=true` 且仍在重试预算内，会先回到 `agent` 重试一次；否则走 `checkpoint_finalize`，仅在存在 todo 时做一次 `todo_check` 兜底后再 `finalize`。
 - `verify` 聚焦结果质量校验，`todo_check` 聚焦计划进度/停滞检测，两者职责分离。
 
 关键实现：

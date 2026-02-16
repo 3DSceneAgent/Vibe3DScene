@@ -154,7 +154,8 @@ class SessionManager:
             self._ensure_storage_paths(session)
             return session.storage_dir
 
-    def persist_session_blend(self, session_id: str) -> bool:
+    def persist_session_blend(self, session_id: str, *, min_interval_seconds: float = 0.0) -> bool:
+        now = time.time()
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None or not session.blend_path:
@@ -162,6 +163,14 @@ class SessionManager:
             blend_path = session.blend_path
             connection = session.connection
             process = session.process
+            last_persisted_at = session.last_persisted_at
+
+        if (
+            min_interval_seconds > 0.0
+            and last_persisted_at is not None
+            and now - last_persisted_at < min_interval_seconds
+        ):
+            return True
 
         if process is not None and process.poll() is not None:
             process = None
@@ -179,7 +188,7 @@ class SessionManager:
                 with self._lock:
                     current = self._sessions.get(session_id)
                     if current is not None:
-                        current.last_persisted_at = time.time()
+                        current.last_persisted_at = now
                 return True
             return False
         except Exception:
@@ -208,6 +217,10 @@ class SessionManager:
             session.connection = None
             session.process = None
             session.mcp_process = None
+            session.port = None
+            session.mcp_port = None
+            session.host = None
+            session.mcp_host = None
             session.status = "closed"
 
     def restart_session_processes(self, session_id: str, timeout: float = 5.0) -> None:
@@ -291,6 +304,12 @@ class SessionManager:
                     current.connection = None
                     current.process = None
                     current.mcp_process = None
+                    # Clear port assignments so that on resume fresh ports are
+                    # allocated and properly re-reserved in the registry.
+                    current.port = None
+                    current.mcp_port = None
+                    current.host = None
+                    current.mcp_host = None
                     current.status = "closed"
                 stopped = True
                 return True, persisted

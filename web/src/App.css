@@ -410,13 +410,15 @@ a.sidebar-icon-btn {
   position: absolute;
   top: calc(100% + 6px);
   left: 0;
-  min-width: 180px;
+  min-width: 240px;
+  max-height: 320px;
+  overflow-y: auto;
   background: var(--color-surface-elevated);
   border: 1px solid var(--color-border);
   border-radius: 10px;
   box-shadow: 0 8px 18px rgba(4, 6, 12, 0.45);
   z-index: 30;
-  overflow: hidden;
+  overflow-x: hidden;
 }
 
 .dropdown-item {
@@ -443,6 +445,33 @@ a.sidebar-icon-btn {
   color: var(--color-muted);
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.dropdown-section-label {
+  padding: 8px 12px;
+  font-size: 11px;
+  color: var(--color-muted);
+  border-top: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+  background: rgba(255, 255, 255, 0.02);
+  letter-spacing: 0.02em;
+}
+
+.dropdown-item-info {
+  color: var(--color-muted);
+  cursor: default;
+}
+
+.dropdown-item-blend {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.dropdown-item-meta {
+  font-size: 11px;
+  color: var(--color-muted);
 }
 
 .toggle-switch {
@@ -530,6 +559,48 @@ a.sidebar-icon-btn {
   flex-direction: column;
   gap: 14px;
   height: 100%;
+}
+
+.chat-stream-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  min-height: 32px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
+  font-size: 12px;
+  color: var(--color-muted);
+}
+
+.chat-stream-status.streaming {
+  border-color: rgba(95, 164, 255, 0.7);
+  background: rgba(95, 164, 255, 0.14);
+  color: #d8e8ff;
+}
+
+.chat-stream-status.complete {
+  border-color: var(--color-border);
+}
+
+.chat-stream-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #4ade80;
+  box-shadow: 0 0 6px rgba(74, 222, 128, 0.6);
+}
+
+.chat-stream-status.streaming .chat-stream-status-dot {
+  background: #5fa4ff;
+  box-shadow: 0 0 8px rgba(95, 164, 255, 0.75);
+  animation: status-pulse 1.2s ease-in-out infinite;
+}
+
+.chat-stream-status-text {
+  font-weight: 500;
 }
 
 .chat-pane {
@@ -1468,6 +1539,11 @@ a.sidebar-icon-btn {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.viewer-header-right .dropdown-menu {
+  left: auto;
+  right: 0;
 }
 
 .viewer-fullscreen-btn {

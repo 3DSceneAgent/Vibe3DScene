@@ -59,6 +59,33 @@ stop_by_listen_port() {
     echo "stopped $name on port $port"
 }
 
+cleanup_stale_session_ports() {
+    local start_port="$1"
+    local end_port="$2"
+    if ! command -v lsof >/dev/null 2>&1; then
+        return 0
+    fi
+    local port
+    for ((port=start_port; port<=end_port; port++)); do
+        while IFS= read -r row; do
+            if [ -z "$row" ]; then
+                continue
+            fi
+            cmd="$(echo "$row" | awk '{print $1}')"
+            pid="$(echo "$row" | awk '{print $2}')"
+            case "$cmd" in
+                blender|python|python3|python3.*|Python)
+                    kill -TERM "$pid" >/dev/null 2>&1 || true
+                    sleep 0.02
+                    if kill -0 "$pid" >/dev/null 2>&1; then
+                        kill -KILL "$pid" >/dev/null 2>&1 || true
+                    fi
+                    ;;
+            esac
+        done < <(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $1, $2}')
+    done
+}
+
 if [ -f "$PID_DIR/nginx.pid" ]; then
     if command -v nginx >/dev/null 2>&1 && [ -f "$NGINX_CONF" ]; then
         nginx -p "$NGINX_PREFIX/" -c "$NGINX_CONF" -s quit >/dev/null 2>&1 || true
@@ -72,6 +99,14 @@ stop_pid_file "worker-2" "$PID_DIR/worker-2.pid"
 stop_by_listen_port "gateway" "$GATEWAY_PORT"
 stop_by_listen_port "worker-1" "$WORKER_1_PORT"
 stop_by_listen_port "worker-2" "$WORKER_2_PORT"
+
+if [ "${SCENE_AGENT_CLEAN_STALE_SESSION_PROCS:-1}" = "1" ]; then
+    headless_base="${BLENDER_HEADLESS_BASE_PORT:-9876}"
+    mcp_base="${BLENDER_MCP_BASE_PORT:-9877}"
+    clean_range="${SCENE_AGENT_SESSION_PORT_CLEAN_RANGE:-80}"
+    cleanup_stale_session_ports "$headless_base" "$((headless_base + clean_range - 1))"
+    cleanup_stale_session_ports "$mcp_base" "$((mcp_base + clean_range - 1))"
+fi
 
 if [ -f "$PID_DIR/redis.managed" ]; then
     stop_pid_file "redis" "$PID_DIR/redis.pid"

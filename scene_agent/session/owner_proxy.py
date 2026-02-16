@@ -98,7 +98,7 @@ async def forward_request_to_owner(
         )
     except Exception as exc:
         await session.close()
-        raise OwnerProxyError(f"Failed to proxy request to owner {owner_url}: {exc}") from exc
+        raise OwnerProxyError(f"Failed to proxy request to owner {owner_url}: {exc!r}") from exc
 
     headers = _sanitize_response_headers(upstream.headers)
     content_type = upstream.headers.get("Content-Type", "")

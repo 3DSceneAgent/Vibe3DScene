@@ -7,6 +7,7 @@ import type { ReferenceImage, VlmProviderOption } from '../api/types'
 type ChatTabProps = {
   thread: Thread | null
   isStreaming: boolean
+  streamStatus: 'streaming' | 'complete'
   onSend: (message: string, files: File[]) => Promise<boolean>
   onStop?: () => void
   backendUrl: string
@@ -40,6 +41,7 @@ function toSelectionValue(provider: string, model: string): string {
 export function ChatTab({
   thread,
   isStreaming,
+  streamStatus,
   onSend,
   onStop,
   backendUrl,
@@ -83,6 +85,16 @@ export function ChatTab({
 
   return (
     <div className="chat-tab chat-pane">
+      <div
+        className={`chat-stream-status ${streamStatus === 'streaming' ? 'streaming' : 'complete'}`}
+        role="status"
+        aria-live="polite"
+      >
+        <span className="chat-stream-status-dot" />
+        <span className="chat-stream-status-text">
+          {streamStatus === 'streaming' ? 'Agent is building the scene' : 'Agent ready'}
+        </span>
+      </div>
       <div className="chat-scroll-area">
         <MessageList messages={thread.messages} backendUrl={backendUrl} />
       </div>

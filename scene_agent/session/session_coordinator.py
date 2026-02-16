@@ -216,7 +216,10 @@ class SessionCoordinator:
             return False
         if resolution.lease_ttl_ms <= 0:
             return True
-        return False
+        grace_ms = max(0, self.owner_unreachable_grace_seconds) * 1000
+        if grace_ms <= 0:
+            return True
+        return resolution.lease_ttl_ms <= grace_ms
 
     def reserve_port(
         self,
@@ -238,6 +241,9 @@ class SessionCoordinator:
                 seed=seed,
             )
         except RedisError:
+            return None
+        except RuntimeError:
+            # All ports in range exhausted – fall back to in-memory allocation.
             return None
 
     def release_port(
@@ -280,6 +286,27 @@ class SessionCoordinator:
                 locked=locked,
             )
         except RedisError:
+            return
+
+    def delete_session_metadata(self, thread_id: str) -> None:
+        """Remove all Redis keys associated with a session."""
+        if self._registry is None:
+            return
+        try:
+            client = self._registry.client
+            keys_to_delete = [
+                self._registry.session_lease_key(thread_id),
+                self._registry.session_meta_key(thread_id),
+                self._registry.session_fence_key(thread_id),
+                self._registry.session_vlm_key(thread_id),
+            ]
+            client.delete(*keys_to_delete)
+            client.zrem(self._registry.sessions_last_active_key(), thread_id)
+            client.srem(
+                self._registry.worker_sessions_key(self.worker_id),
+                thread_id,
+            )
+        except (RedisError, Exception):
             return
 
     def redis_health(self) -> tuple[bool, int | None]:

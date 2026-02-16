@@ -44,6 +44,48 @@ def _render_result_to_markdown(
     return CallToolResult(content=[{"type": "text", "text": markdown_image}], isError=False)
 
 
+def _is_no_valid_mesh_error(error_text: str) -> bool:
+    normalized = (error_text or "").lower()
+    return "no valid mesh objects found" in normalized
+
+
+def _render_all_meshes_fallback(
+    *,
+    ctx: Context,
+    blender,
+    mode: str,
+    focal_length: str,
+    azimuth: float,
+    elevation: float,
+) -> CallToolResult | None:
+    temp_path = os.path.join(
+        tempfile.gettempdir(), f"blender_render_fallback_{os.getpid()}_{int(time.time())}.png"
+    )
+    result = blender.send_command(
+        "camera_observe",
+        {
+            "object_names": [],
+            "mode": "single_view",
+            "focal_length": focal_length,
+            "azimuth": azimuth,
+            "elevation": elevation,
+            "reuse_cameras": True,
+            "filepath": temp_path,
+        },
+    )
+    if not result.get("success"):
+        return None
+    filepath = result["filepath"]
+    thread_id = _extract_thread_id(ctx)
+    camera_name = result.get("camera", "auto")
+    return _render_result_to_markdown(
+        filepath=filepath,
+        thread_id=thread_id,
+        camera_name=camera_name,
+        alt_text=f"Fallback render ({mode})",
+    )
+
+
 def render_from_objects(
     ctx: Context,
     object_names: list[str],
@@ -53,8 +95,10 @@ def render_from_objects(
     elevation: float = 30,
 ) -> CallToolResult:
     """Render image by auto-creating camera and return markdown image link."""
+    blender = None
     try:
         blender = runtime.get_blender_connection(logger)
+        thread_id = _extract_thread_id(ctx)
         temp_path = os.path.join(
             tempfile.gettempdir(), f"blender_render_{os.getpid()}_{int(time.time())}.png"
         )
@@ -72,7 +116,6 @@ def render_from_objects(
         if not result.get("success"):
             raise Exception("Render failed")
         filepath = result["filepath"]
-        thread_id = _extract_thread_id(ctx)
         camera_name = result.get("camera", "auto")
         objects_str = ", ".join(object_names)
         return _render_result_to_markdown(
@@ -82,7 +125,36 @@ def render_from_objects(
             alt_text=f"Render of {objects_str}",
         )
     except Exception as exc:
-        logger.error("Error rendering from objects: %s", str(exc))
+        error_text = str(exc)
+        if _is_no_valid_mesh_error(error_text):
+            logger.warning(
+                "render_from_objects fallback triggered for target objects %s: %s",
+                object_names,
+                error_text,
+            )
+            if blender is not None:
+                try:
+                    fallback_result = _render_all_meshes_fallback(
+                        ctx=ctx,
+                        blender=blender,
+                        mode=mode,
+                        focal_length=focal_length,
+                        azimuth=azimuth,
+                        elevation=elevation,
+                    )
+                    if fallback_result is not None:
+                        return fallback_result
+                except Exception as fallback_exc:
+                    logger.warning("render_from_objects fallback failed: %s", str(fallback_exc))
+            fallback_note = (
+                "Render skipped: no valid mesh objects were found for this request. "
+                "Try `get_scene_info` to inspect current object names."
+            )
+            return CallToolResult(
+                content=[{"type": "text", "text": fallback_note}],
+                isError=False,
+            )
+        logger.error("Error rendering from objects: %s", error_text)
         raise Exception(f"Render failed: {str(exc)}")
 
 

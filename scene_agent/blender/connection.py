@@ -6,6 +6,10 @@ import socket
 from typing import Any, Mapping
 
 
+class BlenderCommandError(Exception):
+    """Command execution failed in Blender but socket transport remains healthy."""
+
+
 class BlenderConnection:
     """Socket client for Blender addon commands."""
 
@@ -100,8 +104,10 @@ class BlenderConnection:
             if response.get("status") == "error":
                 if self.logger:
                     self.logger.error("Blender error: %s", response.get("message"))
-                raise Exception(response.get("message", "Unknown error from Blender"))
+                raise BlenderCommandError(response.get("message", "Unknown error from Blender"))
             return response.get("result", {})
+        except BlenderCommandError:
+            raise
         except socket.timeout:
             if self.logger:
                 self.logger.error("Socket timeout while waiting for response from Blender")

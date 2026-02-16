@@ -5,6 +5,9 @@ import {
   getSceneRenders,
   getSceneGltf,
   getSceneBlend,
+  listSceneBlendFiles,
+  getSceneBlendFile,
+  deleteThread as deleteThreadApi,
   getHealth,
   uploadReferenceImages,
   listReferenceImages,
@@ -12,7 +15,7 @@ import {
   getMcpTools,
   getVlmModels
 } from './api/client'
-import type { ReferenceImage, StreamEvent, TodoItem, VlmProviderOption } from './api/types'
+import type { BlendFileEntry, ReferenceImage, StreamEvent, TodoItem, VlmProviderOption } from './api/types'
 import { ChatTab } from './components/ChatTab'
 import { SceneTab } from './components/SceneTab'
 import { SettingsPanel } from './components/SettingsPanel'
@@ -81,6 +84,7 @@ function App() {
   const [vlmLoadingThreadId, setVlmLoadingThreadId] = useState<string | null>(null)
   const [loadingByThread, setLoadingByThread] = useState<Record<string, ThreadLoadingState>>({})
   const [sceneActionErrorByThread, setSceneActionErrorByThread] = useState<Record<string, string | null>>({})
+  const [streamStatusByThread, setStreamStatusByThread] = useState<Record<string, 'streaming' | 'complete'>>({})
   const streamAbortRef = useRef<AbortController | null>(null)
   const healthAbortRef = useRef<AbortController | null>(null)
   const sceneAbortRef = useRef<Record<string, AbortController>>({})
@@ -94,7 +98,8 @@ function App() {
   const sceneChangeRef = useRef<Record<string, boolean>>({})
   const settingsRef = useRef(settings)
   const loadedReferenceImagesRef = useRef<Set<string>>(new Set())
-  const currentStreamRef = useRef<{ threadId: string; assistantId: string } | null>(null)
+  const currentStreamRef = useRef<{ threadId: string; assistantId: string; runId: number } | null>(null)
+  const streamRunIdRef = useRef(0)
   const messageIdMapRef = useRef<Map<string, string>>(new Map())
   const saveThreadsTimerRef = useRef<number | null>(null)
   const loadingRef = useRef<Record<string, ThreadLoadingState>>({})
@@ -132,6 +137,10 @@ function App() {
 
   const setSceneActionError = useCallback((threadId: string, message: string | null) => {
     setSceneActionErrorByThread((prev) => ({ ...prev, [threadId]: message }))
+  }, [])
+
+  const setThreadStreamStatus = useCallback((threadId: string, status: 'streaming' | 'complete') => {
+    setStreamStatusByThread((prev) => ({ ...prev, [threadId]: status }))
   }, [])
 
   // Load data from IndexedDB on mount
@@ -401,6 +410,11 @@ function App() {
   }
 
   const deleteThread = (threadId: string) => {
+    // Fire-and-forget backend cleanup (kills Blender/MCP processes, releases ports).
+    if (settings.backendUrl) {
+      void deleteThreadApi(settings.backendUrl, threadId)
+    }
+
     setThreads((prev) => {
       const target = prev.find((thread) => thread.id === threadId)
       if (target?.gltfUrl) {
@@ -545,7 +559,7 @@ function App() {
     }
     
     if (currentStreamRef.current) {
-      const { threadId, assistantId } = currentStreamRef.current
+      const { threadId, assistantId, runId } = currentStreamRef.current
       updateThread(threadId, (thread) => ({
         ...thread,
         messages: thread.messages.map((message) =>
@@ -554,11 +568,16 @@ function App() {
             : message
         )
       }))
+      setThreadStreamStatus(threadId, 'complete')
+      if (streamRunIdRef.current === runId) {
+        streamRunIdRef.current += 1
+      }
       currentStreamRef.current = null
     }
     
+    messageIdMapRef.current.clear()
     setIsStreaming(false)
-  }, [updateThread])
+  }, [setThreadStreamStatus, updateThread])
 
   const handleSend = async (text: string, files: File[] = []) => {
     if (!activeThread) {
@@ -619,6 +638,19 @@ function App() {
     if (streamAbortRef.current) {
       streamAbortRef.current.abort()
     }
+    if (currentStreamRef.current) {
+      const { threadId: previousThreadId, assistantId: previousAssistantId } = currentStreamRef.current
+      updateThread(previousThreadId, (thread) => ({
+        ...thread,
+        messages: thread.messages.map((message) =>
+          message.id === previousAssistantId && message.status === 'streaming'
+            ? { ...message, status: 'final' }
+            : message
+        )
+      }))
+      setThreadStreamStatus(previousThreadId, 'complete')
+      currentStreamRef.current = null
+    }
 
     previousAssistantContentRef.current =
       activeThread.messages.slice().reverse().find((message) => message.role === 'assistant')?.content ?? null
@@ -668,12 +700,21 @@ function App() {
     })
 
     setIsStreaming(true)
+    setThreadStreamStatus(threadId, 'streaming')
+    const runId = streamRunIdRef.current + 1
+    streamRunIdRef.current = runId
     const abortController = new AbortController()
     streamAbortRef.current = abortController
-    currentStreamRef.current = { threadId, assistantId }
+    currentStreamRef.current = { threadId, assistantId, runId }
     messageIdMapRef.current.clear()
     messageIdMapRef.current.set('initial', assistantId)
     const handleStreamEvent = (event: StreamEvent) => {
+      if (streamRunIdRef.current !== runId) {
+        return
+      }
+      if (event.event === 'done') {
+        setThreadStreamStatus(threadId, 'complete')
+      }
       const getOrCreateAssistantMessage = (messageId: string | null): string => {
         if (!messageId) {
           return assistantId
@@ -737,6 +778,7 @@ function App() {
 
       if (event.error) {
         updateAssistantById(assistantId, (message) => ({ ...message, content: `Error: ${event.error}`, status: 'error' }))
+        setThreadStreamStatus(threadId, 'complete')
         return
       }
 
@@ -748,11 +790,12 @@ function App() {
       }
 
       if (typeof event.scene_has_change === 'boolean') {
-        const nextSceneChange = updateSceneChange(event.scene_has_change, event.event === 'done')
-        if (event.event === 'done') {
-          if (nextSceneChange) {
-            triggerAutoFetch(threadId)
-          }
+        const isFinalEvent = event.event === 'done'
+        const nextSceneChange = updateSceneChange(event.scene_has_change, isFinalEvent)
+        if (nextSceneChange) {
+          triggerAutoFetch(threadId, isFinalEvent)
+        }
+        if (isFinalEvent) {
           sceneChangeRef.current[threadId] = false
           updateThread(threadId, (thread) => ({
             ...thread,
@@ -877,6 +920,9 @@ function App() {
     })
     streamPromise
       .catch((error) => {
+        if (streamRunIdRef.current !== runId) {
+          return
+        }
         updateThread(threadId, (thread) => {
           let lastAssistantIndex = -1
           for (let i = thread.messages.length - 1; i >= 0; i -= 1) {
@@ -900,16 +946,25 @@ function App() {
         })
       })
       .finally(() => {
+        if (streamRunIdRef.current !== runId) {
+          return
+        }
         updateThread(threadId, (thread) => ({
           ...thread,
           messages: thread.messages.map((message) =>
             message.status === 'streaming'
               ? { ...message, status: 'final' }
               : message
-          )
+            )
         }))
+        setThreadStreamStatus(threadId, 'complete')
         setIsStreaming(false)
-        currentStreamRef.current = null
+        if (streamAbortRef.current === abortController) {
+          streamAbortRef.current = null
+        }
+        if (currentStreamRef.current?.runId === runId) {
+          currentStreamRef.current = null
+        }
         messageIdMapRef.current.clear()
       })
     return true
@@ -1067,6 +1122,28 @@ function App() {
     }
   }, [activeThread, setSceneActionError, setThreadLoading, settings.backendUrl])
 
+  const listBlendFiles = useCallback(async (): Promise<BlendFileEntry[]> => {
+    if (!activeThread) return []
+    return await listSceneBlendFiles(settings.backendUrl, activeThread.id)
+  }, [activeThread, settings.backendUrl])
+
+  const downloadBlendFile = useCallback(
+    async (relativePath: string, filename: string) => {
+      if (!activeThread) return
+      setThreadLoading(activeThread.id, { download: true })
+      setSceneActionError(activeThread.id, null)
+      try {
+        const blob = await getSceneBlendFile(settings.backendUrl, activeThread.id, relativePath)
+        downloadBlob(blob, filename || `scene-${activeThread.id}.blend`)
+      } catch (error) {
+        setSceneActionError(activeThread.id, formatSceneActionError(error, 'Download BLEND'))
+      } finally {
+        setThreadLoading(activeThread.id, { download: false })
+      }
+    },
+    [activeThread, setSceneActionError, setThreadLoading, settings.backendUrl]
+  )
+
   useEffect(() => {
     if (!activeThread) return
     const threadId = activeThread.id
@@ -1085,7 +1162,7 @@ function App() {
   useEffect(() => {
     const threadId = activeThread?.id
     if (!threadId) return
-    if (!settings.autoRefreshScene || backendStatus !== 'online' || !settings.backendUrl || isStreaming) return
+    if (!settings.autoRefreshScene || backendStatus !== 'online' || !settings.backendUrl) return
     if (initialAutoFetchRef.current.has(threadId)) return
     if (activeThread?.gltfUrl || (activeThread?.renders?.length ?? 0) > 0) {
       initialAutoFetchRef.current.add(threadId)
@@ -1103,7 +1180,6 @@ function App() {
     settings.autoFetchIntervalSeconds,
     settings.backendUrl,
     backendStatus,
-    isStreaming,
     activeThreadLoading.renders,
     activeThreadLoading.gltf,
     triggerAutoFetch
@@ -1231,6 +1307,10 @@ function App() {
                 <ChatTab
                   thread={activeThread}
                   isStreaming={isStreaming}
+                  streamStatus={
+                    streamStatusByThread[activeThread.id] ??
+                    (isStreaming && currentStreamRef.current?.threadId === activeThread.id ? 'streaming' : 'complete')
+                  }
                   onSend={handleSend}
                   onStop={handleStop}
                   backendUrl={settings.backendUrl}
@@ -1269,11 +1349,13 @@ function App() {
                   onFetchGltf={() => void fetchGltf()}
                   onDownloadGltf={() => void downloadGltf()}
                   onDownloadBlend={() => void downloadBlend()}
+                  onDownloadBlendFile={(relativePath, filename) => void downloadBlendFile(relativePath, filename)}
+                  onListBlendFiles={() => listBlendFiles()}
                   actionError={activeSceneActionError}
                   onClearActionError={() => setSceneActionError(activeThread.id, null)}
                   onHierarchyChange={handleSceneHierarchyChange}
                   loading={activeThreadLoading}
-                  canRunActions={Boolean(activeThread) && !isStreaming}
+                  canRunActions={Boolean(activeThread)}
                 />
               </section>
             </>

@@ -1,4 +1,5 @@
 import type {
+  BlendFileEntry,
   McpToolsInfo,
   ReferenceImage,
   RenderImage,
@@ -32,6 +33,40 @@ function parseRenderImages(payload: unknown): RenderImage[] {
       return []
     }
     return [{ camera_name: maybe.camera_name, image_url: maybe.image_url }]
+  })
+}
+
+function parseBlendFiles(payload: unknown): BlendFileEntry[] {
+  if (!payload || typeof payload !== 'object') return []
+  const files = (payload as { files?: unknown }).files
+  if (!Array.isArray(files)) return []
+  return files.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return []
+    const maybe = entry as {
+      relative_path?: unknown
+      filename?: unknown
+      size_bytes?: unknown
+      modified_at?: unknown
+      category?: unknown
+    }
+    if (
+      typeof maybe.relative_path !== 'string' ||
+      typeof maybe.filename !== 'string' ||
+      typeof maybe.size_bytes !== 'number' ||
+      typeof maybe.modified_at !== 'string' ||
+      typeof maybe.category !== 'string'
+    ) {
+      return []
+    }
+    return [
+      {
+        relative_path: maybe.relative_path,
+        filename: maybe.filename,
+        size_bytes: maybe.size_bytes,
+        modified_at: maybe.modified_at,
+        category: maybe.category
+      }
+    ]
   })
 }
 
@@ -92,6 +127,14 @@ export async function streamChat({
       } catch (error) {
         console.error('Failed to parse stream event', error)
       }
+    }
+    if (sawTerminalEvent) {
+      try {
+        await reader.cancel()
+      } catch {
+        // Ignore cancellation errors from already-closing streams.
+      }
+      break
     }
   }
 
@@ -176,6 +219,33 @@ export async function getSceneBlend(
   return await response.blob()
 }
 
+export async function listSceneBlendFiles(
+  baseUrl: string,
+  threadId: string,
+  signal?: AbortSignal
+): Promise<BlendFileEntry[]> {
+  const response = await fetch(`${baseUrl}/scene/${threadId}/blends`, { signal })
+  if (!response.ok) {
+    throw new Error(`Failed to load .blend files (${response.status})`)
+  }
+  const data = (await response.json()) as unknown
+  return parseBlendFiles(data)
+}
+
+export async function getSceneBlendFile(
+  baseUrl: string,
+  threadId: string,
+  relativePath: string,
+  signal?: AbortSignal
+): Promise<Blob> {
+  const query = new URLSearchParams({ path: relativePath })
+  const response = await fetch(`${baseUrl}/scene/${threadId}/blends/download?${query.toString()}`, { signal })
+  if (!response.ok) {
+    throw new Error(`Failed to download .blend file (${response.status})`)
+  }
+  return await response.blob()
+}
+
 export async function uploadReferenceImages(
   baseUrl: string,
   threadId: string,
@@ -201,6 +271,25 @@ export async function listReferenceImages(baseUrl: string, threadId: string): Pr
   }
   const data = (await response.json()) as { images?: ReferenceImage[] }
   return data.images ?? []
+}
+
+export async function deleteThread(
+  baseUrl: string,
+  threadId: string,
+  signal?: AbortSignal
+): Promise<void> {
+  try {
+    const response = await fetch(`${baseUrl}/threads/${threadId}`, {
+      method: 'DELETE',
+      signal
+    })
+    if (!response.ok) {
+      console.warn(`Backend thread delete returned ${response.status} for ${threadId}`)
+    }
+  } catch (error) {
+    // Best-effort: don't block frontend deletion if backend is unreachable.
+    console.warn('Failed to delete thread on backend', error)
+  }
 }
 
 export async function getHealth(

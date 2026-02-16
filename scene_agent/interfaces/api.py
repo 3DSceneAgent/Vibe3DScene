@@ -9,6 +9,7 @@ import re
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request
@@ -771,6 +772,19 @@ class VLMModelsResponse(BaseModel):
     thread_selection: ThreadVLMSelectionResponse | None = None
 
 
+class BlendFileEntry(BaseModel):
+    relative_path: str
+    filename: str
+    size_bytes: int
+    modified_at: str
+    category: str
+
+
+class BlendFileListResponse(BaseModel):
+    thread_id: str
+    files: list[BlendFileEntry]
+
+
 def serialize_reference_image(image: ReferenceImage) -> ReferenceImageResponse:
     return ReferenceImageResponse(
         id=image.id,
@@ -781,6 +795,21 @@ def serialize_reference_image(image: ReferenceImage) -> ReferenceImageResponse:
         sha256=image.sha256,
         uploaded_at=image.uploaded_at,
     )
+
+
+def _safe_storage_session_id(thread_id: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", thread_id).strip("._")
+    return safe or "session"
+
+
+def _resolve_thread_storage_dir(thread_id: str) -> Path:
+    settings = get_settings()
+    storage_root = (
+        os.getenv("SESSION_SHARED_STORAGE_ROOT")
+        or os.getenv("SESSION_BLEND_ROOT")
+        or settings.session_shared_storage_root
+    )
+    return Path(storage_root) / _safe_storage_session_id(thread_id)
 
 
 def parse_example_prompts(markdown_text: str) -> list[str]:
@@ -929,14 +958,31 @@ async def _claim_or_proxy_request(
         _set_owner_headers(proxied, resolution)
         return resolution, proxied
     except OwnerProxyError as exc:
-        if not coordinator.should_attempt_takeover(resolution):
+        retry_error = exc
+        # Retry once to absorb transient owner socket failures.
+        try:
+            proxied = await forward_request_to_owner(
+                request=request,
+                owner_url=resolution.owner_url,
+                timeout_seconds=max(
+                    settings.api_stream_timeout_seconds + 30,
+                    settings.headless_request_timeout_seconds + 30,
+                ),
+            )
+            _set_owner_headers(proxied, resolution)
+            return resolution, proxied
+        except OwnerProxyError as retry_exc:
+            retry_error = retry_exc
+
+        latest_resolution = coordinator.get_owner(thread_id) or resolution
+        if not coordinator.should_attempt_takeover(latest_resolution):
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    f"Owner worker '{resolution.owner_worker_id}' is unavailable; "
-                    f"lease still active, skipping takeover. Error: {exc}"
+                    f"Owner worker '{latest_resolution.owner_worker_id}' is unavailable; "
+                    f"lease still active, skipping takeover. Error: {retry_error}"
                 ),
-            ) from exc
+            ) from retry_error
         takeover = coordinator.force_takeover(thread_id)
         if not takeover.is_owner:
             raise HTTPException(
@@ -945,7 +991,7 @@ async def _claim_or_proxy_request(
                     f"Failed to proxy and failed to take over thread '{thread_id}'. "
                     f"Current owner: {takeover.owner_worker_id}"
                 ),
-            ) from exc
+            ) from retry_error
         return takeover, None
 
 
@@ -979,6 +1025,12 @@ async def _idle_session_sweeper() -> None:
                 kind="mcp",
                 port=session.mcp_port,
             )
+            # Also clean up cached agent graph & VLM config so MCP client
+            # references are released and don't keep reconnecting.
+            if session.session_id in _agent_graphs_by_thread:
+                del _agent_graphs_by_thread[session.session_id]
+            with _thread_vlm_lock:
+                _thread_vlm_configs.pop(session.session_id, None)
             log_event(
                 "info",
                 "headless_session_idle_stopped",
@@ -1082,7 +1134,8 @@ async def root():
             "vlm_models": "GET /vlm/models",
             "mcp_tools": "GET /threads/{thread_id}/mcp-tools",
             "todos": "GET /todos/{thread_id}",
-            "threads": "GET /threads"
+            "threads": "GET /threads",
+            "delete_thread": "DELETE /threads/{thread_id}"
         }
     }
 
@@ -1208,9 +1261,12 @@ async def chat(request: ChatRequest, request_http: Request, response: Response):
         )
         get_session_coordinator().touch_activity(request.thread_id)
         
-        # Extract response
+        # Extract response as plain text (LangChain message content can be list/dict blocks).
         last_message = result["messages"][-1]
-        response_text = last_message.content if hasattr(last_message, "content") else str(last_message)
+        serialized_last = serialize_message(last_message)
+        response_text = message_content_to_text(serialized_last.get("content")).strip()
+        if not response_text:
+            response_text = str(last_message)
         
         payload = ChatResponse(
             response=response_text,
@@ -1249,7 +1305,7 @@ async def chat_stream(request: ChatRequest, request_http: Request):
         settings = get_settings()
         timeout_seconds = max(1, settings.api_stream_timeout_seconds)
         keepalive_interval = min(15.0, max(5.0, timeout_seconds / 4))
-        deadline = time.time() + timeout_seconds
+        idle_deadline = time.time() + timeout_seconds
         request_id = f"{request.thread_id}:{int(time.time() * 1000)}"
         saw_message_stream = False
         saw_new_message = False
@@ -1299,7 +1355,7 @@ async def chat_stream(request: ChatRequest, request_http: Request):
             )
             next_event_task: asyncio.Task | None = None
             while True:
-                if time.time() >= deadline:
+                if time.time() >= idle_deadline:
                     if next_event_task is not None:
                         next_event_task.cancel()
                     raise TimeoutError("Stream timed out")
@@ -1315,6 +1371,7 @@ async def chat_stream(request: ChatRequest, request_http: Request):
                     break
                 finally:
                     next_event_task = None
+                idle_deadline = time.time() + timeout_seconds
 
                 mode, payload = normalize_stream_event(event)
                 is_message_stream = mode == "messages" or hasattr(mode, "content") or hasattr(mode, "type")
@@ -1904,6 +1961,110 @@ async def get_scene_blend(thread_id: str, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _blend_file_category(relative_path: str) -> str:
+    if relative_path == "scene.blend":
+        return "session"
+    if relative_path.startswith("snapshots/"):
+        return "snapshot"
+    return "other"
+
+
+@app.get("/scene/{thread_id}/blends", response_model=BlendFileListResponse)
+async def list_scene_blends(thread_id: str, request: Request, response: Response):
+    """
+    List persisted .blend files available for this thread.
+    """
+    resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
+    if proxied is not None:
+        return proxied
+
+    settings = get_settings()
+    if settings.blender_mode == "headless":
+        try:
+            get_session_manager().persist_session_blend(
+                thread_id,
+                min_interval_seconds=8.0,
+            )
+        except Exception:
+            pass
+
+    storage_dir = _resolve_thread_storage_dir(thread_id)
+    files_with_mtime: list[tuple[float, BlendFileEntry]] = []
+    if storage_dir.exists():
+        root = storage_dir.resolve()
+        for candidate in storage_dir.rglob("*.blend"):
+            if not candidate.is_file():
+                continue
+            try:
+                resolved = candidate.resolve()
+                relative_path = resolved.relative_to(root).as_posix()
+                stat = resolved.stat()
+            except Exception:
+                continue
+            files_with_mtime.append(
+                (
+                    float(stat.st_mtime),
+                    BlendFileEntry(
+                        relative_path=relative_path,
+                        filename=resolved.name,
+                        size_bytes=int(stat.st_size),
+                        modified_at=datetime.fromtimestamp(
+                            stat.st_mtime,
+                            tz=timezone.utc,
+                        ).isoformat(),
+                        category=_blend_file_category(relative_path),
+                    ),
+                )
+            )
+
+    files_with_mtime.sort(key=lambda item: (-item[0], item[1].relative_path))
+    payload = BlendFileListResponse(
+        thread_id=thread_id,
+        files=[entry for _, entry in files_with_mtime],
+    )
+    _set_owner_headers(response, resolution)
+    return payload
+
+
+@app.get("/scene/{thread_id}/blends/download")
+async def download_scene_blend_file(thread_id: str, path: str, request: Request):
+    """
+    Download one persisted .blend file for this thread.
+    """
+    resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
+    if proxied is not None:
+        return proxied
+
+    normalized = path.strip().replace("\\", "/").lstrip("/")
+    if not normalized or normalized.endswith("/") or "\x00" in normalized:
+        raise HTTPException(status_code=400, detail="Invalid blend path.")
+
+    path_parts = [part for part in normalized.split("/") if part]
+    if not path_parts or any(part in {".", ".."} for part in path_parts):
+        raise HTTPException(status_code=400, detail="Invalid blend path.")
+
+    storage_dir = _resolve_thread_storage_dir(thread_id)
+    root = storage_dir.resolve()
+    target = (root / "/".join(path_parts)).resolve()
+    if target != root and root not in target.parents:
+        raise HTTPException(status_code=400, detail="Invalid blend path.")
+    if target.suffix.lower() != ".blend":
+        raise HTTPException(status_code=400, detail="Only .blend files are supported.")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="Blend file not found.")
+
+    with open(target, "rb") as handle:
+        blend_data = handle.read()
+
+    result = Response(
+        content=blend_data,
+        media_type="application/x-blender",
+        headers={"Content-Disposition": f'attachment; filename="{target.name}"'},
+    )
+    _set_owner_headers(result, resolution)
+    return result
+
+
 @app.post("/threads/{thread_id}/reference-images", response_model=ReferenceImageListResponse)
 async def upload_reference_images(
     thread_id: str,
@@ -2002,6 +2163,96 @@ async def list_threads():
     coordinator = get_session_coordinator()
     threads = coordinator.list_threads(limit=1000)
     return {"threads": threads}
+
+
+def _teardown_thread_session(thread_id: str) -> dict[str, Any]:
+    """Fully tear down a headless session: kill processes, release ports, clean caches."""
+    settings = get_settings()
+    coordinator = get_session_coordinator()
+    manager = get_session_manager()
+    session = manager.get(thread_id)
+    result: dict[str, Any] = {"thread_id": thread_id, "cleaned": []}
+
+    if session is not None and session.mode == "headless":
+        # Persist blend before teardown (best-effort).
+        try:
+            manager.persist_session_blend(thread_id)
+            result["cleaned"].append("blend_persisted")
+        except Exception:
+            pass
+
+        # Terminate Blender & MCP processes.
+        manager.terminate_session_processes(thread_id, timeout=5.0)
+        result["cleaned"].append("processes_terminated")
+
+        # Release headless port.
+        coordinator.release_port(
+            host=session.host or settings.blender_host,
+            kind="headless",
+            port=session.port,
+        )
+        if session.port:
+            result["cleaned"].append(f"headless_port:{session.port}")
+
+        # Release MCP port.
+        coordinator.release_port(
+            host=session.mcp_host or os.getenv("BLENDER_MCP_HOST", "localhost"),
+            kind="mcp",
+            port=session.mcp_port,
+        )
+        if session.mcp_port:
+            result["cleaned"].append(f"mcp_port:{session.mcp_port}")
+
+        # Remove from in-memory session manager.
+        manager.remove(thread_id)
+        result["cleaned"].append("session_removed")
+
+    # Clean up cached agent graph (frees MCP client references).
+    if thread_id in _agent_graphs_by_thread:
+        del _agent_graphs_by_thread[thread_id]
+        result["cleaned"].append("agent_graph")
+
+    # Clean up cached VLM config.
+    with _thread_vlm_lock:
+        if thread_id in _thread_vlm_configs:
+            del _thread_vlm_configs[thread_id]
+            result["cleaned"].append("vlm_config")
+
+    # Clean up Redis session metadata.
+    coordinator.update_session_runtime_fields(thread_id, {"status": "closed"})
+    coordinator.delete_session_metadata(thread_id)
+    result["cleaned"].append("redis_metadata")
+
+    return result
+
+
+@app.delete("/threads/{thread_id}")
+async def delete_thread(thread_id: str, request: Request):
+    """
+    Delete a thread and tear down all associated resources.
+
+    Kills headless Blender/MCP processes, releases ports, and cleans up
+    Redis metadata and in-memory caches.
+    """
+    resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
+    if proxied is not None:
+        return proxied
+
+    try:
+        result = await asyncio.to_thread(_teardown_thread_session, thread_id)
+        log_event(
+            "info",
+            "thread_deleted",
+            {"thread_id": thread_id, "cleaned": result.get("cleaned", [])},
+        )
+        return result
+    except Exception as exc:
+        log_event(
+            "error",
+            "thread_delete_failed",
+            {"thread_id": thread_id, "error": str(exc)},
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 def run_api(host: str = "0.0.0.0", port: int = 8000, workers: int | None = None):

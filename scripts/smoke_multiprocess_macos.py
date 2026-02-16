@@ -100,7 +100,7 @@ def _chat_check(gateway_url: str, timeout: float, thread_id: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Smoke test local multiprocess backend.")
-    parser.add_argument("--gateway-url", default="http://127.0.0.1:18000")
+    parser.add_argument("--gateway-url", default="http://127.0.0.1:8000")
     parser.add_argument("--worker1-url", default="http://127.0.0.1:18001")
     parser.add_argument("--worker2-url", default="http://127.0.0.1:18002")
     parser.add_argument("--health-timeout", type=float, default=8.0)

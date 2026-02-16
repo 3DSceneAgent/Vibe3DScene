@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { RenderImage } from '../api/types'
+import type { BlendFileEntry, RenderImage } from '../api/types'
 import type { SceneHierarchyNode } from '../state/types'
 import { GltfViewer } from './GltfViewer'
 import { RenderGallery } from './RenderGallery'
@@ -25,6 +25,8 @@ type SceneTabProps = {
   onFetchGltf: () => void
   onDownloadGltf: () => void
   onDownloadBlend: () => void
+  onDownloadBlendFile: (relativePath: string, filename: string) => void
+  onListBlendFiles: () => Promise<BlendFileEntry[]>
   actionError?: string | null
   onClearActionError?: () => void
   onHierarchyChange: (threadId: string, hierarchy: SceneHierarchyNode[]) => void
@@ -40,18 +42,45 @@ type SceneTabProps = {
 type DownloadDropdownProps = {
   onDownloadGltf: () => void
   onDownloadBlend: () => void
+  onDownloadBlendFile: (relativePath: string, filename: string) => void
+  onListBlendFiles: () => Promise<BlendFileEntry[]>
   disabled: boolean
   loading: boolean
+}
+
+function formatBlendFileSize(sizeBytes: number): string {
+  if (sizeBytes < 1024) return `${sizeBytes} B`
+  if (sizeBytes < 1024 * 1024) return `${(sizeBytes / 1024).toFixed(1)} KB`
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 function DownloadDropdown({
   onDownloadGltf,
   onDownloadBlend,
+  onDownloadBlendFile,
+  onListBlendFiles,
   disabled,
   loading
 }: DownloadDropdownProps) {
   const [isOpen, setIsOpen] = useState(false)
+  const [blendFiles, setBlendFiles] = useState<BlendFileEntry[]>([])
+  const [isLoadingBlendFiles, setIsLoadingBlendFiles] = useState(false)
+  const [blendFilesError, setBlendFilesError] = useState<string | null>(null)
   const dropdownRef = useRef<HTMLDivElement | null>(null)
+
+  const loadBlendFiles = useCallback(async () => {
+    setIsLoadingBlendFiles(true)
+    setBlendFilesError(null)
+    try {
+      const files = await onListBlendFiles()
+      setBlendFiles(files)
+    } catch (error) {
+      setBlendFiles([])
+      setBlendFilesError(error instanceof Error ? error.message : 'Failed to load .blend files')
+    } finally {
+      setIsLoadingBlendFiles(false)
+    }
+  }, [onListBlendFiles])
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -69,19 +98,70 @@ function DownloadDropdown({
     <div className="dropdown" ref={dropdownRef}>
       <button
         className="primary-btn dropdown-trigger"
-        onClick={() => setIsOpen((open) => !open)}
+        onClick={() =>
+          setIsOpen((open) => {
+            const next = !open
+            if (next) {
+              void loadBlendFiles()
+            }
+            return next
+          })
+        }
         disabled={disabled || loading}
       >
-        Download 
+        Download
       </button>
       {isOpen && (
         <div className="dropdown-menu">
-          <button className="dropdown-item" onClick={onDownloadGltf} disabled={disabled || loading}>
+          <button
+            className="dropdown-item"
+            onClick={() => {
+              onDownloadGltf()
+              setIsOpen(false)
+            }}
+            disabled={disabled || loading}
+          >
             Download GLTF (.glb)
           </button>
-          <button className="dropdown-item" onClick={onDownloadBlend} disabled={disabled || loading}>
-            Download BLEND (.blend)
+          <button
+            className="dropdown-item"
+            onClick={() => {
+              onDownloadBlend()
+              setIsOpen(false)
+            }}
+            disabled={disabled || loading}
+          >
+            Download Current BLEND (.blend)
           </button>
+          <div className="dropdown-section-label">Persisted BLEND Files</div>
+          {isLoadingBlendFiles && <div className="dropdown-item dropdown-item-info">Loading...</div>}
+          {!isLoadingBlendFiles && blendFilesError && (
+            <button className="dropdown-item" onClick={() => void loadBlendFiles()} disabled={disabled || loading}>
+              Retry loading files
+            </button>
+          )}
+          {!isLoadingBlendFiles && !blendFilesError && blendFiles.length === 0 && (
+            <div className="dropdown-item dropdown-item-info">No persisted .blend files</div>
+          )}
+          {!isLoadingBlendFiles &&
+            !blendFilesError &&
+            blendFiles.map((file) => (
+              <button
+                key={file.relative_path}
+                className="dropdown-item dropdown-item-blend"
+                onClick={() => {
+                  onDownloadBlendFile(file.relative_path, file.filename)
+                  setIsOpen(false)
+                }}
+                disabled={disabled || loading}
+                title={file.relative_path}
+              >
+                <span>{file.filename}</span>
+                <span className="dropdown-item-meta">
+                  {file.category} · {formatBlendFileSize(file.size_bytes)}
+                </span>
+              </button>
+            ))}
         </div>
       )}
     </div>
@@ -104,6 +184,8 @@ export function SceneTab({
   onFetchGltf,
   onDownloadGltf,
   onDownloadBlend,
+  onDownloadBlendFile,
+  onListBlendFiles,
   actionError,
   onClearActionError,
   onHierarchyChange,
@@ -112,6 +194,7 @@ export function SceneTab({
 }: SceneTabProps) {
   const [objectsCollapsed, setObjectsCollapsed] = useState(true)
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const [alwaysAutoFrameCamera, setAlwaysAutoFrameCamera] = useState(false)
   const isSceneActionBusy = loading.scene || loading.renders || loading.gltf
   const handleHierarchyChange = useCallback(
     (hierarchy: SceneHierarchyNode[]) => onHierarchyChange(threadId, hierarchy),
@@ -139,9 +222,45 @@ export function SceneTab({
           environment={environment}
           viewportTheme={viewportTheme}
           uiTheme={uiTheme}
+          alwaysAutoFrameCamera={alwaysAutoFrameCamera}
           onHierarchyChange={handleHierarchyChange}
           isFullscreen={fullscreen}
           onToggleFullscreen={() => setIsFullscreen((value) => !value)}
+          headerControls={
+            <>
+              <label className="toggle-switch">
+                <input
+                  type="checkbox"
+                  checked={alwaysAutoFrameCamera}
+                  onChange={(event) => setAlwaysAutoFrameCamera(event.target.checked)}
+                />
+                <span className="toggle-slider" />
+                <span className="toggle-label">AutoCamera</span>
+              </label>
+              <label className="select-label">
+                EnvLight
+                <select
+                  className="styled-select"
+                  value={environment}
+                  onChange={(event) => onEnvironmentChange(event.target.value as EnvironmentPreset)}
+                >
+                  <option value="studio">Studio</option>
+                  <option value="warm">Warm</option>
+                  <option value="cool">Cool</option>
+                </select>
+              </label>
+              {fullscreen && (
+                <DownloadDropdown
+                  onDownloadGltf={onDownloadGltf}
+                  onDownloadBlend={onDownloadBlend}
+                  onDownloadBlendFile={onDownloadBlendFile}
+                  onListBlendFiles={onListBlendFiles}
+                  disabled={!canRunActions}
+                  loading={loading.download}
+                />
+              )}
+            </>
+          }
         />
       </div>
       <SceneInfoPanel
@@ -166,6 +285,8 @@ export function SceneTab({
           <DownloadDropdown
             onDownloadGltf={onDownloadGltf}
             onDownloadBlend={onDownloadBlend}
+            onDownloadBlendFile={onDownloadBlendFile}
+            onListBlendFiles={onListBlendFiles}
             disabled={!canRunActions}
             loading={loading.download}
           />
@@ -179,18 +300,6 @@ export function SceneTab({
             />
             <span className="toggle-slider" />
             <span className="toggle-label">Auto-fetch</span>
-          </label>
-          <label className="select-label">
-            EnvLight
-            <select
-              className="styled-select"
-              value={environment}
-              onChange={(event) => onEnvironmentChange(event.target.value as EnvironmentPreset)}
-            >
-              <option value="studio">Studio</option>
-              <option value="warm">Warm</option>
-              <option value="cool">Cool</option>
-            </select>
           </label>
         </div>
       </div>

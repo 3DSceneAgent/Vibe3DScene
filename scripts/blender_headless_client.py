@@ -164,6 +164,74 @@ def _call_addon_function(module: str, host: str, port: int) -> bool:
     return False
 
 
+def _prepare_scene(bpy: Any, blend_path: str | None) -> None:
+    loaded_blend = False
+    if blend_path:
+        candidate = os.path.abspath(blend_path)
+        if os.path.exists(candidate):
+            try:
+                current_path = bpy.data.filepath or ""
+                if os.path.abspath(current_path) != candidate:
+                    print(f"Loading persisted blend before server start: {candidate}")
+                    bpy.ops.wm.open_mainfile(filepath=candidate, load_ui=False)
+                loaded_blend = True
+            except Exception as exc:
+                print(f"Failed to load blend '{candidate}': {exc}")
+        else:
+            print(f"Persisted blend not found, starting from empty scene: {candidate}")
+
+    if loaded_blend:
+        return
+
+    try:
+        bpy.ops.wm.read_factory_settings(use_empty=False)
+        print("Initialized default startup scene for headless session")
+    except Exception as exc:
+        print(f"Failed to initialize default startup scene: {exc}")
+        return
+
+    try:
+        cube = bpy.data.objects.get("Cube")
+        if cube is not None:
+            bpy.data.objects.remove(cube, do_unlink=True)
+            print("Removed default Cube object")
+    except Exception as exc:
+        print(f"Failed to remove default Cube: {exc}")
+
+    try:
+        scene = bpy.context.scene
+        world = scene.world
+        if world is None:
+            world = bpy.data.worlds.new("World")
+            scene.world = world
+        world.use_nodes = True
+        node_tree = world.node_tree
+        if node_tree is None:
+            raise RuntimeError("World node tree is unavailable")
+
+        background = node_tree.nodes.get("Background")
+        if background is None:
+            background = node_tree.nodes.new(type="ShaderNodeBackground")
+        world_output = node_tree.nodes.get("World Output")
+        if world_output is None:
+            world_output = node_tree.nodes.new(type="ShaderNodeOutputWorld")
+
+        if "Color" in background.inputs:
+            background.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+        if "Strength" in background.inputs:
+            background.inputs["Strength"].default_value = 1.0
+
+        has_background_link = any(
+            link.from_node == background and link.to_node == world_output
+            for link in node_tree.links
+        )
+        if not has_background_link:
+            node_tree.links.new(background.outputs["Background"], world_output.inputs["Surface"])
+        print("Configured world environment light with strength=1.0")
+    except Exception as exc:
+        print(f"Failed to configure world environment light: {exc}")
+
+
 def main() -> int:
     try:
         import bpy  # type: ignore
@@ -180,14 +248,7 @@ def main() -> int:
     # Operator removed in headless refactor - use function entry point only
     operator_path = args.operator or os.getenv("BLENDER_ADDON_START_OP", "")
 
-    if blend_path and os.path.exists(blend_path):
-        try:
-            current_path = bpy.data.filepath or ""
-            if os.path.abspath(current_path) != os.path.abspath(blend_path):
-                print(f"Loading persisted blend before server start: {blend_path}")
-                bpy.ops.wm.open_mainfile(filepath=blend_path, load_ui=False)
-        except Exception as exc:
-            print(f"Failed to load blend '{blend_path}': {exc}")
+    _prepare_scene(bpy, blend_path)
 
     print(f"Starting addon '{addon_module}' on {host}:{port}")
     _enable_addon(bpy, addon_module)

@@ -1,11 +1,11 @@
-# 3DSceneAgent
+# Vibe3DScene: Create Your Own 3D Scene With Words
 
 [![Website](https://img.shields.io/badge/Website-Coming%20Soon-lightgrey)](#1-overview)
-[![GitHub Stars](https://img.shields.io/github/stars/3DSceneAgent/3DSceneAgent?style=social)](https://github.com/3DSceneAgent/3DSceneAgent/stargazers)
+[![GitHub Stars](https://img.shields.io/github/stars/3DSceneAgent/Vibe3DScene?style=social)](https://github.com/3DSceneAgent/Vibe3DScene/stargazers)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE)
 [![Demo](https://img.shields.io/badge/Demo-YouTube-red)](#1-overview)
 
-LangGraph-based 3D scene agent for Blender. It accepts natural-language scene requests, orchestrates MCP tools, and can run with either an existing Blender client (`local-client`) or auto-managed Blender sessions (`headless`).
+Vibe3DScene converts natural-language intent into Blender scenes through a LangGraph orchestration engine. It executes end-to-end MCP tool workflows and supports two battle-tested runtime modes: `local-client` (attach to a local Blender GUI) and `headless` (pure on-the-cloud auto-provision and manage Blender sessions).
 
 ## Table of Contents
 - [1. Overview](#1-overview)
@@ -45,7 +45,6 @@ flowchart LR
 
 Detailed workflow and deployment diagrams:
 - [Agentic Workflow and Deployment Topologies](./docs/architecture/agentic-workflow.md)
-- [Multiprocess Migration Plan](./docs/architecture/multiprocess-migration-plan.md)
 
 ### Repository Structure
 
@@ -53,7 +52,7 @@ Detailed workflow and deployment diagrams:
 scene_agent/     Core runtime: agent graph, sessions, VLM providers, API/CLI
 mcp_server/      MCP server runtime and tool registry
 web/             React + TypeScript frontend (Vite)
-addon/           Blender addon
+addon/           Blender addon for **headless** mode (NOT the version that installed in blender GUI)
 tool_servers/    Dockerized TRELLIS2 / Retrieval / PCG services
 scripts/         Local launch helpers (headless/local-client)
 tests/           Unit / integration / contract / manual tests
@@ -62,38 +61,30 @@ tests/           Unit / integration / contract / manual tests
 ## 2. Installation and Backend Setup
 
 ### Prerequisites
-- Python 3.10+
+- Python 3.11+
 - Blender 3.6+
 - Node.js 18+ (required for frontend only)
 - Redis (recommended for headless multi-worker/session coordination)
 - Docker (optional, for tool servers)
 
-### Install Python Dependencies
+### Install Dependencies
 
 ```bash
+# python 
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+# required for macos multi-process deployment 
+brew install redis nginx
 ```
 
-### Download Blender 4.2 (Cached)
-
-Use the helper script to download Blender release packages with cache reuse.
-Supported targets: `macos-x64`, `linux-x86-64`.
-
-```bash
-# auto-detect host platform (only macos-x64 / linux-x86-64)
-python scripts/download_blender_4_2.py
-
-# explicitly download macOS x64 package (cached in ~/.cache/3dsceneagent/blender)
-python scripts/download_blender_4_2.py --platform macos-x64
-```
 
 For Docker multiprocess builds, set:
 - `INSTALL_BLENDER=true`
 - `BLENDER_VERSION=4.2.15`
 
-Note: Docker multiprocess workers are pinned to `linux/amd64` and install Blender `linux-x86-64` only.
+Note: Docker multiprocess workers are pinned to `linux/amd64`.
+You can also use the [helper script](scripts/download_blender_4_2.py) to download Blender release.
 
 ### Configure Environment
 
@@ -121,47 +112,43 @@ Recommended for headless mode:
 
 ### Run Backend
 
-Run single API worker directly (current baseline):
+Option1: Run single API worker directly (current baseline):
 
 ```bash
-cd /Users/fishwowater/projects/3DSceneAgent
 python main.py --mode api --host 0.0.0.0 --port 8000 --workers 1
 ```
 
-Run multi-worker deployment (Docker + owner-proxy):
+Option2: Run multi-worker deployment (Linux-x86-64, Docker + Owner-Proxy Arch):
 
 ```bash
-cd /Users/fishwowater/projects/3DSceneAgent
 cp docker/.env.multiprocess.example docker/.env.multiprocess
 # edit docker/.env.multiprocess and set provider/API key
 docker compose -f docker-compose.multiprocess.yml up --build
 ```
 
-Run multi-worker deployment on macOS without Docker gateway (nginx + local workers):
+Run multi-worker deployment on macOS (nginx + local workers):
 
 ```bash
-cd /Users/fishwowater/projects/3DSceneAgent
-./scripts/run_multiprocess_nginx_local.sh
-# stop
-./scripts/stop_multiprocess_nginx_local.sh
+# start the service
+./scripts/run_multiprocess_macos.sh
+# stop the service
+./scripts/stop_multiprocess_macos.sh
 ```
 
 Notes for macOS local multiprocess:
 - Script loads env from `docker/.env.multiprocess` first (or `.env` if not found).
-- You can override env source via `SCENE_AGENT_ENV_FILE=/path/to/env`.
-- If Blender binary is missing on macOS x64, it auto-downloads cached DMG and prompts you to install it.
 
 Smoke test (recommended after startup):
 
 ```bash
 # health + owner/proxy + mcp-tools
-python scripts/smoke_multiprocess_local.py --gateway-url http://127.0.0.1:18000 --worker1-url http://127.0.0.1:18001 --worker2-url http://127.0.0.1:18002 --skip-chat
+python scripts/smoke_multiprocess_macos.py --gateway-url http://127.0.0.1:8000 --worker1-url http://127.0.0.1:18001 --worker2-url http://127.0.0.1:18002 --skip-chat
 
 # include /chat
-python scripts/smoke_multiprocess_local.py --gateway-url http://127.0.0.1:18000 --worker1-url http://127.0.0.1:18001 --worker2-url http://127.0.0.1:18002
+python scripts/smoke_multiprocess_macos.py --gateway-url http://127.0.0.1:8000 --worker1-url http://127.0.0.1:18001 --worker2-url http://127.0.0.1:18002
 ```
 
-or use helper scripts:
+Option3: use helper scripts:
 
 ```bash
 # Default BLENDER_MODE=headless
@@ -184,31 +171,31 @@ python main.py --mode cli
 | Category | Tools |
 | --- | --- |
 | Scene inspection and control | `get_scene_info`, `get_object_info`, `get_viewport_screenshot`, `execute_blender_code`, `import_glb_model` |
-| Camera and rendering | `render_from_objects`, `render_from_camera`, `camera_observe`, `camera_act`, `camera_set_pose` |
-| Session persistence | `undo_last_snapshot`, `get_session_persistence_status` |
-| PolyHaven retrieval | `search_polyhaven_assets`, `download_polyhaven_asset`, `set_texture` |
-| Objaverse retrieval (conditional) | `search_3d_assets_by_text`, `import_retrieved_asset` |
-| Sketchfab (conditional) | `search_sketchfab_models`, `get_sketchfab_model_preview`, `download_sketchfab_model` |
-| 3D generation (conditional) | `generate_trellis2_model`, `generate_hyper3d_model_via_text`, `generate_hyper3d_model_via_images`, `poll_rodin_job_status`, `import_generated_asset`, `generate_hunyuan3d_model` |
-| PCG (conditional) | `get_infinigen_available_assets`, `generate_infinigen_assets` |
+| Camera and Rendering | `render_from_objects`, `render_from_camera`, `camera_observe`, `camera_act`, `camera_set_pose` |
+| Session Persistence | `undo_last_snapshot`, `get_session_persistence_status` |
+| PolyHaven | `search_polyhaven_assets`, `download_polyhaven_asset`, `set_texture` |
+| Objaverse Retrieval | `search_3d_assets_by_text`, `import_retrieved_asset` |
+| Sketchfab | `search_sketchfab_models`, `get_sketchfab_model_preview`, `download_sketchfab_model` |
+| 3DGen (Hunyuan/Rodin/trellis2) | `generate_trellis2_model`, `generate_hyper3d_model_via_text`, `generate_hyper3d_model_via_images`, `poll_rodin_job_status`, `import_generated_asset`, `generate_hunyuan3d_model` |
+| PCG | `get_infinigen_available_assets`, `generate_infinigen_assets` |
 
 Conditional tool gates:
-- `ENABLE_RODIN=true` and `RODIN_API_KEY` (with `BLENDER_MODE` in `local-client`/`headless`).
-- `ENABLE_TRELLIS2=true` and `BLENDER_MODE=headless`.
-- `ENABLE_HUNYUAN=true` and `BLENDER_MODE=headless`.
-- `ENABLE_RETRIEVAL=true` for retrieval tools.
+- TRELLIS2/Hunyuan3D are only available in headless mode, Rodin is available in both. TRELLIS2 is locally deployed, enable corresponding API keys for Hunyuan3D/Rodin. 
+- Enable corresponding keys for 
+- `ENABLE_RETRIEVAL=true` for objaverse retrieval tools.
 - `ENABLE_INFINIGEN=true` for PCG tools.
 - `ENABLE_SKETCHFAB=true` and `SKETCHFAB_API_KEY` for Sketchfab tools.
 - Invalid combos fail MCP startup:
   - More than one of `ENABLE_RODIN`, `ENABLE_TRELLIS2`, `ENABLE_HUNYUAN`.
   - Both `ENABLE_RETRIEVAL=true` and `ENABLE_SKETCHFAB=true`.
 
-### Tool Servers (Sub-deployments)
+### Tool Servers (Sub-deployments, Optional)
+> Some of the tools above require a local deployment, all of them are dockerized.
 
 `tool_servers/` includes Docker Compose deployment for:
-- TRELLIS2 (`:8001`)
-- AssetRetrieval3D (`:8002`)
-- PCGIntegrator3D (`:8003`)
+- [TRELLIS2](https://github.com/FishWoWater/TRELLIS.2/tree/api) (`:8001`)
+- [AssetRetrieval3D](https://github.com/3DSceneAgent/AssetRetrieval3D) (`:8002`)
+- [PCGIntegrator3D](https://github.com/3DSceneAgent/PCGIntegrator3D) (`:8003`)
 - PostgreSQL for retrieval backend
 
 Deployment steps:
@@ -216,7 +203,8 @@ Deployment steps:
 ```bash
 cd tool_servers
 cp .env.example .env
-# edit .env toggles and ports
+
+# edit .env toggles(based on which tool server you want) and ports
 ./start_tool_servers.sh
 ```
 
@@ -234,7 +222,7 @@ If you change ports in `tool_servers/.env`, sync the root `.env` values used by 
 
 ## 4. Usage Modes
 
-### A) Headless Mode + Web
+### (A) Headless Mode + Web
 
 1. Configure `.env`:
    - `BLENDER_MODE=headless`
@@ -243,7 +231,12 @@ If you change ports in `tool_servers/.env`, sync the root `.env` values used by 
 2. Start backend:
 
 ```bash
+# single worker
 ./scripts/run_headless.sh
+# multi worker (macos)
+./scripts/run_multiprocess_macos.sh
+# multi workers (linux x86-64)
+docker compose -f docker-compose.multiprocess.yml up --build
 ```
 
 3. Start frontend:
@@ -257,9 +250,9 @@ npm run dev
 4. Open the web app and set backend URL to `http://localhost:8000`.
 5. Send the first chat request with a new `thread_id`; headless Blender/MCP sessions are created on demand.
 
-### B) Local-Client Mode + Blender
+### (B) Local-Client Mode + Blender
 
-1. Install addon from `addon/` into Blender and enable it.
+1. Install addon from [blender-mcp-vision:main]([3DSceneAgent/blender-mcp-vision](https://github.com/3DSceneAgent/blender-mcp-vision))(**NOTE: NOT addon directory of this repo**) into Blender and enable it.
 2. In Blender sidebar (`BlenderMCPVision`), start the addon socket server on configured port (default `9876`).
 3. Configure `.env`:
    - `BLENDER_MODE=local-client`
@@ -272,34 +265,23 @@ npm run dev
 
 5. Use API/CLI/Web against `http://localhost:8000`.
 
-### C) Blender + Cursor/Claude Code (External Workflow)
+### (C) Blender + Coding Agent IDE (External Workflow)
 
-If you want a direct Blender MCP workflow in coding assistants (not tied to this repository runtime), see:
-- [ahujasid/blender-mcp](https://github.com/ahujasid/blender-mcp)
-
-This is an external friendly-link workflow and is separate from `3DSceneAgent` backend/session architecture.
+If you want a pure Blender MCP workflow in coding assistants (not tied to this repository runtime), also see:
+- [3DSceneAgent/blender-mcp-vision](https://github.com/3DSceneAgent/blender-mcp-vision), which extends  beyond original [blender-mcp repo](https://github.com/ahujasid/blender-mcp)
 
 ## 5. Frontend
-
-Development:
-
 ```bash
+# Development
 cd web
 npm install
 npm run dev
-```
 
-Production build and lint:
-
-```bash
+# Production build and lint 
 cd web
 npm run build
 npm run lint
 ```
-
-Backend integration notes:
-- Frontend expects the API endpoints under your configured backend base URL.
-- Recommended local backend: `http://localhost:8000`.
 
 ## 6. Core Environment Variables
 
@@ -353,15 +335,16 @@ Backend integration notes:
 | `ENABLE_SKETCHFAB`, `SKETCHFAB_API_KEY` | Enable Sketchfab search/download tools. |
 
 ## 7. Acknowledgements
-
+- [Blender-MCP](https://github.com/ahujasid/blender-mcp)
+- [VIGA](https://github.com/Fugtemypt123/VIGA) 
 - [LangGraph](https://github.com/langchain-ai/langgraph)
 - [LangChain](https://github.com/langchain-ai/langchain)
 - [FastAPI](https://fastapi.tiangolo.com/)
 - [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
 - [langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters)
 - [Blender](https://www.blender.org/) and Blender Python API
-- [Poly Haven](https://polyhaven.com/)
-- [TRELLIS](https://github.com/microsoft/TRELLIS)
+- [PolyHaven](https://polyhaven.com/)
+- [TRELLIS.2](https://github.com/microsoft/TRELLIS.2)
 - [Sketchfab](https://sketchfab.com/)
 - [Hyper3D Rodin](https://hyper3d.ai/)
 

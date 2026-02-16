@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { Message } from '../state/types'
 import { LoadingSpinner } from './LoadingSpinner'
 import { ToolResultBlock } from './ToolResultBlock'
@@ -10,16 +10,49 @@ type MessageListProps = {
   backendUrl: string
 }
 
+const STICKY_BOTTOM_THRESHOLD_PX = 48
+
+function isNearBottom(container: HTMLDivElement): boolean {
+  const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight
+  return distanceToBottom <= STICKY_BOTTOM_THRESHOLD_PX
+}
+
 export function MessageList({ messages, backendUrl }: MessageListProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const shouldStickToBottomRef = useRef(true)
+  const scrollRafRef = useRef<number | null>(null)
 
   useEffect(() => {
-    if (!containerRef.current) return
-    containerRef.current.scrollTop = containerRef.current.scrollHeight
+    return () => {
+      if (scrollRafRef.current !== null) {
+        window.cancelAnimationFrame(scrollRafRef.current)
+      }
+    }
+  }, [])
+
+  useLayoutEffect(() => {
+    const container = containerRef.current
+    if (!container || !shouldStickToBottomRef.current) return
+
+    if (scrollRafRef.current !== null) {
+      window.cancelAnimationFrame(scrollRafRef.current)
+    }
+    scrollRafRef.current = window.requestAnimationFrame(() => {
+      container.scrollTop = container.scrollHeight
+      scrollRafRef.current = null
+    })
   }, [messages])
 
   return (
-    <div className="message-list" ref={containerRef}>
+    <div
+      className="message-list"
+      ref={containerRef}
+      onScroll={() => {
+        const container = containerRef.current
+        if (!container) return
+        shouldStickToBottomRef.current = isNearBottom(container)
+      }}
+    >
       {messages.length === 0 && <div className="muted">Let's build something!</div>}
       {messages.map((message) => (
         <MessageItem key={message.id} message={message} backendUrl={backendUrl} />
@@ -28,31 +61,34 @@ export function MessageList({ messages, backendUrl }: MessageListProps) {
   )
 }
 
-function MessageItem({ message, backendUrl }: { message: Message; backendUrl: string }) {
-  if (message.role === 'tool') {
+const MessageItem = memo(
+  function MessageItem({ message, backendUrl }: { message: Message; backendUrl: string }) {
+    const todos = useMemo(() => (message.raw ? parseTodos(message.raw) : []), [message.raw])
+    if (message.role === 'tool') {
+      return (
+        <div className="message-row tool">
+          <div className="message-bubble tool">
+            <ToolResultBlock message={message} backendUrl={backendUrl} />
+          </div>
+        </div>
+      )
+    }
+    const showSpinner = message.role === 'assistant' && message.status === 'streaming'
     return (
-      <div className="message-row tool">
-        <div className="message-bubble tool">
-          <ToolResultBlock message={message} backendUrl={backendUrl} />
+      <div className={`message-row ${message.role}`}>
+        <div className={`message-bubble ${message.role}`}>
+          {message.thinking && <ThinkingBlock thinking={message.thinking} />}
+          {todos.length > 0 && <TodosBlock todos={todos} />}
+          <div className="message-content">
+            <MarkdownMessage content={message.content || ' '} backendUrl={backendUrl} />
+            {showSpinner && <LoadingSpinner />}
+          </div>
         </div>
       </div>
     )
-  }
-  const showSpinner = message.role === 'assistant' && message.status === 'streaming'
-  const todos = message.raw ? parseTodos(message.raw) : []
-  return (
-    <div className={`message-row ${message.role}`}>
-      <div className={`message-bubble ${message.role}`}>
-        {message.thinking && <ThinkingBlock thinking={message.thinking} />}
-        {todos.length > 0 && <TodosBlock todos={todos} />}
-        <div className="message-content">
-          <MarkdownMessage content={message.content || ' '} backendUrl={backendUrl} />
-          {showSpinner && <LoadingSpinner />}
-        </div>
-      </div>
-    </div>
-  )
-}
+  },
+  (prev, next) => prev.message === next.message && prev.backendUrl === next.backendUrl
+)
 
 function ThinkingBlock({ thinking }: { thinking: string }) {
   const [open, setOpen] = useState(false)
