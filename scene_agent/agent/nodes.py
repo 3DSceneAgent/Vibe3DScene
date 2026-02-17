@@ -350,17 +350,20 @@ def scene_observe_node(state: AgentState) -> Dict[str, Any]:
     except Exception as exc:
         logger = _get_logger()
         logger.warning("scene_observe_node: update_scene_cameras failed: %s", exc)
-        return {}
+        # Scene mutated but render failed — invalidate stale render path
+        return {"last_render_path": None}
 
     if not result.get("success"):
-        return {}
+        # Scene mutated but render failed — invalidate stale render path
+        return {"last_render_path": None}
 
     cameras = result.get("cameras", [])
     image_urls = result.get("image_urls", [])
     scene_bbox = result.get("scene_bbox", {})
 
     if not image_urls:
-        return {}
+        # Scene mutated but render failed — invalidate stale render path
+        return {"last_render_path": None}
 
     content: list[dict] = [
         {
