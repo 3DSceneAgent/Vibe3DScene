@@ -229,8 +229,13 @@ def generate_hyper3d_model_via_images(
 def poll_rodin_job_status(
     ctx: Context,
     request_id: Optional[str] = None,
+    subscription_key: Optional[str] = None,
 ) -> str:
-    """Poll Hyper3D Rodin task status."""
+    """Poll Hyper3D Rodin task status.
+
+    - MAIN_SITE mode requires `subscription_key` from task creation response.
+    - FAL_AI mode requires `request_id` from task creation response.
+    """
     mode, api_key, error_message = _get_rodin_mode_and_api_key_or_error()
     if error_message:
         return error_message
@@ -238,12 +243,8 @@ def poll_rodin_job_status(
 
     try:
         if mode == "MAIN_SITE":
-            subscription_key = os.getenv("RODIN_API_KEY", "").strip()
             if not subscription_key:
-                return (
-                    "Error: RODIN_MODE=MAIN_SITE requires RODIN_API_KEY "
-                    "environment variable."
-                )
+                return "Error: RODIN_MODE=MAIN_SITE requires subscription_key."
 
             response = requests.post(
                 f"{RODIN_MAIN_SITE_API_BASE_URL}/status",

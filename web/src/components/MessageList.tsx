@@ -74,9 +74,10 @@ const MessageItem = memo(
       )
     }
     const showSpinner = message.role === 'assistant' && message.status === 'streaming'
+    const isAssistantError = message.role === 'assistant' && message.status === 'error'
     return (
-      <div className={`message-row ${message.role}`}>
-        <div className={`message-bubble ${message.role}`}>
+      <div className={`message-row ${message.role} ${isAssistantError ? 'error' : ''}`}>
+        <div className={`message-bubble ${message.role} ${isAssistantError ? 'error' : ''}`}>
           {message.thinking && <ThinkingBlock thinking={message.thinking} />}
           {todos.length > 0 && <TodosBlock todos={todos} />}
           <div className="message-content">

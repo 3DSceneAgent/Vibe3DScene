@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 
 from scene_agent.blender.session_manager import get_session_manager
 from scene_agent.config import reload_settings
@@ -73,7 +74,9 @@ def test_get_agent_rebuilds_graph_and_migrates_state_on_vlm_switch(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     reload_settings()
 
-    thread_id = "agent-vlm-switch-thread"
+    thread_id = f"agent-vlm-switch-thread-{uuid.uuid4().hex[:8]}"
+    coordinator = api_module.get_session_coordinator()
+    coordinator.delete_session_metadata(thread_id)
     manager = get_session_manager()
     manager.remove(thread_id)
     _reset_runtime_state(thread_id)
@@ -140,3 +143,4 @@ def test_get_agent_rebuilds_graph_and_migrates_state_on_vlm_switch(monkeypatch):
 
     _reset_runtime_state(thread_id)
     manager.remove(thread_id)
+    coordinator.delete_session_metadata(thread_id)

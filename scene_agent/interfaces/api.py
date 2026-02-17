@@ -4,6 +4,7 @@ Provides HTTP endpoints and streaming support.
 """
 import asyncio
 import json
+import logging
 import os
 import re
 import tempfile
@@ -83,6 +84,16 @@ _VLM_PROVIDER_DISPLAY_NAMES = {
     "anthropic": "Anthropic",
     "gemini": "Gemini",
 }
+_SCENE_LEVEL_RENDER_CAMERA_CONFIGS: tuple[tuple[str, float], ...] = (
+    ("SceneCamera_NE", 45.0),
+    ("SceneCamera_NW", 135.0),
+    ("SceneCamera_SE", -45.0),
+    ("SceneCamera_SW", -135.0),
+)
+_SCENE_LEVEL_RENDER_ELEVATION = 30.0
+_SCENE_LEVEL_RENDER_FOCAL_MM = 50.0
+_DEFAULT_API_LOG_PATH = Path(__file__).resolve().parents[2] / "logs" / "api_server.log"
+_API_LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
 
 
 def _normalize_optional(value: str | None, *, lower: bool = False) -> str | None:
@@ -92,6 +103,65 @@ def _normalize_optional(value: str | None, *, lower: bool = False) -> str | None
     if not normalized:
         return None
     return normalized.lower() if lower else normalized
+
+
+def _resolve_api_log_path() -> Path:
+    configured = _normalize_optional(os.getenv("SCENE_AGENT_API_LOG_PATH"))
+    if configured:
+        return Path(configured).expanduser()
+    return _DEFAULT_API_LOG_PATH
+
+
+def _logger_has_file_handler(logger: logging.Logger, log_path: Path) -> bool:
+    resolved = str(log_path.resolve())
+    for handler in logger.handlers:
+        if not isinstance(handler, logging.FileHandler):
+            continue
+        base_filename = getattr(handler, "baseFilename", None)
+        if isinstance(base_filename, str) and os.path.abspath(base_filename) == resolved:
+            return True
+    return False
+
+
+def _add_file_handler_if_missing(
+    logger: logging.Logger,
+    log_path: Path,
+    *,
+    formatter: logging.Formatter,
+) -> None:
+    if _logger_has_file_handler(logger, log_path):
+        return
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+
+def _configure_api_file_logging() -> Path:
+    log_path = _resolve_api_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    formatter = logging.Formatter(_API_LOG_FORMAT)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    _add_file_handler_if_missing(root_logger, log_path, formatter=formatter)
+
+    # Uvicorn access/error loggers often run with custom handlers/propagation.
+    for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        _add_file_handler_if_missing(logging.getLogger(logger_name), log_path, formatter=formatter)
+    return log_path
+
+
+def _extract_graph_step_events(mode: str | None, payload: Any) -> list[dict[str, Any]]:
+    if mode != "updates" or not isinstance(payload, dict):
+        return []
+    steps: list[dict[str, Any]] = []
+    for raw_name, update in payload.items():
+        if not isinstance(raw_name, str) or not raw_name:
+            continue
+        update_keys = sorted(update.keys()) if isinstance(update, dict) else []
+        steps.append({"step": raw_name, "update_keys": update_keys})
+    return steps
 
 
 def _headless_timeout_seconds_for_session(settings: Any, session: Any | None = None) -> float:
@@ -394,19 +464,25 @@ def get_blender_connection_for_thread(thread_id: str) -> BlenderConnection:
             "SESSION_PERSISTENCE_ENABLED": "1",
         }
     )
-    print("Building headless command and args...")
-    print(f"Command: {command}")
-    print(f"Args: {args}")
+    log_event(
+        "debug",
+        "headless_command_prepared",
+        {"thread_id": thread_id, "command": command, "args": args},
+    )
 
     with session.lock:
-        print("Lock acquired.")
+        log_event("debug", "headless_session_lock_acquired", {"thread_id": thread_id})
         connection = session.connection
         if not isinstance(connection, BlenderConnection):
-            print("Creating new connection for the thread...")
+            log_event("info", "headless_connection_creating", {"thread_id": thread_id})
             connection = BlenderConnection(host=host, port=port)
             session.connection = connection
         if not connection.connect():
-            print("Starting headless process...")
+            log_event(
+                "info",
+                "headless_process_starting",
+                {"thread_id": thread_id, "host": host, "port": port},
+            )
             start_headless_process(session, command, args, env=headless_env)
             
             # 等待进程启动并监控
@@ -426,11 +502,19 @@ def get_blender_connection_for_thread(thread_id: str) -> BlenderConnection:
                                 error_msg += f"\n\nProcess Log:\n{log_content[-2000:]}"
                             manager.set_error(thread_id, error_msg)
                             raise Exception(error_msg)
-                        print(f"  Process still running (PID: {session.process.pid}), waiting for connection...")
+                        log_event(
+                            "debug",
+                            "headless_process_waiting_for_connection",
+                            {"thread_id": thread_id, "pid": session.process.pid},
+                        )
                     last_check = time.time()
                 
                 if connection.connect():
-                    print(f"Successfully connected to Blender on {host}:{port}")
+                    log_event(
+                        "info",
+                        "headless_connection_established",
+                        {"thread_id": thread_id, "host": host, "port": port},
+                    )
                     connected = True
                     break
                 time.sleep(0.5)
@@ -444,7 +528,7 @@ def get_blender_connection_for_thread(thread_id: str) -> BlenderConnection:
                 manager.set_error(thread_id, error_msg)
                 raise Exception(error_msg)
         else:
-            print("Connection already established.")
+            log_event("debug", "headless_connection_reused", {"thread_id": thread_id})
 
         if not connection.sock:
             error_message = "Could not connect to headless Blender session."
@@ -464,7 +548,7 @@ def get_blender_connection_for_thread(thread_id: str) -> BlenderConnection:
                 "status": "ready",
             },
         )
-        print(f"Session ready for thread: {thread_id}")
+        log_event("info", "headless_session_ready", {"thread_id": thread_id})
 
     return connection
 
@@ -918,6 +1002,70 @@ def build_headless_diagnostics(
     return payload
 
 
+async def _render_scene_level_views(
+    *,
+    thread_id: str,
+    is_headless: bool,
+    request_timeout_seconds: float | None,
+) -> list[dict[str, str]]:
+    """
+    Render canonical 4 scene-level viewpoints (NE/NW/SE/SW).
+
+    This path does not depend on pre-existing camera objects in scene info.
+    It uses camera_observe in single_view mode and labels outputs with
+    deterministic scene-level camera names.
+    """
+    renders: list[dict[str, str]] = []
+    for camera_name, azimuth in _SCENE_LEVEL_RENDER_CAMERA_CONFIGS:
+        temp_path = os.path.join(
+            tempfile.gettempdir(),
+            f"scene_level_render_{camera_name}_{int(time.time() * 1000)}.png",
+        )
+        render_call = asyncio.to_thread(
+            send_blender_command_sync,
+            "camera_observe",
+            {
+                "object_names": [],
+                "mode": "single_view",
+                "focal_length": _SCENE_LEVEL_RENDER_FOCAL_MM,
+                "azimuth": azimuth,
+                "elevation": _SCENE_LEVEL_RENDER_ELEVATION,
+                "reuse_cameras": False,
+                "filepath": temp_path,
+            },
+            thread_id,
+        )
+        try:
+            if is_headless and request_timeout_seconds is not None:
+                result = await asyncio.wait_for(render_call, timeout=request_timeout_seconds)
+            else:
+                result = await render_call
+        except Exception as exc:
+            log_event(
+                "warning",
+                "scene_level_render_failed",
+                {"thread_id": thread_id, "camera_name": camera_name, "error": str(exc)},
+            )
+            continue
+
+        filepath = result.get("filepath") or temp_path
+        if not os.path.exists(filepath):
+            continue
+
+        image_url = process_and_save_render(
+            filepath,
+            thread_id,
+            camera_name,
+            log_event=log_event,
+        )
+        try:
+            os.remove(filepath)
+        except OSError:
+            pass
+        renders.append({"camera_name": camera_name, "image_url": image_url})
+    return renders
+
+
 def _set_owner_headers(response: Response, resolution: Any | None) -> None:
     if resolution is None:
         return
@@ -1049,6 +1197,8 @@ async def startup_event():
     """Initialize agent on startup"""
     global _idle_sweeper_task
     try:
+        log_path = _configure_api_file_logging()
+        log_event("info", "api_file_logging_enabled", {"log_path": str(log_path)})
         settings = get_settings()
         coordinator = get_session_coordinator()
         coordinator.register_worker()
@@ -1066,9 +1216,9 @@ async def startup_event():
             log_event("info", "startup_skip_agent_init", {"mode": settings.blender_mode})
             return
         await get_agent()
-        print("✓ Agent initialized successfully")
+        log_event("info", "agent_initialized", {"mode": settings.blender_mode})
     except Exception as e:
-        print(f"✗ Failed to initialize agent: {e}")
+        log_event("error", "agent_init_failed", {"error": str(e)})
 
 
 @app.on_event("shutdown")
@@ -1351,7 +1501,7 @@ async def chat_stream(request: ChatRequest, request_http: Request):
                     "enabled_tool_names": enabled_tool_names,
                 },
                 config=config,
-                stream_mode=["messages", "values"]
+                stream_mode=["messages", "values", "updates"]
             )
             next_event_task: asyncio.Task | None = None
             while True:
@@ -1374,6 +1524,18 @@ async def chat_stream(request: ChatRequest, request_http: Request):
                 idle_deadline = time.time() + timeout_seconds
 
                 mode, payload = normalize_stream_event(event)
+                step_events = _extract_graph_step_events(mode, payload)
+                for step_event in step_events:
+                    log_event(
+                        "info",
+                        "agent_graph_step",
+                        {
+                            "request_id": request_id,
+                            "thread_id": request.thread_id,
+                            "step": step_event["step"],
+                            "update_keys": step_event["update_keys"],
+                        },
+                    )
                 is_message_stream = mode == "messages" or hasattr(mode, "content") or hasattr(mode, "type")
                 if is_message_stream:
                     saw_message_stream = True
@@ -1573,6 +1735,7 @@ async def get_scene_renders(
     try:
         settings = get_settings()
         diagnostics = None
+        request_timeout_seconds: float | None = None
         if settings.blender_mode == "headless":
             manager = get_session_manager()
             session = manager.ensure(thread_id, "headless")
@@ -1615,70 +1778,80 @@ async def get_scene_renders(
                 ) from exc
         else:
             scene_info = await asyncio.to_thread(send_blender_command_sync, "get_scene_info", None, thread_id)
-        objects = scene_info.get("objects", [])
-        cameras = [obj.get("name") for obj in objects if obj.get("type") == "CAMERA"]
 
-        renders = []
         start_time = start_timer()
-        for camera_name in cameras:
-            if not camera_name:
-                continue
-            temp_path = os.path.join(
-                tempfile.gettempdir(),
-                f"blender_render_{camera_name}_{int(time.time() * 1000)}.png"
+        renders: list[dict[str, str]] = []
+        if mode == "rgb":
+            renders = await _render_scene_level_views(
+                thread_id=thread_id,
+                is_headless=settings.blender_mode == "headless",
+                request_timeout_seconds=request_timeout_seconds,
             )
-            render_call = asyncio.to_thread(
-                send_blender_command_sync,
-                "render_from_camera",
-                {
-                    "camera_name": camera_name,
-                    "object_names": None,
-                    "mode": mode,
-                    "filepath": temp_path
-                },
-                thread_id
-            )
-            if settings.blender_mode == "headless":
+
+        # Backward-compatible fallback: if scene-level strategy returns no output,
+        # render from any existing camera objects in scene info.
+        if not renders:
+            objects = scene_info.get("objects", []) if isinstance(scene_info, dict) else []
+            cameras = [obj.get("name") for obj in objects if obj.get("type") == "CAMERA"]
+            for camera_name in cameras:
+                if not camera_name:
+                    continue
+                temp_path = os.path.join(
+                    tempfile.gettempdir(),
+                    f"blender_render_{camera_name}_{int(time.time() * 1000)}.png"
+                )
+                render_call = asyncio.to_thread(
+                    send_blender_command_sync,
+                    "render_from_camera",
+                    {
+                        "camera_name": camera_name,
+                        "object_names": None,
+                        "mode": mode,
+                        "filepath": temp_path
+                    },
+                    thread_id
+                )
+                if settings.blender_mode == "headless":
+                    try:
+                        result = await asyncio.wait_for(render_call, timeout=request_timeout_seconds)
+                    except asyncio.TimeoutError as exc:
+                        elapsed_value = elapsed_ms(start_time)
+                        diagnostics = build_headless_diagnostics(
+                            session=session,
+                            request_id=request_id,
+                            elapsed_ms_value=elapsed_value,
+                            status="timeout",
+                            target_ms=int(request_timeout_seconds * 1000),
+                        )
+                        log_event(
+                            "error",
+                            "headless_renders_timeout",
+                            {**diagnostics, "camera_name": camera_name},
+                        )
+                        _restart_headless_session_after_timeout(thread_id)
+                        raise HTTPException(
+                            status_code=504,
+                            detail={"error": "Headless render request timed out.", **diagnostics},
+                        ) from exc
+                else:
+                    result = await render_call
+                filepath = result.get("filepath") or temp_path
+                if not os.path.exists(filepath):
+                    continue
+                image_url = process_and_save_render(
+                    filepath,
+                    thread_id,
+                    camera_name,
+                    log_event=log_event,
+                )
                 try:
-                    result = await asyncio.wait_for(render_call, timeout=request_timeout_seconds)
-                except asyncio.TimeoutError as exc:
-                    elapsed_value = elapsed_ms(start_time)
-                    diagnostics = build_headless_diagnostics(
-                        session=session,
-                        request_id=request_id,
-                        elapsed_ms_value=elapsed_value,
-                        status="timeout",
-                        target_ms=int(request_timeout_seconds * 1000),
-                    )
-                    log_event(
-                        "error",
-                        "headless_renders_timeout",
-                        {**diagnostics, "camera_name": camera_name},
-                    )
-                    _restart_headless_session_after_timeout(thread_id)
-                    raise HTTPException(
-                        status_code=504,
-                        detail={"error": "Headless render request timed out.", **diagnostics},
-                    ) from exc
-            else:
-                result = await render_call
-            filepath = result.get("filepath") or temp_path
-            if not os.path.exists(filepath):
-                continue
-            image_url = process_and_save_render(
-                filepath,
-                thread_id,
-                camera_name,
-                log_event=log_event,
-            )
-            try:
-                os.remove(filepath)
-            except OSError:
-                pass
-            renders.append({
-                "camera_name": camera_name,
-                "image_url": image_url
-            })
+                    os.remove(filepath)
+                except OSError:
+                    pass
+                renders.append({
+                    "camera_name": camera_name,
+                    "image_url": image_url
+                })
 
         if settings.blender_mode == "headless":
             elapsed_value = elapsed_ms(start_time)
@@ -2266,14 +2439,24 @@ def run_api(host: str = "0.0.0.0", port: int = 8000, workers: int | None = None)
     """
     import uvicorn
     load_project_dotenv()
+    log_path = _configure_api_file_logging()
+    log_event("info", "api_run_configured", {"log_path": str(log_path), "host": host, "port": port})
     settings = get_settings()
     worker_count = workers if workers is not None else settings.api_workers
     worker_count = max(1, worker_count)
     if worker_count > 1:
-        print(
-            "Warning: A single API process must run with workers=1. "
-            "Use multiple processes on different ports (and set unique API_WORKER_ADVERTISE_URL) "
-            "for multiprocess session routing."
+        log_event(
+            "warning",
+            "api_worker_count_adjusted",
+            {
+                "requested_workers": worker_count,
+                "forced_workers": 1,
+                "reason": (
+                    "single API process must run with workers=1; "
+                    "use multiple processes on different ports with "
+                    "unique API_WORKER_ADVERTISE_URL"
+                ),
+            },
         )
         worker_count = 1
     uvicorn.run("scene_agent.interfaces.api:app", host=host, port=port, workers=worker_count)

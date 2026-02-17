@@ -138,6 +138,19 @@ class AgentState(TypedDict):
     last_todo_snapshot: NotRequired[dict[str, str]]
     stagnation_count: NotRequired[int]
     
+    # Scene-level camera state — updated by scene_observe_node
+    scene_camera_params: Annotated[dict, merge_dicts]
+    # {"SceneCamera_NE": {"location": [...], "focal_mm": 50.0, "azimuth": 45}, ...}
+
+    last_scene_observe_round: NotRequired[int]
+    # Tool round when scene_observe last rendered
+
+    scene_bbox: NotRequired[dict]
+    # {"center": [x,y,z], "dimensions": [w,h,d]} — union AABB of all mesh objects
+
+    last_render_source: NotRequired[str]
+    # "scene_observe" | "agent_camera" — helps verify pick the right prompt
+
     # Simple fields (last write wins)
     current_task: str
     iteration_count: int

@@ -157,6 +157,37 @@ redis.call('HSET', KEYS[2], 'status', 'closed', 'updated_at_ms', ARGV[2])
 return 1
 """
 
+_RESERVE_PORT_LUA = """
+local primary_key = KEYS[1]
+local secondary_key = KEYS[2]
+local base_port = tonumber(ARGV[1])
+local range_size = tonumber(ARGV[2])
+local start = tonumber(ARGV[3])
+
+if range_size <= 1 then
+    local candidate = base_port
+    if redis.call('SISMEMBER', primary_key, candidate) == 1 then
+        return -1
+    end
+    if redis.call('SISMEMBER', secondary_key, candidate) == 1 then
+        return -1
+    end
+    redis.call('SADD', primary_key, candidate)
+    return candidate
+end
+
+for offset = 0, range_size - 1 do
+    local candidate = base_port + ((start + offset) % range_size)
+    if redis.call('SISMEMBER', primary_key, candidate) == 0
+        and redis.call('SISMEMBER', secondary_key, candidate) == 0 then
+        redis.call('SADD', primary_key, candidate)
+        return candidate
+    end
+end
+
+return -1
+"""
+
 
 class RedisSessionRegistry:
     """Low-level Redis operations for multiprocess session coordination."""
@@ -389,17 +420,23 @@ class RedisSessionRegistry:
         range_size: int,
         seed: str,
     ) -> int:
-        key = self.ports_key(host, kind)
-        if range_size <= 1:
-            candidate = base_port
-            if self._client.sadd(key, candidate) == 1:
-                return candidate
+        primary_key = self.ports_key(host, kind)
+        secondary_kind = "mcp" if kind == "headless" else "headless"
+        secondary_key = self.ports_key(host, secondary_kind)
+        normalized_range = max(1, int(range_size))
+        start = abs(hash(seed)) % normalized_range
+        result = self._client.eval(
+            _RESERVE_PORT_LUA,
+            2,
+            primary_key,
+            secondary_key,
+            str(int(base_port)),
+            str(normalized_range),
+            str(start),
+        )
+        candidate = self._to_int(result, default=-1)
+        if candidate >= 0:
             return candidate
-        start = abs(hash(seed)) % range_size
-        for offset in range(range_size):
-            candidate = base_port + ((start + offset) % range_size)
-            if self._client.sadd(key, candidate) == 1:
-                return candidate
         raise RuntimeError(f"No available {kind} port in configured range for host {host}.")
 
     def release_port(self, *, host: str, kind: str, port: int | None) -> None:

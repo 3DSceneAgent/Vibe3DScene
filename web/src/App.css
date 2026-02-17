@@ -652,6 +652,12 @@ a.sidebar-icon-btn {
   box-shadow: 0 12px 30px rgba(95, 164, 255, 0.3);
 }
 
+.message-bubble.assistant.error {
+  border-color: rgba(255, 122, 122, 0.55);
+  background: rgba(84, 24, 31, 0.42);
+  box-shadow: 0 10px 24px rgba(175, 60, 74, 0.28);
+}
+
 .message-bubble.tool {
   max-width: 85%;
   background: rgba(16, 20, 30, 0.85);

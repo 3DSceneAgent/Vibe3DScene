@@ -8,6 +8,7 @@ from mcp.server.fastmcp import Context
 from mcp_server import runtime
 
 logger = logging.getLogger("BlenderMCPServer")
+_POLYHAVEN_MAX_SEARCH_RESULTS = 5
 
 
 def search_polyhaven_assets(
@@ -38,11 +39,15 @@ def search_polyhaven_assets(
             return f"Error: PolyHaven API failed with status code {response.status_code}"
 
         assets = response.json()
-        limited_assets = {}
-        for i, (key, value) in enumerate(assets.items()):
-            if i >= 20:
-                break
-            limited_assets[key] = value
+        if not isinstance(assets, dict):
+            return "Error: PolyHaven API returned an unexpected payload."
+
+        sorted_assets = sorted(
+            assets.items(),
+            key=lambda x: x[1].get("download_count", 0),
+            reverse=True,
+        )
+        limited_assets = sorted_assets[:_POLYHAVEN_MAX_SEARCH_RESULTS]
         total_count = len(assets)
         returned_count = len(limited_assets)
 
@@ -51,12 +56,7 @@ def search_polyhaven_assets(
             formatted_output += f" in categories: {categories}"
         formatted_output += f"\nShowing {returned_count} assets:\n\n"
 
-        sorted_assets = sorted(
-            limited_assets.items(),
-            key=lambda x: x[1].get("download_count", 0),
-            reverse=True,
-        )
-        for asset_id, asset_data in sorted_assets:
+        for asset_id, asset_data in limited_assets:
             formatted_output += f"- {asset_data.get('name', asset_id)} (ID: {asset_id})\n"
             formatted_output += (
                 f"  Type: {['HDRI', 'Texture', 'Model'][asset_data.get('type', 0)]}\n"

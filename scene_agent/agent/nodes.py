@@ -28,6 +28,40 @@ TODO_MILESTONE_TOOL_MARKERS = (
     "camera_act",
 )
 
+SCENE_MUTATING_TOOLS: frozenset[str] = frozenset({
+    "execute_blender_code",
+    "import_glb_model",
+    "download_polyhaven_asset",
+    "set_texture",
+    "generate_trellis2_model",
+    "import_retrieved_asset",
+    "download_sketchfab_model",
+    "generate_infinigen_assets",
+    "import_generated_asset",
+    "generate_hunyuan3d_model",
+    "generate_hyper3d_model_via_text",
+    "generate_hyper3d_model_via_images",
+})
+
+OBJECT_LEVEL_TOOLS: frozenset[str] = frozenset({
+    "camera_act",
+    "camera_observe",
+    "camera_set_pose",
+    "render_from_camera",
+    "render_from_objects",
+})
+
+_INTERNAL_HUMAN_MESSAGE_SOURCE_KEY = "internal_source"
+_INTERNAL_HUMAN_MESSAGE_SOURCES: frozenset[str] = frozenset({
+    "scene_observe",
+    "tool_render_observe",
+})
+
+_LEGACY_INTERNAL_HUMAN_PREFIXES: tuple[str, ...] = (
+    "auto scene observation",
+    "latest render from tool call",
+)
+
 
 def agent_node(
     state: AgentState,
@@ -251,6 +285,7 @@ def update_memory_node(state: AgentState) -> Dict[str, Any]:
         last_render_path = _persist_render_image(render_image)
     if last_render_path:
         result["last_render_path"] = last_render_path
+        result["last_render_source"] = "agent_camera"
 
     render_message_update = _build_render_vlm_message(
         last_render_path,
@@ -263,6 +298,119 @@ def update_memory_node(state: AgentState) -> Dict[str, Any]:
         result["last_render_signature"] = signature
     
     return result
+
+
+def scene_observe_node(state: AgentState) -> Dict[str, Any]:
+    """Auto-render 4 scene-level cameras after scene-mutating tool calls.
+
+    This node fires only when the latest tool batch contains a scene-mutating
+    tool (import, generate, execute_blender_code, etc.).  For object-level
+    camera work the node is a no-op so that the agent's own render flows
+    directly to verify.
+    """
+    latest_tools = state.get("last_tool_batch_names")
+    if not isinstance(latest_tools, list):
+        return {}
+
+    has_scene_mutation = any(name in SCENE_MUTATING_TOOLS for name in latest_tools)
+    if not has_scene_mutation:
+        return {}
+
+    thread_id = state.get("thread_id", "default")
+    send_blender_command = None
+
+    # In headless deployments, agent graph execution runs in the API process.
+    # Use API-side per-thread command routing so scene_observe does not depend
+    # on MCP runtime globals from another process.
+    try:
+        from scene_agent.interfaces.api import send_blender_command_sync
+
+        def _send_blender_command(
+            command_type: str,
+            params: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            return send_blender_command_sync(command_type, params, thread_id=thread_id)
+
+        send_blender_command = _send_blender_command
+    except Exception as exc:
+        logger = _get_logger()
+        logger.debug(
+            "scene_observe_node: API command sender unavailable, "
+            "falling back to MCP runtime connection: %s",
+            exc,
+        )
+
+    try:
+        from mcp_server.tools.multimodal.camera_tools import update_scene_cameras
+
+        result = update_scene_cameras(
+            thread_id=thread_id,
+            send_blender_command=send_blender_command,
+        )
+    except Exception as exc:
+        logger = _get_logger()
+        logger.warning("scene_observe_node: update_scene_cameras failed: %s", exc)
+        return {}
+
+    if not result.get("success"):
+        return {}
+
+    cameras = result.get("cameras", [])
+    image_urls = result.get("image_urls", [])
+    scene_bbox = result.get("scene_bbox", {})
+
+    if not image_urls:
+        return {}
+
+    content: list[dict] = [
+        {
+            "type": "text",
+            "text": (
+                "Auto scene observation — 4-view render after scene mutation. "
+                "Review these views to assess overall composition, scale, and layout."
+            ),
+        },
+    ]
+    for cam_info in cameras:
+        url = cam_info.get("image_url", "")
+        if url:
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": url},
+                }
+            )
+
+    tool_round = _coerce_non_negative_int(state.get("tool_round_count"))
+
+    camera_params: dict = {}
+    camera_names: list[str] = []
+    for cam_info in cameras:
+        name = cam_info.get("camera_name", "")
+        camera_params[name] = {
+            "location": cam_info.get("location"),
+            "focal_mm": cam_info.get("focal_mm"),
+            "azimuth": cam_info.get("azimuth"),
+            "elevation": cam_info.get("elevation"),
+        }
+        camera_names.append(name)
+
+    first_url = image_urls[0] if image_urls else None
+
+    return {
+        "messages": [_build_internal_human_message(content, source="scene_observe")],
+        "last_render_path": first_url,
+        "last_render_source": "scene_observe",
+        "scene_camera_params": camera_params,
+        "persistent_cameras": camera_names,
+        "scene_bbox": scene_bbox,
+        "last_scene_observe_round": tool_round,
+    }
+
+
+def _get_logger():
+    import logging
+    return logging.getLogger("scene_agent.nodes")
 
 
 def checkpoint_gate_node(
@@ -710,7 +858,26 @@ def _build_render_vlm_message(
         {"type": "text", "text": "Latest render from tool call."},
         {"type": "image_url", "image_url": {"url": data_url}},
     ]
-    return HumanMessage(content=content), signature
+    return _build_internal_human_message(content, source="tool_render_observe"), signature
+
+
+def _build_internal_human_message(content: Any, *, source: str) -> HumanMessage:
+    return HumanMessage(
+        content=content,
+        additional_kwargs={_INTERNAL_HUMAN_MESSAGE_SOURCE_KEY: source},
+    )
+
+
+def _is_internal_human_message(msg: HumanMessage) -> bool:
+    additional_kwargs = getattr(msg, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict):
+        source = additional_kwargs.get(_INTERNAL_HUMAN_MESSAGE_SOURCE_KEY)
+        if isinstance(source, str) and source in _INTERNAL_HUMAN_MESSAGE_SOURCES:
+            return True
+
+    # Backward compatibility for messages produced before internal_source tagging.
+    text = _message_content_to_text(msg.content).strip().lower()
+    return any(text.startswith(prefix) for prefix in _LEGACY_INTERNAL_HUMAN_PREFIXES)
 
 
 def _payload_to_data_url(payload: dict[str, str] | None) -> str | None:
@@ -764,9 +931,28 @@ def _render_signature(render_path: str | None, payload: dict[str, str] | None) -
 
 def _latest_human_message(state: AgentState) -> str:
     for msg in reversed(state["messages"]):
-        if isinstance(msg, HumanMessage):
+        if isinstance(msg, HumanMessage) and not _is_internal_human_message(msg):
             return _message_content_to_text(msg.content)
     return ""
+
+
+def _active_todo_context(state: AgentState) -> list[str]:
+    todos = _coerce_todos(state.get("todos"))
+    if not todos:
+        return []
+    latest = _latest_todos_by_description(todos)
+    in_progress: list[str] = []
+    pending: list[str] = []
+    for todo in latest.values():
+        description = str(todo.get("description", "")).strip()
+        status = str(todo.get("status", "")).strip()
+        if not description:
+            continue
+        if status == "in_progress":
+            in_progress.append(description)
+        elif status == "pending":
+            pending.append(description)
+    return (in_progress + pending)[:5]
 
 
 def verify_node(
@@ -776,9 +962,21 @@ def verify_node(
     api_key: str | None = None,
     model: str | None = None,
 ) -> Dict[str, Any]:
+    """Verify the latest render against references / user request.
+
+    As a fixed sequential node (scene_observe -> verify -> checkpoint_loop),
+    this skips silently when there is no new unverified render.
+    """
     render_path = state.get("last_render_path")
     if not render_path:
         return {}
+
+    # Already verified this exact render — skip
+    if state.get("last_verified_path") == render_path:
+        return {}
+
+    render_source = state.get("last_render_source", "agent_camera")
+    todo_context = _active_todo_context(state) if render_source != "scene_observe" else []
 
     thread_id = state.get("thread_id", "default")
     memory = get_reference_image_memory()
@@ -791,6 +989,8 @@ def verify_node(
         render_path=render_path,
         reference_paths=reference_paths,
         user_request=_latest_human_message(state),
+        render_source=render_source,
+        todo_context=todo_context,
         provider_name=provider_name,
         api_key=api_key,
         model=model,
@@ -800,6 +1000,8 @@ def verify_node(
             "reference_count": len(reference_paths),
             "reference_ids": [image.id for image in reference_images],
             "render_path": render_path,
+            "render_source": render_source,
+            "todo_context": todo_context,
         }
     )
     return {

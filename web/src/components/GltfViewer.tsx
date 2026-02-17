@@ -5,6 +5,8 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader'
 // @ts-expect-error project does not include three example type declarations in this workspace.
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls'
+// @ts-expect-error project does not include three example type declarations in this workspace.
+import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader'
 import type { SceneHierarchyNode } from '../state/types'
 
 type EnvironmentPreset = 'studio' | 'warm' | 'cool'
@@ -23,10 +25,39 @@ type GltfViewerProps = {
   alwaysAutoFrameCamera?: boolean
 }
 
-const environmentPresets: Record<EnvironmentPreset, { ambient: number; directional: number; color: string }> = {
-  studio: { ambient: 0.55, directional: 1.2, color: '#ffffff' },
-  warm: { ambient: 0.6, directional: 1.1, color: '#ffd8b2' },
-  cool: { ambient: 0.5, directional: 1.3, color: '#cfe6ff' }
+type EnvironmentPresetConfig = {
+  ambient: number
+  directional: number
+  color: string
+  exposure: number
+  hdriUrl: string
+}
+
+const environmentPresets: Record<EnvironmentPreset, EnvironmentPresetConfig> = {
+  studio: {
+    ambient: 0.26,
+    directional: 0.95,
+    color: '#ffffff',
+    exposure: 1.0,
+    hdriUrl:
+      'https://cdn.jsdelivr.net/gh/mrdoob/three.js@dev/examples/textures/equirectangular/quarry_01_1k.hdr'
+  },
+  warm: {
+    ambient: 0.24,
+    directional: 0.9,
+    color: '#ffd9bc',
+    exposure: 0.95,
+    hdriUrl:
+      'https://cdn.jsdelivr.net/gh/mrdoob/three.js@dev/examples/textures/equirectangular/venice_sunset_1k.hdr'
+  },
+  cool: {
+    ambient: 0.25,
+    directional: 0.92,
+    color: '#cfe6ff',
+    exposure: 1.02,
+    hdriUrl:
+      'https://cdn.jsdelivr.net/gh/mrdoob/three.js@dev/examples/textures/equirectangular/blouberg_sunrise_2_1k.hdr'
+  }
 }
 
 const viewportPalettes: Record<
@@ -55,6 +86,42 @@ const viewportPalettes: Record<
   }
 }
 
+function getAutoFrameDirection(size: THREE.Vector3): THREE.Vector3 {
+  const xToZRatio = size.x / Math.max(size.z, 0.001)
+  if (xToZRatio > 1.35) {
+    return new THREE.Vector3(0.75, 0.6, 1.25).normalize()
+  }
+  if (xToZRatio < 0.74) {
+    return new THREE.Vector3(1.25, 0.6, 0.75).normalize()
+  }
+  return new THREE.Vector3(1, 0.62, 1).normalize()
+}
+
+function frameCameraToBox(
+  camera: THREE.PerspectiveCamera,
+  controls: OrbitControls,
+  box: THREE.Box3,
+  size: THREE.Vector3,
+  center: THREE.Vector3
+): void {
+  const sphere = box.getBoundingSphere(new THREE.Sphere())
+  const radius = Math.max(sphere.radius, 0.1)
+  const verticalFov = (camera.fov * Math.PI) / 180
+  const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * Math.max(camera.aspect, 0.1))
+  const limitingFov = Math.max(Math.PI / 18, Math.min(verticalFov, horizontalFov))
+  const distance = (radius / Math.sin(limitingFov / 2)) * 1.22
+  const direction = getAutoFrameDirection(size)
+  const focus = center.clone()
+  focus.y = box.min.y + size.y * 0.45
+
+  camera.position.copy(focus).addScaledVector(direction, distance)
+  camera.near = Math.max(distance / 1000, radius / 200, 0.01)
+  camera.far = Math.max(distance + radius * 10, 1000)
+  camera.updateProjectionMatrix()
+  controls.target.copy(focus)
+  controls.update()
+}
+
 function buildHierarchy(object: THREE.Object3D): SceneHierarchyNode {
   return {
     id: object.uuid,
@@ -62,6 +129,26 @@ function buildHierarchy(object: THREE.Object3D): SceneHierarchyNode {
     type: object.type,
     children: object.children.map((child: THREE.Object3D) => buildHierarchy(child))
   }
+}
+
+function setMaterialDoubleSided(material: THREE.Material | THREE.Material[]): void {
+  if (Array.isArray(material)) {
+    material.forEach((entry) => setMaterialDoubleSided(entry))
+    return
+  }
+  if (material.side !== THREE.DoubleSide) {
+    material.side = THREE.DoubleSide
+    material.needsUpdate = true
+  }
+}
+
+function applyModelMaterialDefaults(object: THREE.Object3D): void {
+  object.traverse((entry: THREE.Object3D) => {
+    const material = (entry as { material?: THREE.Material | THREE.Material[] }).material
+    if (material) {
+      setMaterialDoubleSided(material)
+    }
+  })
 }
 
 function disposeMaterial(material: THREE.Material | THREE.Material[]): void {
@@ -115,9 +202,13 @@ export function GltfViewer({
   const lightRef = useRef<{ ambient: THREE.AmbientLight; directional: THREE.DirectionalLight } | null>(
     null
   )
+  const pmremGeneratorRef = useRef<THREE.PMREMGenerator | null>(null)
+  const environmentRenderTargetRef = useRef<THREE.WebGLRenderTarget | null>(null)
+  const environmentLoadTokenRef = useRef(0)
   const loadTokenRef = useRef(0)
   const hasLoadedModelRef = useRef(false)
   const cameraViewRef = useRef<{ position: THREE.Vector3; target: THREE.Vector3 } | null>(null)
+  const hasUserCameraOverrideRef = useRef(false)
 
   const preset = useMemo(() => environmentPresets[environment], [environment])
   const resolvedViewportTheme: UiTheme =
@@ -143,6 +234,12 @@ export function GltfViewer({
   }, [alwaysAutoFrameCamera])
 
   useEffect(() => {
+    if (alwaysAutoFrameCamera) {
+      hasUserCameraOverrideRef.current = false
+    }
+  }, [alwaysAutoFrameCamera])
+
+  useEffect(() => {
     if (!containerRef.current) return
 
     const container = containerRef.current
@@ -155,6 +252,8 @@ export function GltfViewer({
     renderer.toneMapping = THREE.ACESFilmicToneMapping
     renderer.toneMappingExposure = 1.15
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    const pmremGenerator = new THREE.PMREMGenerator(renderer)
+    pmremGenerator.compileEquirectangularShader()
 
     const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 4000)
     camera.position.set(9, 7, 9)
@@ -184,7 +283,11 @@ export function GltfViewer({
         target: controls.target.clone()
       }
     }
+    const markUserCameraOverride = () => {
+      hasUserCameraOverrideRef.current = true
+    }
     syncViewState()
+    controls.addEventListener('start', markUserCameraOverride)
     controls.addEventListener('change', syncViewState)
 
     const resizeRenderer = () => {
@@ -210,6 +313,7 @@ export function GltfViewer({
     controlsRef.current = controls
     gridRef.current = defaultGrid
     lightRef.current = { ambient, directional }
+    pmremGeneratorRef.current = pmremGenerator
 
     let animationFrame = 0
     const animate = () => {
@@ -222,8 +326,16 @@ export function GltfViewer({
     return () => {
       window.cancelAnimationFrame(animationFrame)
       resizeObserver.disconnect()
+      environmentLoadTokenRef.current += 1
       controls.removeEventListener('change', syncViewState)
+      controls.removeEventListener('start', markUserCameraOverride)
       controls.dispose()
+      if (environmentRenderTargetRef.current) {
+        environmentRenderTargetRef.current.dispose()
+        environmentRenderTargetRef.current = null
+      }
+      pmremGenerator.dispose()
+      pmremGeneratorRef.current = null
       disposeObject3D(modelRef.current)
       modelRef.current = null
       disposeObject3D(gridRef.current)
@@ -235,6 +347,7 @@ export function GltfViewer({
       scene.clear()
       hasLoadedModelRef.current = false
       cameraViewRef.current = null
+      hasUserCameraOverrideRef.current = false
     }
   }, [])
 
@@ -245,7 +358,48 @@ export function GltfViewer({
     directional.color = new THREE.Color(preset.color)
     ambient.intensity = preset.ambient
     directional.intensity = preset.directional
-  }, [preset.ambient, preset.color, preset.directional])
+    if (rendererRef.current) {
+      rendererRef.current.toneMappingExposure = preset.exposure
+    }
+  }, [preset.ambient, preset.color, preset.directional, preset.exposure])
+
+  useEffect(() => {
+    const scene = sceneRef.current
+    const pmremGenerator = pmremGeneratorRef.current
+    if (!scene || !pmremGenerator) return
+
+    const loadToken = environmentLoadTokenRef.current + 1
+    environmentLoadTokenRef.current = loadToken
+    const loader = new RGBELoader()
+    loader.setDataType(THREE.HalfFloatType)
+    loader.load(
+      preset.hdriUrl,
+      (texture: THREE.DataTexture) => {
+        if (environmentLoadTokenRef.current !== loadToken) {
+          texture.dispose()
+          return
+        }
+        const renderTarget = pmremGenerator.fromEquirectangular(texture)
+        texture.dispose()
+
+        if (environmentLoadTokenRef.current !== loadToken) {
+          renderTarget.dispose()
+          return
+        }
+
+        if (environmentRenderTargetRef.current) {
+          environmentRenderTargetRef.current.dispose()
+        }
+        environmentRenderTargetRef.current = renderTarget
+        scene.environment = renderTarget.texture
+      },
+      undefined,
+      (error: unknown) => {
+        if (environmentLoadTokenRef.current !== loadToken) return
+        console.warn('Failed to load HDR environment map', error)
+      }
+    )
+  }, [preset.hdriUrl])
 
   useEffect(() => {
     const scene = sceneRef.current
@@ -320,6 +474,7 @@ export function GltfViewer({
       controls.target.set(0, 0.5, 0)
       controls.update()
       hasLoadedModelRef.current = false
+      hasUserCameraOverrideRef.current = false
       cameraViewRef.current = {
         position: camera.position.clone(),
         target: controls.target.clone()
@@ -336,7 +491,11 @@ export function GltfViewer({
     const loadToken = loadTokenRef.current + 1
     loadTokenRef.current = loadToken
     const preservedView =
-      hasLoadedModelRef.current && !alwaysAutoFrameCameraRef.current ? cameraViewRef.current : null
+      hasLoadedModelRef.current &&
+      !alwaysAutoFrameCameraRef.current &&
+      hasUserCameraOverrideRef.current
+        ? cameraViewRef.current
+        : null
 
     loader.load(
       gltfUrl,
@@ -347,6 +506,7 @@ export function GltfViewer({
           disposeObject3D(modelRef.current)
           scene.remove(modelRef.current)
         }
+        applyModelMaterialDefaults(gltf.scene)
         modelRef.current = gltf.scene
         scene.add(gltf.scene)
 
@@ -383,17 +543,7 @@ export function GltfViewer({
           camera.updateProjectionMatrix()
           controls.update()
         } else {
-          const fov = (camera.fov * Math.PI) / 180
-          const fitHeightDistance = maxDim / (2 * Math.tan(fov / 2))
-          const fitWidthDistance = fitHeightDistance / Math.max(camera.aspect, 0.5)
-          const distance = Math.max(fitHeightDistance, fitWidthDistance) * 1.45
-          const direction = new THREE.Vector3(1, 0.65, 1).normalize()
-          camera.position.copy(center).addScaledVector(direction, distance)
-          camera.near = Math.max(distance / 1000, 0.05)
-          camera.far = Math.max(distance * 25, 1000)
-          camera.updateProjectionMatrix()
-          controls.target.copy(center)
-          controls.update()
+          frameCameraToBox(camera, controls, box, size, center)
         }
         hasLoadedModelRef.current = true
         cameraViewRef.current = {

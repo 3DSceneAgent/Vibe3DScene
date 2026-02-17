@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import tempfile
 import time
-from typing import Optional
+from typing import Any, Callable, Optional
 
 from mcp.server.fastmcp import Context
 from mcp.types import CallToolResult
@@ -13,6 +14,159 @@ from mcp_server import runtime
 from scene_agent.utils.rendering import process_and_save_render
 
 logger = logging.getLogger("BlenderMCPServer")
+BlenderCommandSender = Callable[[str, dict[str, Any] | None], dict[str, Any]]
+
+# ---------------------------------------------------------------------------
+# Scene-level camera constants
+# ---------------------------------------------------------------------------
+SCENE_CAMERA_NAMES = ("SceneCamera_NE", "SceneCamera_NW", "SceneCamera_SE", "SceneCamera_SW")
+_SCENE_CAMERA_AZIMUTHS = (45.0, 135.0, -45.0, -135.0)  # degrees
+_SCENE_CAMERA_ELEVATION = 30.0  # degrees
+_SCENE_CAMERA_FOCAL_MM = 50.0
+_SCENE_CAMERA_SENSOR_WIDTH = 36.0
+_SCENE_CAMERA_DISTANCE_MARGIN = 1.5
+
+
+def _compute_union_aabb(scene_info: dict[str, Any]) -> dict[str, Any] | None:
+    """Compute union AABB from scene_info objects that have world_bounding_box."""
+    objects = scene_info.get("objects") or scene_info.get("scene_objects") or {}
+    if isinstance(objects, list):
+        obj_list = objects
+    elif isinstance(objects, dict):
+        obj_list = list(objects.values())
+    else:
+        return None
+
+    all_min: list[list[float]] = []
+    all_max: list[list[float]] = []
+    for obj in obj_list:
+        if not isinstance(obj, dict):
+            continue
+        bbox = obj.get("world_bounding_box")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 2:
+            continue
+        bbox_min, bbox_max = bbox[0], bbox[1]
+        if len(bbox_min) < 3 or len(bbox_max) < 3:
+            continue
+        all_min.append([float(v) for v in bbox_min[:3]])
+        all_max.append([float(v) for v in bbox_max[:3]])
+
+    if not all_min:
+        return None
+
+    union_min = [min(c[i] for c in all_min) for i in range(3)]
+    union_max = [max(c[i] for c in all_max) for i in range(3)]
+    center = [(union_min[i] + union_max[i]) / 2 for i in range(3)]
+    dimensions = [union_max[i] - union_min[i] for i in range(3)]
+    return {"center": center, "dimensions": dimensions, "min": union_min, "max": union_max}
+
+
+def _fov_aware_distance(dimensions: list[float]) -> float:
+    """Calculate camera distance so the bbox fits comfortably in frame."""
+    max_dim = max(max(dimensions), 0.1)
+    fov_h = 2 * math.atan(_SCENE_CAMERA_SENSOR_WIDTH / (2 * _SCENE_CAMERA_FOCAL_MM))
+    return (max_dim / math.tan(fov_h / 2)) * _SCENE_CAMERA_DISTANCE_MARGIN
+
+
+def _spherical_to_cartesian(
+    center: list[float], distance: float, azimuth_deg: float, elevation_deg: float
+) -> list[float]:
+    """Convert spherical coords around *center* to a world-space position."""
+    az = math.radians(azimuth_deg)
+    el = math.radians(elevation_deg)
+    x = center[0] + distance * math.cos(el) * math.sin(az)
+    y = center[1] + distance * math.cos(el) * math.cos(az)
+    z = center[2] + distance * math.sin(el)
+    return [x, y, z]
+
+
+def update_scene_cameras(
+    *,
+    thread_id: str = "unknown",
+    send_blender_command: BlenderCommandSender | None = None,
+) -> dict[str, Any]:
+    """Render the scene from 4 FOV-aware diagnostic cameras.
+
+    This is an **internal** helper — NOT exposed as an MCP tool.  It is
+    called by the ``scene_observe`` graph node after scene-mutating tools.
+
+    Returns a dict with keys:
+        success, scene_bbox, cameras (list of per-camera dicts with
+        camera_name, location, filepath, image_url), and composite_path.
+    """
+    command_sender = send_blender_command
+    if command_sender is None:
+        blender = runtime.get_blender_connection(logger)
+        command_sender = blender.send_command
+
+    # 1. Gather scene info to compute union AABB
+    scene_info = command_sender("get_scene_info", {})
+    if not scene_info or not scene_info.get("success", True):
+        return {"success": False, "error": "get_scene_info failed"}
+
+    aabb = _compute_union_aabb(scene_info)
+    if aabb is None:
+        return {"success": False, "error": "No mesh objects with bounding boxes found"}
+
+    center = aabb["center"]
+    dimensions = aabb["dimensions"]
+    distance = _fov_aware_distance(dimensions)
+
+    # 2. Place cameras and render
+    cameras: list[dict[str, Any]] = []
+    image_paths: list[str] = []
+
+    for cam_name, azimuth in zip(SCENE_CAMERA_NAMES, _SCENE_CAMERA_AZIMUTHS):
+        location = _spherical_to_cartesian(center, distance, azimuth, _SCENE_CAMERA_ELEVATION)
+
+        temp_path = os.path.join(
+            tempfile.gettempdir(),
+            f"scene_cam_{cam_name}_{os.getpid()}_{int(time.time() * 1000)}.png",
+        )
+        result = command_sender(
+            "camera_observe",
+            {
+                "object_names": [],
+                "mode": "single_view",
+                "focal_length": _SCENE_CAMERA_FOCAL_MM,
+                "azimuth": azimuth,
+                "elevation": _SCENE_CAMERA_ELEVATION,
+                "reuse_cameras": False,
+                "filepath": temp_path,
+            },
+        )
+        if not result or not result.get("success", False):
+            logger.warning("Scene camera %s render failed: %s", cam_name, result)
+            continue
+
+        filepath = result.get("filepath", temp_path)
+        image_url = process_and_save_render(filepath, thread_id, cam_name, logger=logger)
+        try:
+            os.remove(filepath)
+        except Exception:
+            pass
+
+        cam_entry: dict[str, Any] = {
+            "camera_name": cam_name,
+            "location": location,
+            "focal_mm": _SCENE_CAMERA_FOCAL_MM,
+            "azimuth": azimuth,
+            "elevation": _SCENE_CAMERA_ELEVATION,
+            "filepath": filepath,
+            "image_url": image_url,
+        }
+        cameras.append(cam_entry)
+        image_paths.append(image_url)
+
+    if not cameras:
+        return {"success": False, "error": "All scene camera renders failed"}
+
+    return {
+        "success": True,
+        "scene_bbox": {"center": center, "dimensions": dimensions},
+        "cameras": cameras,
+        "image_urls": image_paths,
+    }
 
 
 def _extract_thread_id(ctx: Context) -> str:

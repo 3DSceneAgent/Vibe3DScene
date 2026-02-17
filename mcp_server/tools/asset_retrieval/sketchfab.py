@@ -19,7 +19,7 @@ logger = logging.getLogger("BlenderMCPServer")
 SKETCHFAB_API_BASE_URL = "https://api.sketchfab.com/v3"
 _SKETCHFAB_IMPORT_MARKER = "MCP_SKETCHFAB_IMPORT_RESULT::"
 _SKETCHFAB_MIN_SEARCH_COUNT = 1
-_SKETCHFAB_MAX_SEARCH_COUNT = 50
+_SKETCHFAB_MAX_SEARCH_COUNT = 5
 
 
 def _sketchfab_disabled_message() -> str:
@@ -206,7 +206,7 @@ def search_sketchfab_models(
     ctx: Context,
     query: str,
     categories: Optional[str] = None,
-    count: int = 20,
+    count: int = 5,
     downloadable: bool = True,
 ) -> str:
     """Search Sketchfab models with optional category and downloadable filters."""
@@ -214,11 +214,14 @@ def search_sketchfab_models(
     if error_message:
         return error_message
 
-    if count < _SKETCHFAB_MIN_SEARCH_COUNT or count > _SKETCHFAB_MAX_SEARCH_COUNT:
-        return (
-            f"Error: count must be between {_SKETCHFAB_MIN_SEARCH_COUNT} and "
-            f"{_SKETCHFAB_MAX_SEARCH_COUNT}."
+    normalized_count = max(_SKETCHFAB_MIN_SEARCH_COUNT, min(count, _SKETCHFAB_MAX_SEARCH_COUNT))
+    if normalized_count != count:
+        logger.info(
+            "Sketchfab search count adjusted from %s to %s",
+            count,
+            normalized_count,
         )
+    count = normalized_count
 
     params: dict[str, Any] = {
         "type": "models",

@@ -17,25 +17,66 @@ def asset_creation_strategy_text() -> str:
     hunyuan_ready = runtime.is_hunyuan_tool_enabled()
     retrieval_ready = runtime.is_retrieval_tool_enabled() and service_status.get("retrieval", False)
 
+    # ── Phase 0: Scene grounding ──────────────────────────────────────
     lines: list[str] = [
-        "When creating 3D content in Blender:",
+        "When creating or editing a 3D scene, follow this execution playbook:",
         "",
-        "0. Before anything, call get_scene_info().",
-        "1. Use only these currently available asset workflows (no status-check tools needed):",
-        "   - PolyHaven",
-        "     - Objects/models: download_polyhaven_asset(asset_type=\"models\")",
-        "     - Materials/textures: download_polyhaven_asset(asset_type=\"textures\")",
-        "     - Environment lighting: download_polyhaven_asset(asset_type=\"hdris\")",
-        "     - Best for physically plausible materials and HDRI lighting setup",
+        "0. Scene grounding first (NEVER skip):",
+        "   - Run get_scene_info() to understand existing objects and scene scale.",
+        "   - If scene is visually complex, run get_viewport_screenshot() for a quick global snapshot.",
+        "",
     ]
+
+    # ── Phase 0.5: Automatic scene observation ────────────────────────
+    lines.extend(
+        [
+            "0.5. Automatic scene observation (system-managed):",
+            "   - After every scene mutation (import, generate, execute_blender_code, set_texture),",
+            "     4 scene-level cameras auto-update and render. You will see a multi-view composite.",
+            "   - These cameras track the full scene bounding box — do NOT modify them manually.",
+            "   - For object-level inspection, use camera_act() and camera_observe().",
+            "   - After local refinement, ALWAYS re-render the target object before moving on.",
+            "",
+        ]
+    )
+
+    # ── Phase 1: Visual evidence & camera workflow ────────────────────
+    lines.extend(
+        [
+            "1. Visual evidence before claims (anti-hallucination rule):",
+            "   - Review the automatic multi-view renders for global composition issues.",
+            "   - For targeted inspection around one object:",
+            "       camera_act(action=\"focus\", object_names=[...])",
+            "       camera_act(action=\"move\", direction=\"left/right/up/down\")",
+            "       camera_act(action=\"zoom\", direction=\"in/out\")",
+            "   - Use render_from_objects() or render_from_camera() for deterministic single-shot verification.",
+            "   - If visibility is incomplete or occluded, explicitly state uncertainty instead of guessing.",
+            "   - camera_set_pose() for precise absolute camera placement when exact viewpoints matter.",
+            "",
+        ]
+    )
+
+    # ── Phase 2: Available asset workflows ────────────────────────────
+    lines.extend(
+        [
+            "2. Available asset workflows (no status-check tools needed):",
+            "   - PolyHaven (always available)",
+            "     - Flow: search_polyhaven_assets() -> download_polyhaven_asset()",
+            "     - Objects/models: download_polyhaven_asset(asset_type=\"models\")",
+            "     - Materials/textures: download_polyhaven_asset(asset_type=\"textures\")",
+            "       then set_texture() to apply downloaded textures to existing meshes",
+            "     - Environment lighting: download_polyhaven_asset(asset_type=\"hdris\")",
+            "     - Best for physically plausible materials and HDRI lighting setup",
+        ]
+    )
 
     if sketchfab_ready:
         lines.extend(
             [
                 "   - Sketchfab (server-side)",
-                "     - Search: search_sketchfab_models(query=...)",
-                "     - Compare previews: get_sketchfab_model_preview(uid)",
-                "     - Import: download_sketchfab_model(uid=..., target_size=...)",
+                "     - Flow: search_sketchfab_models(query=...) -> get_sketchfab_model_preview(uid)"
+                " -> download_sketchfab_model(uid=..., target_size=...)",
+                "     - Always compare previews before importing to avoid wasted downloads",
                 "     - Best for authored realistic assets",
             ]
         )
@@ -44,8 +85,7 @@ def asset_creation_strategy_text() -> str:
         lines.extend(
             [
                 "   - Infinigen (Procedural Content Generation)",
-                "     - Inspect supported asset types: get_infinigen_available_assets()",
-                "     - Generate: generate_infinigen_assets(asset_type=\"...\")",
+                "     - Flow: get_infinigen_available_assets() -> generate_infinigen_assets(asset_type=\"...\")",
                 "     - Best for natural assets and procedural indoor/architectural variations",
             ]
         )
@@ -54,7 +94,8 @@ def asset_creation_strategy_text() -> str:
         lines.extend(
             [
                 "   - TRELLIS2 (headless)",
-                "     - Generate custom single object: generate_trellis2_model(text_prompt=..., object_name=...)",
+                "     - Flow: generate_trellis2_model(text_prompt=..., object_name=...)",
+                "     - Synchronous (~30-60s), best for single custom objects",
                 "     - Use when retrieval/libraries cannot satisfy a unique object request",
             ]
         )
@@ -62,10 +103,10 @@ def asset_creation_strategy_text() -> str:
     if rodin_ready:
         lines.extend(
             [
-                "   - Hyper3D Rodin (local-client/headless)",
-                "     - Create task: generate_hyper3d_model_via_text(...) or generate_hyper3d_model_via_images(...)",
-                "     - Poll task: poll_rodin_job_status(...)",
-                "     - Import generated model: import_generated_asset(...)",
+                "   - Hyper3D Rodin",
+                "     - Flow: generate_hyper3d_model_via_text(...) or generate_hyper3d_model_via_images(...)"
+                " -> poll_rodin_job_status(subscription_key=... or request_id=...)"
+                " -> import_generated_asset(...)",
                 "     - Best for single-item custom generation, especially from reference images",
             ]
         )
@@ -73,9 +114,9 @@ def asset_creation_strategy_text() -> str:
     if hunyuan_ready:
         lines.extend(
             [
-                "   - Hunyuan3D (headless)",
-                "     - Generate with built-in polling: generate_hunyuan3d_model(text_prompt=... or input_image_url=...)",
-                "     - Best for single custom object generation in headless mode",
+                "   - Hunyuan3D",
+                "     - Flow: generate_hunyuan3d_model(text_prompt=... or input_image_url=...)",
+                "     - Built-in polling, best for single custom object generation",
             ]
         )
 
@@ -83,8 +124,8 @@ def asset_creation_strategy_text() -> str:
         lines.extend(
             [
                 "   - 3D Asset Retrieval Database",
-                "     - Search: search_3d_assets_by_text(query=..., top_k=...)",
-                "     - Import: import_retrieved_asset(model_url=..., object_name=...)",
+                "     - Flow: search_3d_assets_by_text(query=..., top_k=...)"
+                " -> import_retrieved_asset(model_url=..., object_name=...)",
                 "     - Best for common real-world objects and fast scene assembly",
             ]
         )
@@ -98,6 +139,22 @@ def asset_creation_strategy_text() -> str:
             ]
         )
 
+    # ── Phase 3: Post-import verification ─────────────────────────────
+    lines.extend(
+        [
+            "",
+            "3. After every import/generation (REQUIRED):",
+            "   a. Use get_object_info() to confirm world_bounding_box, dimensions, and transform.",
+            "   b. Check for clipping/intersection/floating: compare bounding boxes of nearby objects.",
+            "   c. Re-check with camera_observe(object_names, mode=\"multi_view\") before asserting"
+            " final placement.",
+            "   d. Fix scale mismatch, clipping, or intersection immediately using Blender edits.",
+            "   e. Ensure spatial relationships and target sizes are consistent across all objects.",
+            "",
+        ]
+    )
+
+    # ── Phase 4: Source priority ──────────────────────────────────────
     priority_rules: list[str] = []
     if sketchfab_ready and retrieval_ready:
         priority_rules.append("For realistic authored objects: Sketchfab -> Retrieval")
@@ -126,25 +183,16 @@ def asset_creation_strategy_text() -> str:
         priority_rules.append("For unique custom objects: Retrieval")
 
     if trellis2_ready and retrieval_ready:
-        priority_rules.append("For headless custom generation fallback: Retrieval first, then TRELLIS2")
+        priority_rules.append("For custom generation fallback: Retrieval first, then TRELLIS2")
     elif trellis2_ready:
-        priority_rules.append("For headless custom generation fallback: TRELLIS2")
+        priority_rules.append("For custom generation fallback: TRELLIS2")
 
     if hunyuan_ready and retrieval_ready:
-        priority_rules.append("For headless unique-object fallback: Retrieval first, then Hunyuan3D")
+        priority_rules.append("For unique-object fallback: Retrieval first, then Hunyuan3D")
     elif hunyuan_ready:
-        priority_rules.append("For headless unique-object fallback: Hunyuan3D")
+        priority_rules.append("For unique-object fallback: Hunyuan3D")
 
-    lines.extend(
-        [
-            "",
-            "2. Always verify placement and scale after each import/generation:",
-            "   - Inspect world/object bounding boxes to avoid clipping and floating assets",
-            "   - Ensure spatial relationships and target size are consistent across objects",
-            "",
-            "3. Recommended source priority among available workflows:",
-        ]
-    )
+    lines.append("4. Recommended source priority among available workflows:")
 
     if priority_rules:
         for rule in priority_rules:
@@ -152,6 +200,26 @@ def asset_creation_strategy_text() -> str:
     else:
         lines.append("   - Use PolyHaven for materials/textures/HDRIs; rely on scripting for custom geometry.")
 
+    lines.append("   - Environment lighting and PBR textures: PolyHaven first.")
+    lines.append("   - Simple primitives (cube/sphere/plane): create directly via scripting.")
+
+    # ── Phase 5: Multimodal feedback loop ─────────────────────────────
+    lines.extend(
+        [
+            "",
+            "5. Multimodal feedback loop (use throughout construction):",
+            "   - Scene-level verification runs automatically after every scene mutation.",
+            "   - For object-level detail work, use camera_act/render_from_objects to inspect.",
+            "   - If verification reports problems (wrong scale, bad placement, missing objects):",
+            "       -> fix immediately, then re-render the affected object to confirm the fix.",
+            "   - After local refinement, ALWAYS call a render tool so the system can verify.",
+            "   - Do NOT claim the scene is complete without verification showing 'match' status.",
+            "   - Do NOT mark a todo as completed without visual confirmation.",
+            "",
+        ]
+    )
+
+    # ── Phase 6: Scripting fallback ───────────────────────────────────
     generator_names = [
         name
         for enabled, name in [
@@ -164,8 +232,7 @@ def asset_creation_strategy_text() -> str:
 
     lines.extend(
         [
-            "",
-            "4. Only fall back to scripting when:",
+            "6. Only fall back to execute_blender_code() when:",
             "   - A simple primitive is explicitly requested",
             "   - No suitable asset exists after searching/generating with available workflows",
         ]
@@ -176,6 +243,11 @@ def asset_creation_strategy_text() -> str:
             + ", ".join(generator_names)
             + " generation failed, timed out, or returned unusable geometry"
         )
-    lines.append("   - The task specifically requires basic procedural geometry/material edits")
+    lines.extend(
+        [
+            "   - The task specifically requires basic procedural geometry/material edits",
+            "   - Required capability is not available in existing tools",
+        ]
+    )
 
     return "\n".join(lines)

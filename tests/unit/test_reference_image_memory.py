@@ -1,4 +1,5 @@
 import io
+import uuid
 
 import pytest
 from PIL import Image
@@ -20,8 +21,10 @@ def test_reference_image_limit_enforced(tmp_path, monkeypatch):
     reload_settings()
 
     memory = ReferenceImageMemory()
+    thread_id = f"thread-{uuid.uuid4().hex[:8]}"
+    memory.clear_thread(thread_id)
     memory.add_images(
-        thread_id="thread-1",
+        thread_id=thread_id,
         uploads=[
             ("a.png", "image/png", _make_png_bytes((255, 0, 0))),
             ("b.png", "image/png", _make_png_bytes((0, 255, 0))),
@@ -30,6 +33,7 @@ def test_reference_image_limit_enforced(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError):
         memory.add_images(
-            thread_id="thread-1",
+            thread_id=thread_id,
             uploads=[("c.png", "image/png", _make_png_bytes((0, 0, 255)))],
         )
+    memory.clear_thread(thread_id)

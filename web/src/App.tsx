@@ -59,6 +59,40 @@ function formatSceneActionError(error: unknown, actionLabel: string): string {
   return `${actionLabel} failed.`
 }
 
+function normalizeStreamErrorDetail(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message.trim()
+  }
+  if (typeof error === 'string' && error.trim()) {
+    return error.trim()
+  }
+  if (error && typeof error === 'object') {
+    const detail = (error as { detail?: unknown }).detail
+    if (typeof detail === 'string' && detail.trim()) {
+      return detail.trim()
+    }
+    try {
+      return JSON.stringify(error)
+    } catch {
+      return ''
+    }
+  }
+  return ''
+}
+
+function formatStreamFailureMessage(error: unknown): string {
+  const detail = normalizeStreamErrorDetail(error)
+  if (!detail) {
+    return 'Sorry, the agent ran into an unexpected issue while processing this request. Please retry.'
+  }
+  return [
+    'Sorry, the agent ran into an error while processing this request.',
+    'Please retry, simplify the prompt, or split it into smaller steps.',
+    '',
+    `Details: ${detail}`
+  ].join('\n')
+}
+
 function App() {
   const REQUEST_TIMEOUT_MS = 35000
   const MCP_REQUEST_TIMEOUT_MS = 10000
@@ -708,6 +742,32 @@ function App() {
     currentStreamRef.current = { threadId, assistantId, runId }
     messageIdMapRef.current.clear()
     messageIdMapRef.current.set('initial', assistantId)
+    let streamErrorAppended = false
+    const appendStreamErrorMessage = (error: unknown) => {
+      if (streamErrorAppended) {
+        return
+      }
+      streamErrorAppended = true
+      const friendlyError = formatStreamFailureMessage(error)
+      updateThread(threadId, (thread) => {
+        const finalizedMessages: Message[] = thread.messages.map((message): Message => (
+          message.status === 'streaming'
+            ? { ...message, status: 'final' as const }
+            : message
+        ))
+        const errorMessage: Message = {
+          id: `msg-${Date.now()}-${Math.random()}-stream-error`,
+          role: 'assistant',
+          content: friendlyError,
+          createdAt: Date.now(),
+          status: 'error'
+        }
+        return {
+          ...thread,
+          messages: [...finalizedMessages, errorMessage]
+        }
+      })
+    }
     const handleStreamEvent = (event: StreamEvent) => {
       if (streamRunIdRef.current !== runId) {
         return
@@ -777,7 +837,7 @@ function App() {
       }
 
       if (event.error) {
-        updateAssistantById(assistantId, (message) => ({ ...message, content: `Error: ${event.error}`, status: 'error' }))
+        appendStreamErrorMessage(event.error)
         setThreadStreamStatus(threadId, 'complete')
         return
       }
@@ -923,27 +983,8 @@ function App() {
         if (streamRunIdRef.current !== runId) {
           return
         }
-        updateThread(threadId, (thread) => {
-          let lastAssistantIndex = -1
-          for (let i = thread.messages.length - 1; i >= 0; i -= 1) {
-            const message = thread.messages[i]
-            if (message.role === 'assistant' && message.status === 'streaming') {
-              lastAssistantIndex = i
-              break
-            }
-          }
-          if (lastAssistantIndex === -1) {
-            return thread
-          }
-          return {
-            ...thread,
-            messages: thread.messages.map((message, index) =>
-              index === lastAssistantIndex
-                ? { ...message, content: `Error: ${String(error)}`, status: 'error' }
-                : message
-            )
-          }
-        })
+        appendStreamErrorMessage(error)
+        setThreadStreamStatus(threadId, 'complete')
       })
       .finally(() => {
         if (streamRunIdRef.current !== runId) {

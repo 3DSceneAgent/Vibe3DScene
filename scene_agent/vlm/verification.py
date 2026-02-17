@@ -54,11 +54,65 @@ def _extract_json(text: str) -> dict[str, Any] | None:
         return None
 
 
+def _format_todo_context(todo_context: list[str] | None) -> str:
+    if not todo_context:
+        return ""
+    lines = ["Current todo objectives (prioritize these in your judgment):"]
+    for item in todo_context[:5]:
+        normalized = " ".join(str(item).strip().split())
+        if normalized:
+            lines.append(f"- {normalized}")
+    return "\n".join(lines)
+
+
+_SCENE_LEVEL_VERIFY_PROMPT = """\
+Analyze the rendered 3D scene image(s) against the target description (and reference images if provided).
+Report on each category:
+1) Objects: Are all requested objects present? Any missing, extraneous, or incorrect objects?
+2) Layout: Does the spatial arrangement match the description? Suggest concrete transforms if not.
+3) Scale: Are proportions realistic? Is any object too large or too small relative to others?
+4) Environment: Is the lighting, background, and material/texture treatment correct?
+5) Overall: match | partial | mismatch.
+
+Return JSON only:
+{
+  "status": "match|partial|mismatch",
+  "object_feedback": "...",
+  "layout_feedback": "...",
+  "scale_feedback": "...",
+  "environment_feedback": "...",
+  "edit_suggestions": ["concrete actionable fix 1", "concrete actionable fix 2"],
+  "reason": "short summary"
+}"""
+
+_OBJECT_LEVEL_VERIFY_PROMPT = """\
+Analyze the rendered image of specific object(s) against the target description (and reference images if provided).
+Focus on fine details since this is a close-up / object-level view:
+1) Geometry: Is the object shape correct? Any visible mesh artifacts, holes, or distortion?
+2) Placement: Is the object at the correct position? Any clipping with other objects or floating?
+3) Material: Are textures, colors, and material properties correct? Any UV issues?
+4) Scale: Is the object sized correctly relative to nearby objects and real-world expectations?
+5) Overall: match | partial | mismatch.
+
+Return JSON only:
+{
+  "status": "match|partial|mismatch",
+  "object_feedback": "...",
+  "placement_feedback": "...",
+  "material_feedback": "...",
+  "scale_feedback": "...",
+  "edit_suggestions": ["concrete actionable fix 1", "concrete actionable fix 2"],
+  "reason": "short summary"
+}"""
+
+
 def verify_render_with_references(
     *,
     render_path: str,
     reference_paths: list[str],
     user_request: str,
+    render_source: str = "agent_camera",
+    todo_context: list[str] | None = None,
     provider_name: str | None = None,
     api_key: str | None = None,
     model: str | None = None,
@@ -79,17 +133,36 @@ def verify_render_with_references(
     )
     model = provider.get_chat_model()
 
-    prompt = (
-        "You are verifying whether the rendered image matches the user request "
-        "and any provided reference images. Respond with JSON only using:\n"
-        '{"status":"match|mismatch","reason":"short explanation"}'
-    )
+    has_references = bool(reference_paths)
+
+    if render_source == "scene_observe":
+        base_prompt = _SCENE_LEVEL_VERIFY_PROMPT
+    else:
+        base_prompt = _OBJECT_LEVEL_VERIFY_PROMPT
+
+    if has_references:
+        prompt = (
+            base_prompt
+            + "\n\nReference images are provided — also check style/appearance consistency."
+        )
+    else:
+        prompt = (
+            base_prompt
+            + "\n\nNo reference images provided — judge solely based on the text description."
+        )
+
     content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
     content.append({"type": "text", "text": f"User request: {user_request}"})
+    if render_source != "scene_observe":
+        todo_text = _format_todo_context(todo_context)
+        if todo_text:
+            content.append({"type": "text", "text": todo_text})
+
+    render_data_url = _image_to_data_url(render_path)
     content.append(
         {
             "type": "image_url",
-            "image_url": {"url": _image_to_data_url(render_path)},
+            "image_url": {"url": render_data_url},
         }
     )
     for path in reference_paths:
@@ -108,4 +181,6 @@ def verify_render_with_references(
             "status": "mismatch",
             "reason": response_text.strip() or "Verification response could not be parsed.",
         }
+    parsed["verification_mode"] = "reference_comparison" if has_references else "text_only"
+    parsed["render_source"] = render_source
     return parsed

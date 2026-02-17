@@ -21,6 +21,12 @@ if [ "$HOST_OS" != "Darwin" ]; then
     exit 1
 fi
 
+# Preserve runtime proxy env before loading optional env files.
+RUNTIME_HTTP_PROXY="${http_proxy:-${HTTP_PROXY:-}}"
+RUNTIME_HTTPS_PROXY="${https_proxy:-${HTTPS_PROXY:-}}"
+RUNTIME_ALL_PROXY="${all_proxy:-${ALL_PROXY:-}}"
+RUNTIME_NO_PROXY="${no_proxy:-${NO_PROXY:-}}"
+
 ENV_FILE_CANDIDATE="${SCENE_AGENT_ENV_FILE:-}"
 if [ -z "$ENV_FILE_CANDIDATE" ]; then
     if [ -f "$PROJECT_DIR/docker/.env.multiprocess" ]; then
@@ -101,9 +107,10 @@ if [ -z "${SESSION_BLEND_ROOT:-}" ]; then
 fi
 
 normalize_proxy_env() {
-    local http_proxy_value="${SCENE_AGENT_HTTP_PROXY:-${HTTP_PROXY:-${http_proxy:-}}}"
-    local https_proxy_value="${SCENE_AGENT_HTTPS_PROXY:-${HTTPS_PROXY:-${https_proxy:-${http_proxy_value:-}}}}"
-    local all_proxy_value="${SCENE_AGENT_ALL_PROXY:-${ALL_PROXY:-${all_proxy:-}}}"
+    local http_proxy_value="${RUNTIME_HTTP_PROXY:-${http_proxy:-${HTTP_PROXY:-${SCENE_AGENT_HTTP_PROXY:-}}}}"
+    local https_proxy_value="${RUNTIME_HTTPS_PROXY:-${https_proxy:-${HTTPS_PROXY:-${SCENE_AGENT_HTTPS_PROXY:-${http_proxy_value:-}}}}}"
+    local all_proxy_value="${RUNTIME_ALL_PROXY:-${all_proxy:-${ALL_PROXY:-${SCENE_AGENT_ALL_PROXY:-}}}}"
+    local no_proxy_value="${RUNTIME_NO_PROXY:-${no_proxy:-${NO_PROXY:-${SCENE_AGENT_NO_PROXY:-}}}}"
 
     if [ -n "${http_proxy_value:-}" ]; then
         export HTTP_PROXY="$http_proxy_value"
@@ -116,6 +123,10 @@ normalize_proxy_env() {
     if [ -n "${all_proxy_value:-}" ]; then
         export ALL_PROXY="$all_proxy_value"
         export all_proxy="$all_proxy_value"
+    fi
+    if [ -n "${no_proxy_value:-}" ]; then
+        export NO_PROXY="$no_proxy_value"
+        export no_proxy="$no_proxy_value"
     fi
 }
 

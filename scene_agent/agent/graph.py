@@ -16,6 +16,7 @@ from scene_agent.agent.nodes import (
     checkpoint_gate_node,
     finalize_node,
     post_agent_node,
+    scene_observe_node,
     todo_check_node,
     update_memory_node,
     verify_node,
@@ -33,19 +34,6 @@ def _extract_tool_hint(tool: object) -> str | None:
     if not normalized:
         return None
     return normalized
-
-
-def _route_verify_or_agent(state: AgentState) -> Literal["verify", "agent"]:
-    render_path = state.get("last_render_path")
-    if not render_path:
-        return "agent"
-    if state.get("last_verified_path") == render_path:
-        return "agent"
-    decision = state.get("agent_decision") or {}
-    should_verify = decision.get("should_verify")
-    if isinstance(should_verify, bool) and should_verify:
-        return "verify"
-    return "agent"
 
 
 def _message_has_tool_calls(message: AIMessage) -> bool:
@@ -87,10 +75,10 @@ def _should_run_todo_check(state: AgentState) -> bool:
 
 def _route_after_loop_checkpoint(
     state: AgentState,
-) -> Literal["todo_check", "verify", "agent"]:
+) -> Literal["todo_check", "agent"]:
     if _should_run_todo_check(state):
         return "todo_check"
-    return _route_verify_or_agent(state)
+    return "agent"
 
 
 def _route_after_finalize_checkpoint(state: AgentState) -> Literal["todo_check", "finalize"]:
@@ -99,7 +87,7 @@ def _route_after_finalize_checkpoint(state: AgentState) -> Literal["todo_check",
     return "finalize"
 
 
-def _route_after_todo_check(state: AgentState) -> Literal["finalize", "verify", "agent"]:
+def _route_after_todo_check(state: AgentState) -> Literal["finalize", "agent"]:
     gate = state.get("todo_check_gate")
     if isinstance(gate, dict) and gate.get("stage") == "finalize":
         todo_check = state.get("todo_check")
@@ -107,9 +95,9 @@ def _route_after_todo_check(state: AgentState) -> Literal["finalize", "verify", 
             status = todo_check.get("status")
             if status in {"completed", "blocked", "not_applicable"}:
                 return "finalize"
-            return _route_verify_or_agent(state)
-        return "finalize"
-    return _route_verify_or_agent(state)
+        else:
+            return "finalize"
+    return "agent"
 
 
 async def create_agent_graph(
@@ -180,6 +168,7 @@ async def create_agent_graph(
     builder.add_node("post_agent", post_agent_node)
     builder.add_node("tools", ToolNode(tools))
     builder.add_node("update_memory", update_memory_node)
+    builder.add_node("scene_observe", scene_observe_node)
     builder.add_node(
         "checkpoint_loop",
         lambda state: checkpoint_gate_node(state, stage="loop"),
@@ -210,9 +199,11 @@ async def create_agent_graph(
         _route_after_post_agent,
     )
     
-    # After tools, update memory then pass sparse todo-check gate.
+    # After tools: update_memory -> scene_observe -> verify -> checkpoint_loop
     builder.add_edge("tools", "update_memory")
-    builder.add_edge("update_memory", "checkpoint_loop")
+    builder.add_edge("update_memory", "scene_observe")
+    builder.add_edge("scene_observe", "verify")
+    builder.add_edge("verify", "checkpoint_loop")
     builder.add_conditional_edges(
         "checkpoint_loop",
         _route_after_loop_checkpoint,
@@ -225,7 +216,6 @@ async def create_agent_graph(
         "todo_check",
         _route_after_todo_check,
     )
-    builder.add_edge("verify", "agent")
     builder.add_edge("finalize", END)
     
     # Compile with checkpointing
