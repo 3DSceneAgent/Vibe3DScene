@@ -5,9 +5,10 @@ VLM backend for multimodal reasoning.
 
 The pipeline under test:
   1. MCP tool (camera_tools) returns a CallToolResult with a markdown image link.
-  2. update_memory_node extracts the render path / image payload from ToolMessage.
-  3. _build_render_vlm_message converts it into a HumanMessage with image_url content.
-  4. verify_render_with_references sends the image to the VLM for verification.
+  2. update_memory_node resolves the render URL to a data URL and injects a
+     fixed-ID HumanMessage so the VLM can see the image.  The fixed ID ensures
+     at most one visual message exists in context at any time.
+  3. verify_render_with_references sends the image to the VLM for verification.
 """
 from __future__ import annotations
 
@@ -15,20 +16,17 @@ import base64
 import io
 import json
 import os
-import tempfile
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
 
 import pytest
 from PIL import Image as PILImage
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from scene_agent.agent.nodes import (
-    _build_render_vlm_message,
-    _extract_render_image_payload,
+    _RENDER_VISION_MESSAGE_ID,
     _extract_render_path,
-    _persist_render_image,
+    _resolve_render_message_to_data_url,
     update_memory_node,
 )
 
@@ -72,11 +70,11 @@ class TestExtractRenderPath:
         msg = ToolMessage(name="render_from_camera", content="/tmp/render.png", tool_call_id="t1")
         assert _extract_render_path(msg) == "/tmp/render.png"
 
-    def test_from_markdown_string_returns_raw(self):
+    def test_from_markdown_string_returns_url(self):
         md = "![Render](https://example.com/render.jpg)"
         msg = ToolMessage(name="render_from_objects", content=md, tool_call_id="t1")
         path = _extract_render_path(msg)
-        assert path == md, "Markdown string content is returned as-is"
+        assert path == "https://example.com/render.jpg"
 
     def test_from_list_content_with_image_item(self):
         msg = ToolMessage(
@@ -94,126 +92,71 @@ class TestExtractRenderPath:
         assert _extract_render_path(msg) is None
 
 
-# ── Test: extract render image payload (markdown image, base64, etc.) ────
+# ── Test: _resolve_render_message_to_data_url ────────────────────────────
 
 
-class TestExtractRenderImagePayload:
-    def test_from_markdown_string(self):
-        md = "![Render of dragon](https://example.com/renders/img.jpg)"
+class TestResolveRenderMessageToDataUrl:
+    def test_from_markdown_string_local_file(self, tmp_path):
+        img_path = str(tmp_path / "render.png")
+        _save_test_image(img_path)
+        md = f"![Render]({img_path})"
         msg = ToolMessage(name="render_from_objects", content=md, tool_call_id="t1")
-        payload = _extract_render_image_payload(msg)
-        assert payload is not None
-        assert payload["url"] == "https://example.com/renders/img.jpg"
+        result = _resolve_render_message_to_data_url(msg)
+        assert result is not None
+        assert result.startswith("data:image/png;base64,")
 
-    def test_from_markdown_in_list(self):
-        md = "![Observation view](https://example.com/observe.jpg)"
-        msg = ToolMessage(name="camera_observe", content=[md], tool_call_id="t1")
-        payload = _extract_render_image_payload(msg)
-        assert payload is not None
-        assert payload["url"] == "https://example.com/observe.jpg"
+    def test_from_http_url_passed_through(self):
+        md = "![Render](https://example.com/render.jpg)"
+        msg = ToolMessage(name="render_from_objects", content=md, tool_call_id="t1")
+        result = _resolve_render_message_to_data_url(msg)
+        assert result == "https://example.com/render.jpg"
 
-    def test_from_text_dict_in_list(self):
-        msg = ToolMessage(
-            name="camera_act",
-            content=[{"type": "text", "text": "![cam](https://example.com/cam.jpg)"}],
-            tool_call_id="t1",
-        )
-        payload = _extract_render_image_payload(msg)
-        assert payload is not None
-        assert payload["url"] == "https://example.com/cam.jpg"
+    def test_from_localhost_renders_url_converted_to_data_url(self):
+        from scene_agent.utils.rendering import RENDERS_DIR
 
-    def test_from_base64_image_dict(self):
+        filename = "resolve_localhost.png"
+        render_path = RENDERS_DIR / filename
+        _save_test_image(str(render_path), fmt="PNG", color=(40, 180, 80))
+        md = f"![cam](http://localhost:8000/renders/{filename})"
+        msg = ToolMessage(name="render_from_objects", content=md, tool_call_id="t1")
+        result = _resolve_render_message_to_data_url(msg)
+        assert result is not None
+        assert result.startswith("data:image/png;base64,")
+        try:
+            render_path.unlink()
+        except OSError:
+            pass
+
+    def test_from_relative_renders_url(self):
+        from scene_agent.utils.rendering import RENDERS_DIR
+
+        filename = "resolve_relative.png"
+        render_path = RENDERS_DIR / filename
+        _save_test_image(str(render_path), fmt="PNG", color=(12, 230, 98))
+        md = f"![obs](/renders/{filename})"
+        msg = ToolMessage(name="camera_observe", content=md, tool_call_id="t1")
+        result = _resolve_render_message_to_data_url(msg)
+        assert result is not None
+        assert result.startswith("data:image/png;base64,")
+        try:
+            render_path.unlink()
+        except OSError:
+            pass
+
+    def test_from_legacy_base64_image_block(self):
         b64 = _make_base64_png()
         msg = ToolMessage(
             name="render_from_objects",
             content=[{"type": "image", "base64": b64, "mime_type": "image/png"}],
             tool_call_id="t1",
         )
-        payload = _extract_render_image_payload(msg)
-        assert payload is not None
-        assert payload["base64"] == b64
+        result = _resolve_render_message_to_data_url(msg)
+        assert result is not None
+        assert result.startswith("data:image/png;base64,")
 
-    def test_none_for_plain_text(self):
+    def test_returns_none_for_plain_text_tool_message(self):
         msg = ToolMessage(name="get_scene_info", content="scene data...", tool_call_id="t1")
-        assert _extract_render_image_payload(msg) is None
-
-
-# ── Test: persist render image ───────────────────────────────────────────
-
-
-class TestPersistRenderImage:
-    def test_persist_base64_payload(self):
-        b64 = _make_base64_png()
-        path = _persist_render_image({"base64": b64, "mime_type": "image/png"})
-        assert path is not None
-        assert os.path.exists(path)
-        with open(path, "rb") as f:
-            data = f.read()
-        assert data == base64.b64decode(b64)
-        os.remove(path)
-
-    def test_persist_http_url_returns_url(self):
-        payload = {"url": "https://example.com/render.jpg", "mime_type": "image/jpeg"}
-        result = _persist_render_image(payload)
-        assert result == "https://example.com/render.jpg"
-
-    def test_persist_file_url_returns_local_path(self):
-        payload = {"url": "file:///tmp/local_render.png", "mime_type": "image/png"}
-        result = _persist_render_image(payload)
-        assert result == "/tmp/local_render.png"
-
-    def test_persist_empty_payload(self):
-        assert _persist_render_image({}) is None
-
-
-# ── Test: build VLM message from render ──────────────────────────────────
-
-
-class TestBuildRenderVlmMessage:
-    def test_builds_message_from_local_file(self, tmp_path):
-        img_path = str(tmp_path / "render.png")
-        _save_test_image(img_path)
-        result = _build_render_vlm_message(img_path, None, None)
-        assert result is not None
-        message, signature = result
-        assert isinstance(message, HumanMessage)
-        assert isinstance(message.content, list)
-        assert len(message.content) == 2
-        assert message.content[0]["type"] == "text"
-        assert message.content[1]["type"] == "image_url"
-        image_url = message.content[1]["image_url"]["url"]
-        assert image_url.startswith("data:image/png;base64,")
-        assert signature.startswith("path:")
-
-    def test_builds_message_from_http_url(self):
-        payload = {"url": "https://example.com/render.jpg", "mime_type": "image/jpeg"}
-        result = _build_render_vlm_message(None, payload, None)
-        assert result is not None
-        message, signature = result
-        assert isinstance(message, HumanMessage)
-        image_url = message.content[1]["image_url"]["url"]
-        assert image_url == "https://example.com/render.jpg"
-
-    def test_builds_message_from_base64(self):
-        b64 = _make_base64_png()
-        payload = {"base64": b64, "mime_type": "image/png"}
-        result = _build_render_vlm_message(None, payload, None)
-        assert result is not None
-        message, signature = result
-        image_url = message.content[1]["image_url"]["url"]
-        assert image_url.startswith("data:image/png;base64,")
-
-    def test_deduplicates_same_render(self, tmp_path):
-        img_path = str(tmp_path / "render.png")
-        _save_test_image(img_path)
-        result1 = _build_render_vlm_message(img_path, None, None)
-        assert result1 is not None
-        _, sig1 = result1
-        result2 = _build_render_vlm_message(img_path, None, sig1)
-        assert result2 is None, "Same signature should be deduplicated"
-
-    def test_returns_none_when_no_image(self):
-        assert _build_render_vlm_message(None, None, None) is None
+        assert _resolve_render_message_to_data_url(msg) is None
 
 
 # ── Test: update_memory_node end-to-end with render extraction ───────────
@@ -223,7 +166,6 @@ class TestUpdateMemoryNodeRenderExtraction:
     def _make_state(self, messages: list, **extra) -> dict:
         return {
             "messages": messages,
-            "last_render_signature": None,
             "last_tool_batch_names": None,
             "tool_round_count": 0,
             **extra,
@@ -238,11 +180,9 @@ class TestUpdateMemoryNodeRenderExtraction:
         state = self._make_state([tool_msg])
         result = update_memory_node(state)
         assert "last_render_path" in result
-        # _extract_render_path returns the raw markdown string;
-        # the actual path is extracted via _extract_render_image_payload -> _persist_render_image
-        assert result["last_render_path"] == md
+        assert result["last_render_path"] == render_path
 
-    def test_injects_vlm_image_message(self, tmp_path):
+    def test_injects_vlm_image_message_with_fixed_id(self, tmp_path):
         render_path = str(tmp_path / "test_render.png")
         _save_test_image(render_path, fmt="PNG")
         url = f"file://{render_path}"
@@ -254,6 +194,7 @@ class TestUpdateMemoryNodeRenderExtraction:
         assert len(messages) == 1
         msg = messages[0]
         assert isinstance(msg, HumanMessage)
+        assert msg.id == _RENDER_VISION_MESSAGE_ID, "Fixed ID ensures at most one visual message in context"
         has_image = any(
             item.get("type") == "image_url"
             for item in msg.content
@@ -266,13 +207,21 @@ class TestUpdateMemoryNodeRenderExtraction:
         tool_msg = ToolMessage(name="render_from_camera", content=md, tool_call_id="t1")
         state = self._make_state([tool_msg])
         result = update_memory_node(state)
-        # _extract_render_path returns the raw markdown string;
-        # the image URL is extracted by _extract_render_image_payload
-        assert result.get("last_render_path") == md
+        assert result.get("last_render_path") == "https://example.com/renders/thread1_cam_123.jpg"
         messages = result.get("messages", [])
         assert len(messages) == 1
         image_content = messages[0].content[1]
         assert image_content["image_url"]["url"] == "https://example.com/renders/thread1_cam_123.jpg"
+
+    def test_global_observe_sets_scene_render_source(self):
+        md = "![SceneCamera_NE](https://example.com/renders/scene_ne.jpg)"
+        tool_msg = ToolMessage(name="observe_scene_global", content=md, tool_call_id="t1")
+        state = self._make_state([tool_msg])
+
+        result = update_memory_node(state)
+
+        assert result.get("last_render_path") == "https://example.com/renders/scene_ne.jpg"
+        assert result.get("last_render_source") == "scene_observe"
 
 
 # ── Test: verify_render_with_references with mocked VLM ─────────────────
@@ -412,3 +361,103 @@ class TestVerifyRenderImageDelivery:
         full_text = " ".join(text_items)
         assert "dungeon" in full_text.lower()
         assert "dragon" in full_text.lower()
+
+    def test_verify_accepts_relative_renders_path(self, monkeypatch):
+        from scene_agent.utils.rendering import RENDERS_DIR
+
+        filename = "verify_relative_path_render.png"
+        render_path = RENDERS_DIR / filename
+        _save_test_image(str(render_path), fmt="PNG", color=(200, 60, 60))
+
+        captured_messages: list[Any] = []
+
+        class FakeModel:
+            def invoke(self, messages):
+                captured_messages.extend(messages)
+                return SimpleNamespace(
+                    content=json.dumps({"status": "match", "reason": "looks red"})
+                )
+
+        class FakeProvider:
+            def get_chat_model(self):
+                return FakeModel()
+
+        monkeypatch.setattr(
+            "scene_agent.vlm.verification.get_vlm_provider",
+            lambda **kwargs: FakeProvider(),
+        )
+
+        from scene_agent.vlm.verification import verify_render_with_references
+
+        result = verify_render_with_references(
+            render_path=f"/renders/{filename}",
+            reference_paths=[],
+            user_request="Create a red square",
+            provider_name="openai",
+            api_key="test-key",
+            model="gpt-4o",
+        )
+
+        assert result["status"] == "match"
+        assert len(captured_messages) == 1
+        image_items = [
+            item
+            for item in captured_messages[0].content
+            if isinstance(item, dict) and item.get("type") == "image_url"
+        ]
+        assert image_items
+        assert str(image_items[0]["image_url"]["url"]).startswith("data:image/")
+        try:
+            render_path.unlink()
+        except OSError:
+            pass
+
+    def test_verify_accepts_localhost_renders_http_url(self, monkeypatch):
+        from scene_agent.utils.rendering import RENDERS_DIR
+
+        filename = "verify_localhost_renders_url.png"
+        render_path = RENDERS_DIR / filename
+        _save_test_image(str(render_path), fmt="PNG", color=(20, 20, 220))
+
+        captured_messages: list[Any] = []
+
+        class FakeModel:
+            def invoke(self, messages):
+                captured_messages.extend(messages)
+                return SimpleNamespace(
+                    content=json.dumps({"status": "match", "reason": "looks blue"})
+                )
+
+        class FakeProvider:
+            def get_chat_model(self):
+                return FakeModel()
+
+        monkeypatch.setattr(
+            "scene_agent.vlm.verification.get_vlm_provider",
+            lambda **kwargs: FakeProvider(),
+        )
+
+        from scene_agent.vlm.verification import verify_render_with_references
+
+        result = verify_render_with_references(
+            render_path=f"http://localhost:8000/renders/{filename}",
+            reference_paths=[],
+            user_request="Create a blue square",
+            provider_name="openai",
+            api_key="test-key",
+            model="gpt-4o",
+        )
+
+        assert result["status"] == "match"
+        assert len(captured_messages) == 1
+        image_items = [
+            item
+            for item in captured_messages[0].content
+            if isinstance(item, dict) and item.get("type") == "image_url"
+        ]
+        assert image_items
+        assert str(image_items[0]["image_url"]["url"]).startswith("data:image/")
+        try:
+            render_path.unlink()
+        except OSError:
+            pass

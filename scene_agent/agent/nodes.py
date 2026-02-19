@@ -8,10 +8,9 @@ import json
 import mimetypes
 import os
 import re
-import tempfile
-import time
 from datetime import datetime
 from typing import Any, Dict, Literal
+from urllib.parse import unquote, urlparse
 from langchain_core.messages import ToolMessage, AIMessage, SystemMessage, HumanMessage
 from scene_agent.agent.state import AgentState, TodoItem, create_todo
 from scene_agent.config import get_settings
@@ -26,10 +25,12 @@ TODO_MILESTONE_TOOL_MARKERS = (
     "render_from_objects",
     "camera_observe",
     "camera_act",
+    "observe_scene_global",
 )
 
 SCENE_MUTATING_TOOLS: frozenset[str] = frozenset({
     "execute_blender_code",
+    "delete_objects",
     "import_glb_model",
     "download_polyhaven_asset",
     "set_texture",
@@ -51,16 +52,11 @@ OBJECT_LEVEL_TOOLS: frozenset[str] = frozenset({
     "render_from_objects",
 })
 
-_INTERNAL_HUMAN_MESSAGE_SOURCE_KEY = "internal_source"
-_INTERNAL_HUMAN_MESSAGE_SOURCES: frozenset[str] = frozenset({
-    "scene_observe",
-    "tool_render_observe",
-})
-
-_LEGACY_INTERNAL_HUMAN_PREFIXES: tuple[str, ...] = (
-    "auto scene observation",
-    "latest render from tool call",
-)
+# Fixed message IDs for internal visual context messages.
+# add_messages replaces by ID, so these slots hold at most one message each —
+# no unbounded accumulation across turns.
+_RENDER_VISION_MESSAGE_ID = "render_vision_current"
+_SCENE_OBSERVE_MESSAGE_ID = "scene_observe_current"
 
 
 def agent_node(
@@ -81,9 +77,9 @@ def agent_node(
     """
     # Build messages including system prompt
     from scene_agent.agent.prompts import get_full_system_prompt
-    
-    messages = [SystemMessage(content=get_full_system_prompt())]
     effective_tool_names = _resolve_effective_available_tools(state, available_tool_names)
+
+    messages = [SystemMessage(content=get_full_system_prompt(effective_tool_names))]
     tool_constraints = _build_available_tools_constraint(effective_tool_names)
     if tool_constraints:
         messages.append(SystemMessage(content=tool_constraints))
@@ -133,7 +129,11 @@ def post_agent_node(state: AgentState) -> Dict[str, Any]:
     return result
 
 
-def finalize_node(state: AgentState) -> Dict[str, Any]:
+def finalize_node(
+    state: AgentState,
+    *,
+    finalizer_model: Any | None = None,
+) -> Dict[str, Any]:
     """
     Finalize node: mark workflow-level finish metadata before END.
     """
@@ -146,10 +146,20 @@ def finalize_node(state: AgentState) -> Dict[str, Any]:
         todo_status = todo_check.get("status")
         if todo_status == "completed":
             normalized["finish_reason"] = "todos_completed"
-            return {"agent_decision": normalized}
+            summary = _compose_finalize_summary(
+                state,
+                normalized,
+                finalizer_model=finalizer_model,
+            )
+            return {"agent_decision": normalized, "messages": [AIMessage(content=summary)]}
         if todo_status == "blocked":
             normalized["finish_reason"] = "todo_check_blocked"
-            return {"agent_decision": normalized}
+            summary = _compose_finalize_summary(
+                state,
+                normalized,
+                finalizer_model=finalizer_model,
+            )
+            return {"agent_decision": normalized, "messages": [AIMessage(content=summary)]}
 
     should_call_tools = normalized.get("should_call_tools")
     if isinstance(should_call_tools, bool):
@@ -161,7 +171,195 @@ def finalize_node(state: AgentState) -> Dict[str, Any]:
     else:
         normalized["finish_reason"] = "no_tool_calls"
 
-    return {"agent_decision": normalized}
+    summary = _compose_finalize_summary(
+        state,
+        normalized,
+        finalizer_model=finalizer_model,
+    )
+    return {"agent_decision": normalized, "messages": [AIMessage(content=summary)]}
+
+
+def _compose_finalize_summary(
+    state: AgentState,
+    decision: dict[str, Any],
+    *,
+    finalizer_model: Any | None = None,
+) -> str:
+    fallback = _build_finalize_summary(state, decision)
+    generated = _build_finalize_summary_with_model(
+        state,
+        decision,
+        finalizer_model=finalizer_model,
+    )
+    return generated or fallback
+
+
+def _build_finalize_summary(state: AgentState, decision: dict[str, Any]) -> str:
+    finish_reason = str(decision.get("finish_reason", "unknown"))
+    lines: list[str] = [f"Scene workflow finished ({finish_reason})."]
+
+    todo_check = state.get("todo_check")
+    if isinstance(todo_check, dict):
+        status = todo_check.get("status")
+        reason = todo_check.get("reason")
+        pending = todo_check.get("pending_count")
+        in_progress = todo_check.get("in_progress_count")
+        completed = todo_check.get("completed_count")
+        failed = todo_check.get("failed_count")
+        if isinstance(status, str) and status:
+            if isinstance(reason, str) and reason:
+                lines.append(f"Todo check: {status} ({reason}).")
+            else:
+                lines.append(f"Todo check: {status}.")
+        counts = [pending, in_progress, completed, failed]
+        if all(isinstance(value, int) for value in counts):
+            lines.append(
+                "Todo summary: "
+                f"completed={completed}, in_progress={in_progress}, pending={pending}, failed={failed}."
+            )
+
+    verification_status, verification_reason = _latest_verification_feedback(state)
+    if verification_status:
+        lines.append(f"Latest verification: {verification_status}.")
+    if verification_reason:
+        lines.append(f"Verification note: {verification_reason}.")
+
+    return "\n".join(lines)
+
+
+def _build_finalize_summary_with_model(
+    state: AgentState,
+    decision: dict[str, Any],
+    *,
+    finalizer_model: Any | None,
+) -> str | None:
+    if finalizer_model is None:
+        return None
+
+    summary_payload = _build_finalize_summary_context(state, decision)
+    summarize_prompt = (
+        "You summarize the final state of a 3D scene-editing workflow.\n"
+        "Write concise plain text (no markdown table/code block) using 4 short sections:\n"
+        "1) Result\n"
+        "2) Todo Progress\n"
+        "3) Verification Highlights\n"
+        "4) Suggested Next Action\n"
+        "Requirements:\n"
+        "- Never dump raw dict/JSON.\n"
+        "- Keep concrete and readable for end users.\n"
+        "- Match the user's language inferred from latest_user_request."
+    )
+    context_json = json.dumps(summary_payload, ensure_ascii=False, default=str)
+    try:
+        response = finalizer_model.invoke(
+            [
+                SystemMessage(content=summarize_prompt),
+                HumanMessage(content=f"workflow_state:\n{context_json}"),
+            ]
+        )
+    except Exception:
+        return None
+
+    content_text = _message_content_to_text(getattr(response, "content", response))
+    if not isinstance(content_text, str):
+        return None
+    normalized = re.sub(r"<agent_decision>.*?</agent_decision>", "", content_text, flags=re.DOTALL).strip()
+    return normalized or None
+
+
+def _build_finalize_summary_context(
+    state: AgentState,
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    todo_check = state.get("todo_check")
+    todo_summary: dict[str, Any] = {}
+    if isinstance(todo_check, dict):
+        for key in (
+            "status",
+            "reason",
+            "pending_count",
+            "in_progress_count",
+            "completed_count",
+            "failed_count",
+            "stagnation_count",
+            "tool_round_count",
+        ):
+            todo_summary[key] = todo_check.get(key)
+
+    return {
+        "finish_reason": decision.get("finish_reason"),
+        "workflow_status": decision.get("workflow_status"),
+        "latest_user_request": _latest_human_message(state),
+        "todo_check": todo_summary,
+        "active_todos": _active_todo_context(state),
+        "latest_verification": _sanitize_verification_payload(_latest_verification_payload(state)),
+    }
+
+
+def _sanitize_verification_payload(payload: Any) -> Any:
+    if isinstance(payload, str):
+        text = payload.strip()
+        return text[:600] if len(text) > 600 else text
+    if not isinstance(payload, dict):
+        return payload
+    allowed_keys = (
+        "status",
+        "reason",
+        "object_feedback",
+        "layout_feedback",
+        "placement_feedback",
+        "material_feedback",
+        "scale_feedback",
+        "environment_feedback",
+        "edit_suggestions",
+        "render_source",
+        "verification_mode",
+    )
+    sanitized: dict[str, Any] = {}
+    for key in allowed_keys:
+        if key not in payload:
+            continue
+        value = payload.get(key)
+        if key == "edit_suggestions" and isinstance(value, list):
+            sanitized[key] = [str(item) for item in value[:4]]
+            continue
+        if isinstance(value, str):
+            sanitized[key] = value[:600] if len(value) > 600 else value
+            continue
+        sanitized[key] = value
+    return sanitized
+
+
+def _latest_verification_payload(state: AgentState) -> dict[str, Any] | str | None:
+    messages = state.get("messages")
+    if not isinstance(messages, list):
+        return None
+    for msg in reversed(messages):
+        if not isinstance(msg, ToolMessage):
+            continue
+        name = getattr(msg, "name", None)
+        if not isinstance(name, str) or "verification" not in name:
+            continue
+        content = msg.content
+        if isinstance(content, dict):
+            return content
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        return None
+    return None
+
+
+def _latest_verification_feedback(state: AgentState) -> tuple[str | None, str | None]:
+    payload = _latest_verification_payload(state)
+    if isinstance(payload, dict):
+        status = payload.get("status")
+        reason = payload.get("reason")
+        status_value = status if isinstance(status, str) and status else None
+        reason_value = reason if isinstance(reason, str) and reason else None
+        return status_value, reason_value
+    if isinstance(payload, str):
+        return None, payload
+    return None, None
 
 
 def _resolve_effective_available_tools(
@@ -248,55 +446,47 @@ def _filter_unavailable_tool_calls(
 
 def update_memory_node(state: AgentState) -> Dict[str, Any]:
     """
-    Update memory node: Parse tool results and update scene state.
-    Extracts scene_objects/render artifacts from tool results.
-    
-    Args:
-        state: Current agent state
-        
-    Returns:
-        Partial state update with scene_objects and render metadata
+    Update memory node: parse tool results and update scene state.
+
+    Extracts scene objects from get_scene_info and injects a single
+    VLM-ready visual message (fixed ID) for the latest render.
+    Using a fixed ID means add_messages replaces the previous visual
+    message rather than appending, keeping context lean.
     """
-    last_messages = state["messages"][-10:]  # Look at recent messages
-    
+    last_messages = state["messages"][-10:]
+
     result: Dict[str, Any] = {}
     latest_tool_batch_names = _collect_latest_tool_batch_names(last_messages)
     if latest_tool_batch_names:
         result["last_tool_batch_names"] = latest_tool_batch_names
-        current_tool_round = state.get("tool_round_count")
-        if isinstance(current_tool_round, int) and current_tool_round >= 0:
-            result["tool_round_count"] = current_tool_round + 1
-        else:
-            result["tool_round_count"] = 1
-    
-    # Parse scene_objects from get_scene_info results
-    for msg in last_messages:
-        if isinstance(msg, ToolMessage):
-            if "get_scene_info" in str(msg.name):
-                scene_updates = SceneMemory.parse_scene_info(msg.content)
-                if scene_updates:
-                    result["scene_objects"] = scene_updates
-                    break
-    
-    render_message = _find_last_render_message(last_messages)
-    last_render_path = _extract_render_path(render_message) if render_message else None
-    render_image = _extract_render_image_payload(render_message) if render_message else None
-    if not last_render_path and render_image:
-        last_render_path = _persist_render_image(render_image)
-    if last_render_path:
-        result["last_render_path"] = last_render_path
-        result["last_render_source"] = "agent_camera"
+        result["tool_round_count"] = _coerce_non_negative_int(state.get("tool_round_count")) + 1
 
-    render_message_update = _build_render_vlm_message(
-        last_render_path,
-        render_image,
-        state.get("last_render_signature"),
-    )
-    if render_message_update:
-        message, signature = render_message_update
-        result["messages"] = [message]
-        result["last_render_signature"] = signature
-    
+    for msg in last_messages:
+        if isinstance(msg, ToolMessage) and "get_scene_info" in str(msg.name):
+            scene_updates = SceneMemory.parse_scene_info(msg.content)
+            if scene_updates:
+                result["scene_objects"] = scene_updates
+                break
+
+    render_message = _find_last_render_message(last_messages)
+    if render_message is not None:
+        render_path = _extract_render_path(render_message)
+        if render_path:
+            result["last_render_path"] = render_path
+            result["last_render_source"] = _infer_render_source(render_message)
+
+        data_url = _resolve_render_message_to_data_url(render_message)
+        if data_url:
+            result["messages"] = [
+                HumanMessage(
+                    id=_RENDER_VISION_MESSAGE_ID,
+                    content=[
+                        {"type": "text", "text": "Latest render from tool call."},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                )
+            ]
+
     return result
 
 
@@ -377,10 +567,24 @@ def scene_observe_node(state: AgentState) -> Dict[str, Any]:
     for cam_info in cameras:
         url = cam_info.get("image_url", "")
         if url:
+            vlm_ready_url = _payload_to_data_url({"url": url})
+            if not vlm_ready_url:
+                normalized_url = _normalize_render_reference(url)
+                if (
+                    isinstance(normalized_url, str)
+                    and (
+                        normalized_url.startswith("http://")
+                        or normalized_url.startswith("https://")
+                        or normalized_url.startswith("data:")
+                    )
+                ):
+                    vlm_ready_url = normalized_url
+            if not vlm_ready_url:
+                continue
             content.append(
                 {
                     "type": "image_url",
-                    "image_url": {"url": url},
+                    "image_url": {"url": vlm_ready_url},
                 }
             )
 
@@ -401,7 +605,12 @@ def scene_observe_node(state: AgentState) -> Dict[str, Any]:
     first_url = image_urls[0] if image_urls else None
 
     return {
-        "messages": [_build_internal_human_message(content, source="scene_observe")],
+        "messages": [
+            HumanMessage(
+                id=_SCENE_OBSERVE_MESSAGE_ID,
+                content=content,
+            )
+        ],
         "last_render_path": first_url,
         "last_render_source": "scene_observe",
         "scene_camera_params": camera_params,
@@ -481,6 +690,10 @@ def todo_check_node(state: AgentState) -> Dict[str, Any]:
 
     todos = _coerce_todos(state.get("todos"))
     tool_round_count = _coerce_non_negative_int(state.get("tool_round_count"))
+    current_verified_path = state.get("last_verified_path")
+    if not isinstance(current_verified_path, str):
+        current_verified_path = None
+
     if not todos:
         return {
             "todo_check": {
@@ -495,6 +708,7 @@ def todo_check_node(state: AgentState) -> Dict[str, Any]:
                 "stagnation_count": 0,
             },
             "last_todo_check_round": tool_round_count,
+            "last_todo_check_verified_path": current_verified_path,
             "last_todo_snapshot": {},
             "stagnation_count": 0,
         }
@@ -511,6 +725,9 @@ def todo_check_node(state: AgentState) -> Dict[str, Any]:
         for key, todo in latest_by_description.items()
     }
     previous_snapshot = state.get("last_todo_snapshot")
+    previous_verified_path = state.get("last_todo_check_verified_path")
+    if not isinstance(previous_verified_path, str):
+        previous_verified_path = None
     previous_stagnation = _coerce_non_negative_int(state.get("stagnation_count"))
     stagnation_count = 0
 
@@ -520,10 +737,19 @@ def todo_check_node(state: AgentState) -> Dict[str, Any]:
         status = "completed"
         reason = "all_todos_terminal"
     elif isinstance(previous_snapshot, dict) and previous_snapshot == snapshot:
-        stagnation_count = previous_stagnation + 1
-        if stagnation_count >= TODO_STAGNATION_LIMIT:
-            status = "blocked"
-            reason = "todo_progress_stagnant"
+        has_new_visual_evidence = (
+            isinstance(current_verified_path, str)
+            and current_verified_path
+            and current_verified_path != previous_verified_path
+        )
+        if has_new_visual_evidence:
+            stagnation_count = 0
+            reason = "pending_todos_with_new_visual_evidence"
+        else:
+            stagnation_count = previous_stagnation + 1
+            if stagnation_count >= TODO_STAGNATION_LIMIT:
+                status = "blocked"
+                reason = "todo_progress_stagnant"
     else:
         stagnation_count = 0
 
@@ -540,6 +766,7 @@ def todo_check_node(state: AgentState) -> Dict[str, Any]:
             "stagnation_count": stagnation_count,
         },
         "last_todo_check_round": tool_round_count,
+        "last_todo_check_verified_path": current_verified_path,
         "last_todo_snapshot": snapshot,
         "stagnation_count": stagnation_count,
     }
@@ -719,7 +946,10 @@ def _extract_render_path(message: ToolMessage | None) -> str | None:
                 if isinstance(url, str) and url.startswith("file://"):
                     return url.replace("file://", "", 1)
     if isinstance(content, str):
-        return content if content else None
+        normalized = _normalize_render_reference(content)
+        if normalized and _is_probable_render_reference(normalized):
+            return normalized
+        return None
     return None
 
 
@@ -732,9 +962,19 @@ def _find_last_render_message(messages: list) -> ToolMessage | None:
                 or "render_from_objects" in name
                 or "camera_observe" in name
                 or "camera_act" in name
+                or "observe_scene_global" in name
             ):
                 return msg
     return None
+
+
+def _infer_render_source(message: ToolMessage | None) -> str:
+    if message is None:
+        return "agent_camera"
+    name = str(getattr(message, "name", "") or "")
+    if "observe_scene_global" in name:
+        return "scene_observe"
+    return "agent_camera"
 
 
 def _extract_agent_decision(messages: list) -> dict[str, Any]:
@@ -771,116 +1011,29 @@ def _extract_tagged_json(text: str, tag: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _extract_render_image_payload(message: ToolMessage | None) -> dict[str, str] | None:
-    if message is None:
-        return None
+
+
+def _resolve_render_message_to_data_url(message: ToolMessage) -> str | None:
+    """Convert a render tool message's image reference to a VLM-ready data URL.
+
+    Uses _extract_render_path for URL/path extraction (handles all content
+    formats including markdown), then converts to data: via _path_to_data_url.
+    Legacy base64 image blocks are handled as a fallback.
+    """
+    render_path = _extract_render_path(message)
+    if render_path:
+        return _path_to_data_url(render_path)
+
+    # Fallback: legacy base64 image block
     content = message.content
-    
-    # First check if content is a string with markdown image
-    if isinstance(content, str):
-        # Extract URL from markdown: ![alt](url)
-        import re
-        pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
-        match = re.search(pattern, content)
-        if match:
-            url = match.group(2)
-            result = {"url": url, "mime_type": "image/jpeg"}
-            return result
-    
-    # Then check list format (legacy)
     if isinstance(content, list):
-        # First check for markdown strings in list
         for item in content:
-            if isinstance(item, str):
-                import re
-                pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
-                match = re.search(pattern, item)
-                if match:
-                    url = match.group(2)
-                    return {"url": url, "mime_type": "image/jpeg"}
-            if isinstance(item, dict):
-                # Text content dict may contain markdown
-                text_value = item.get("text")
-                if isinstance(text_value, str):
-                    import re
-                    pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
-                    match = re.search(pattern, text_value)
-                    if match:
-                        url = match.group(2)
-                        return {"url": url, "mime_type": "image/jpeg"}
-                # Legacy: check for image objects
-                if item.get("type") == "image":
-                    base64_data = item.get("base64")
-                    mime_type = item.get("mime_type") or item.get("mimeType")
-                    url = item.get("url")
-                    if isinstance(base64_data, str) and base64_data:
-                        return {"base64": base64_data, "mime_type": mime_type or "image/png"}
-                    if isinstance(url, str) and url:
-                        return {"url": url, "mime_type": mime_type or "image/png"}
+            if isinstance(item, dict) and item.get("type") == "image":
+                b64 = item.get("base64")
+                mime = item.get("mime_type") or item.get("mimeType") or "image/png"
+                if isinstance(b64, str) and b64:
+                    return f"data:{mime};base64,{b64}"
     return None
-
-
-def _persist_render_image(payload: dict[str, str]) -> str | None:
-    base64_data = payload.get("base64")
-    if not base64_data:
-        url = payload.get("url")
-        if isinstance(url, str):
-            # If it's a file:// URL, convert to local path
-            if url.startswith("file://"):
-                return url.replace("file://", "", 1)
-            # If it's an http/https URL, return as-is (already hosted)
-            if url.startswith("http://") or url.startswith("https://"):
-                return url
-        return None
-    mime_type = payload.get("mime_type", "image/png")
-    extension = mimetypes.guess_extension(mime_type) or ".png"
-    filename = f"agent_render_{int(time.time() * 1000)}{extension}"
-    path = os.path.join(tempfile.gettempdir(), filename)
-    try:
-        with open(path, "wb") as handle:
-            handle.write(base64.b64decode(base64_data))
-    except Exception:
-        return None
-    return path
-
-
-def _build_render_vlm_message(
-    render_path: str | None,
-    payload: dict[str, str] | None,
-    last_signature: str | None,
-) -> tuple[HumanMessage, str] | None:
-    data_url = _payload_to_data_url(payload)
-    if not data_url and render_path:
-        data_url = _path_to_data_url(render_path)
-    if not data_url:
-        return None
-    signature = _render_signature(render_path, payload)
-    if not signature or signature == last_signature:
-        return None
-    content = [
-        {"type": "text", "text": "Latest render from tool call."},
-        {"type": "image_url", "image_url": {"url": data_url}},
-    ]
-    return _build_internal_human_message(content, source="tool_render_observe"), signature
-
-
-def _build_internal_human_message(content: Any, *, source: str) -> HumanMessage:
-    return HumanMessage(
-        content=content,
-        additional_kwargs={_INTERNAL_HUMAN_MESSAGE_SOURCE_KEY: source},
-    )
-
-
-def _is_internal_human_message(msg: HumanMessage) -> bool:
-    additional_kwargs = getattr(msg, "additional_kwargs", None)
-    if isinstance(additional_kwargs, dict):
-        source = additional_kwargs.get(_INTERNAL_HUMAN_MESSAGE_SOURCE_KEY)
-        if isinstance(source, str) and source in _INTERNAL_HUMAN_MESSAGE_SOURCES:
-            return True
-
-    # Backward compatibility for messages produced before internal_source tagging.
-    text = _message_content_to_text(msg.content).strip().lower()
-    return any(text.startswith(prefix) for prefix in _LEGACY_INTERNAL_HUMAN_PREFIXES)
 
 
 def _payload_to_data_url(payload: dict[str, str] | None) -> str | None:
@@ -893,27 +1046,46 @@ def _payload_to_data_url(payload: dict[str, str] | None) -> str | None:
         return f"data:{mime_type};base64,{base64_data}"
     url = payload.get("url")
     if isinstance(url, str):
+        normalized = _normalize_render_reference(url)
+        if not normalized:
+            return None
         # Data URL - return as-is
-        if url.startswith("data:"):
-            return url
-        # HTTP URL - return as-is (OpenAI API supports direct URLs)
-        if url.startswith("http://") or url.startswith("https://"):
-            return url
-        # File URL - convert to data URL
-        if url.startswith("file://"):
-            return _path_to_data_url(url.replace("file://", "", 1))
+        if normalized.startswith("data:"):
+            return normalized
+        # Resolve /renders references (including absolute local URLs) to local files first.
+        resolved = _resolve_renders_url_to_path(normalized)
+        if resolved:
+            return _path_to_data_url(resolved)
+        if normalized.startswith("/renders/"):
+            return _path_to_data_url(normalized)
+        # HTTP URL - return as-is when it is externally reachable.
+        if normalized.startswith("http://") or normalized.startswith("https://"):
+            return normalized
+        return _path_to_data_url(normalized)
     return None
 
 
 def _path_to_data_url(path: str) -> str | None:
-    # If it's already an HTTP URL, return as-is
-    if path.startswith("http://") or path.startswith("https://"):
-        return path
-    # If it's a local file, convert to data URL
-    mime, _ = mimetypes.guess_type(path)
+    normalized = _normalize_render_reference(path)
+    if not normalized:
+        return None
+    resolved_renders_path = _resolve_renders_url_to_path(normalized)
+    if resolved_renders_path:
+        normalized = resolved_renders_path
+    # If it's already a URL/data URL, return as-is
+    if normalized.startswith("data:"):
+        return normalized
+    if normalized.startswith("http://") or normalized.startswith("https://"):
+        return normalized
+    resolved_path = normalized
+    if normalized.startswith("/renders/"):
+        resolved_path = _resolve_renders_url_to_path(normalized) or normalized
+    if not os.path.exists(resolved_path):
+        return None
+    mime, _ = mimetypes.guess_type(resolved_path)
     mime = mime or "image/png"
     try:
-        with open(path, "rb") as handle:
+        with open(resolved_path, "rb") as handle:
             payload = handle.read()
     except OSError:
         return None
@@ -921,20 +1093,75 @@ def _path_to_data_url(path: str) -> str | None:
     return f"data:{mime};base64,{encoded}"
 
 
-def _render_signature(render_path: str | None, payload: dict[str, str] | None) -> str | None:
-    if render_path:
-        return f"path:{render_path}"
-    if payload and payload.get("base64"):
-        digest = hashlib.sha256(payload["base64"].encode("utf-8")).hexdigest()
-        return f"b64:{digest}"
-    if payload and payload.get("url"):
-        return f"url:{payload['url']}"
-    return None
+
+def _extract_markdown_image_url(text: str) -> str | None:
+    if not isinstance(text, str) or not text:
+        return None
+    pattern = r'!\[[^\]]*\]\(([^)]+)\)'
+    match = re.search(pattern, text)
+    if not match:
+        return None
+    url = match.group(1).strip()
+    return url if url else None
+
+
+def _normalize_render_reference(raw_value: str | None) -> str | None:
+    if not isinstance(raw_value, str):
+        return None
+    normalized = raw_value.strip()
+    if not normalized:
+        return None
+    markdown_url = _extract_markdown_image_url(normalized)
+    if markdown_url:
+        normalized = markdown_url
+    if normalized.startswith("file://"):
+        normalized = normalized.replace("file://", "", 1)
+    return normalized
+
+
+def _is_probable_render_reference(value: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    lowered = value.lower().strip()
+    if not lowered:
+        return False
+    if lowered.startswith(("http://", "https://", "data:image/", "/renders/")):
+        return True
+    if os.path.exists(value):
+        return True
+    return lowered.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
+
+
+def _resolve_renders_url_to_path(url: str) -> str | None:
+    if not isinstance(url, str):
+        return None
+    normalized = url.strip()
+    if not normalized:
+        return None
+    parsed = urlparse(normalized)
+    renders_path = normalized
+    if parsed.scheme and parsed.netloc:
+        renders_path = parsed.path
+    if not renders_path.startswith("/renders/"):
+        return None
+    filename = unquote(renders_path.replace("/renders/", "", 1).strip("/"))
+    if not filename:
+        return None
+    try:
+        from scene_agent.utils.rendering import RENDERS_DIR
+    except Exception:
+        return None
+    candidate = os.path.join(str(RENDERS_DIR), filename)
+    return candidate if os.path.exists(candidate) else None
 
 
 def _latest_human_message(state: AgentState) -> str:
+    _skip_ids = {
+        _RENDER_VISION_MESSAGE_ID,
+        _SCENE_OBSERVE_MESSAGE_ID,
+    }
     for msg in reversed(state["messages"]):
-        if isinstance(msg, HumanMessage) and not _is_internal_human_message(msg):
+        if isinstance(msg, HumanMessage) and getattr(msg, "id", None) not in _skip_ids:
             return _message_content_to_text(msg.content)
     return ""
 
@@ -988,16 +1215,22 @@ def verify_node(
     reference_images = reference_images[-settings.reference_image_max_count :]
     reference_paths = [image.stored_path for image in reference_images]
 
-    verification = verify_render_with_references(
-        render_path=render_path,
-        reference_paths=reference_paths,
-        user_request=_latest_human_message(state),
-        render_source=render_source,
-        todo_context=todo_context,
-        provider_name=provider_name,
-        api_key=api_key,
-        model=model,
-    )
+    try:
+        verification = verify_render_with_references(
+            render_path=render_path,
+            reference_paths=reference_paths,
+            user_request=_latest_human_message(state),
+            render_source=render_source,
+            todo_context=todo_context,
+            provider_name=provider_name,
+            api_key=api_key,
+            model=model,
+        )
+    except Exception as exc:
+        verification = {
+            "status": "mismatch",
+            "reason": f"Verification skipped due to render access error: {exc}",
+        }
     verification.update(
         {
             "reference_count": len(reference_paths),
@@ -1007,10 +1240,73 @@ def verify_node(
             "todo_context": todo_context,
         }
     )
+    verification_tool_call_id = (
+        "verification_"
+        + hashlib.sha1(str(render_path).encode("utf-8")).hexdigest()[:12]
+    )
+    guidance_text = _build_verification_guidance_message(state, verification)
+    if guidance_text:
+        verification["guidance"] = guidance_text
+
     return {
-        "messages": [ToolMessage(name="verification", content=verification)],
+        "messages": [
+            ToolMessage(
+                name="verification",
+                content=verification,
+                tool_call_id=verification_tool_call_id,
+            )
+        ],
         "last_verified_path": render_path,
     }
+
+
+def _build_verification_guidance_message(
+    state: AgentState,
+    verification: dict[str, Any],
+) -> str:
+    status_value = verification.get("status")
+    status = status_value.strip().lower() if isinstance(status_value, str) else ""
+    if status == "match":
+        return "Latest verification is match. Continue with the next pending todo."
+
+    render_source = verification.get("render_source")
+    is_scene_level = isinstance(render_source, str) and render_source == "scene_observe"
+    focus_candidates: list[str] = []
+
+    decision = state.get("agent_decision")
+    if isinstance(decision, dict):
+        next_focus = decision.get("next_focus_objects")
+        if isinstance(next_focus, list):
+            for item in next_focus:
+                if isinstance(item, str):
+                    cleaned = item.strip()
+                    if cleaned:
+                        focus_candidates.append(cleaned)
+
+    for line in _active_todo_context(state):
+        if line not in focus_candidates:
+            focus_candidates.append(line)
+        if len(focus_candidates) >= 4:
+            break
+
+    focus_text = ""
+    if focus_candidates:
+        focus_text = " Focus first on: " + ", ".join(focus_candidates[:4]) + "."
+
+    if is_scene_level:
+        return (
+            "Global verification still reports mismatches. "
+            "Before editing, run object-level inspection with "
+            "render_from_objects(object_names=[...], mode=\"annotated\") "
+            "to localize exact problem objects and positions."
+            + focus_text
+        )
+    return (
+        "Object-level verification is not yet match. "
+        "Run render_from_objects(object_names=[...], mode=\"annotated\") "
+        "before the next edit so you can locate and fix issues precisely."
+        + focus_text
+    )
 
 
 def extract_todo_updates(messages: list) -> list[TodoItem]:

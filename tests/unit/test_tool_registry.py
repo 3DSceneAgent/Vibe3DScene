@@ -120,3 +120,6 @@ def test_register_mcp_tools_respects_retrieval_and_infinigen_switches(monkeypatc
     assert "import_retrieved_asset" not in enabled
     assert "get_infinigen_available_assets" not in enabled
     assert "generate_infinigen_assets" not in enabled
+    assert "observe_scene_global" in enabled
+    assert "delete_objects" in enabled
+    assert "get_session_persistence_status" not in enabled

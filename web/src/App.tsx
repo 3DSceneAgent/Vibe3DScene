@@ -15,7 +15,14 @@ import {
   getMcpTools,
   getVlmModels
 } from './api/client'
-import type { BlendFileEntry, ReferenceImage, StreamEvent, TodoItem, VlmProviderOption } from './api/types'
+import type {
+  BlendFileEntry,
+  GraphNodeStream,
+  ReferenceImage,
+  StreamEvent,
+  TodoItem,
+  VlmProviderOption
+} from './api/types'
 import { ChatTab } from './components/ChatTab'
 import { SceneTab } from './components/SceneTab'
 import { SettingsPanel } from './components/SettingsPanel'
@@ -437,7 +444,8 @@ function App() {
       gltfUrl: null,
       sceneHierarchy: [],
       sceneHasChange: false,
-      referenceImages: []
+      referenceImages: [],
+      graphEvents: []
     }
     setThreads((prev) => [newThread, ...prev])
     setActiveThreadId(newThread.id)
@@ -729,6 +737,7 @@ function App() {
         vlmProvider: selectedProvider || thread.vlmProvider,
         vlmModel: selectedModel || thread.vlmModel,
         vlmLocked: thread.vlmLocked ?? false,
+        graphEvents: [],
         messages: [...thread.messages, userMessage, assistantMessage]
       }
     })
@@ -774,6 +783,16 @@ function App() {
       }
       if (event.event === 'done') {
         setThreadStreamStatus(threadId, 'complete')
+      }
+      if (event.event === 'graph_node' && event.graph_node) {
+        const graphEvent: GraphNodeStream = event.graph_node
+        updateThread(threadId, (thread) => {
+          const nextEvents = [...(thread.graphEvents ?? []), graphEvent]
+          return {
+            ...thread,
+            graphEvents: nextEvents.slice(-200)
+          }
+        })
       }
       const getOrCreateAssistantMessage = (messageId: string | null): string => {
         if (!messageId) {
@@ -1037,7 +1056,7 @@ function App() {
     }
   }, [activeThread?.id, settings.backendUrl, setSceneActionError, setThreadLoading, updateThread])
 
-  const fetchRenders = useCallback(async (threadId?: string) => {
+  const fetchRenders = useCallback(async (threadId?: string, includeLocalWork: boolean = false) => {
     const targetId = threadId ?? activeThread?.id
     if (!targetId) return
     if (rendersAbortRef.current[targetId]) {
@@ -1049,7 +1068,12 @@ function App() {
     setThreadLoading(targetId, { renders: true })
     setSceneActionError(targetId, null)
     try {
-      const renders = await getSceneRenders(settings.backendUrl, targetId, controller.signal)
+      const renders = await getSceneRenders(
+        settings.backendUrl,
+        targetId,
+        includeLocalWork,
+        controller.signal
+      )
       updateThread(targetId, (thread) => ({ ...thread, renders }))
     } catch (error) {
       console.error('Failed to fetch renders', error)
@@ -1369,6 +1393,7 @@ function App() {
                   vlmError={vlmErrorByThread[activeThread.id] ?? null}
                   vlmLocked={Boolean(activeThread.vlmLocked)}
                   onVlmSelectionChange={handleVlmSelectionChange}
+                  graphEvents={activeThread.graphEvents ?? []}
                 />
               </section>
               <section className="workspace-scene">
@@ -1386,7 +1411,7 @@ function App() {
                     setSettings((prev) => ({ ...prev, autoRefreshScene: enabled }))
                   }
                   onEnvironmentChange={setEnvironment}
-                  onFetchRenders={() => void fetchRenders()}
+                  onFetchRenders={(includeLocalWork) => void fetchRenders(undefined, includeLocalWork ?? false)}
                   onFetchGltf={() => void fetchGltf()}
                   onDownloadGltf={() => void downloadGltf()}
                   onDownloadBlend={() => void downloadBlend()}

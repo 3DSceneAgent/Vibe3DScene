@@ -2,14 +2,48 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import tempfile
 
-from mcp.server.fastmcp import Context, Image
+from mcp.server.fastmcp import Context
 
 from mcp_server import runtime
 
 logger = logging.getLogger("BlenderMCPServer")
+
+
+def _normalize_object_names(object_names: list[str] | str) -> list[str]:
+    if isinstance(object_names, list):
+        normalized: list[str] = []
+        for raw_name in object_names:
+            if not isinstance(raw_name, str):
+                continue
+            name = raw_name.strip()
+            if name:
+                normalized.append(name)
+        return normalized
+
+    text = object_names.strip()
+    if not text:
+        return []
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = None
+
+    if isinstance(parsed, list):
+        return _normalize_object_names(parsed)
+
+    if any(separator in text for separator in (",", "\n", ";")):
+        raw_parts = text.replace("\n", ",").replace(";", ",").split(",")
+    else:
+        raw_parts = [text]
+
+    normalized: list[str] = []
+    for part in raw_parts:
+        name = part.strip().strip("\"'`")
+        if name:
+            normalized.append(name)
+    return normalized
 
 
 def get_scene_info(ctx: Context) -> str:
@@ -34,27 +68,43 @@ def get_object_info(ctx: Context, object_name: str) -> str:
         return f"Error getting object info: {str(exc)}"
 
 
-def get_viewport_screenshot(ctx: Context, max_size: int = 800) -> Image:
-    """Capture a screenshot of the current Blender viewport."""
+def delete_objects(
+    ctx: Context,
+    object_names: list[str] | str,
+    mode: str = "cascade",
+    strict: bool = True,
+    dry_run: bool = False,
+    ignore_missing: bool = False,
+    name_match_mode: str = "exact",
+) -> str:
+    """Delete Blender objects with hierarchy-aware semantics.
+
+    Modes:
+    - cascade: delete requested objects and all descendants
+    - detach_keep_world: keep descendants, unparent to world while preserving world transform
+    - reparent_to_parent_keep_world: keep descendants, reparent to deleted object's parent
+    Name matching:
+    - exact: exact object name lookup
+    - contains: case-insensitive contains lookup (exact-normalized match preferred)
+    """
     try:
+        normalized_names = _normalize_object_names(object_names)
         blender = runtime.get_blender_connection(logger)
-        temp_dir = tempfile.gettempdir()
-        temp_path = os.path.join(temp_dir, f"blender_screenshot_{os.getpid()}.png")
         result = blender.send_command(
-            "get_viewport_screenshot",
-            {"max_size": max_size, "filepath": temp_path, "format": "png"},
+            "delete_objects",
+            {
+                "object_names": normalized_names,
+                "mode": mode,
+                "strict": strict,
+                "dry_run": dry_run,
+                "ignore_missing": ignore_missing,
+                "name_match_mode": name_match_mode,
+            },
         )
-        if "error" in result:
-            raise Exception(result["error"])
-        if not os.path.exists(temp_path):
-            raise Exception("Screenshot file was not created")
-        with open(temp_path, "rb") as handle:
-            image_bytes = handle.read()
-        os.remove(temp_path)
-        return Image(data=image_bytes, format="png")
+        return json.dumps(result, indent=2)
     except Exception as exc:
-        logger.error("Error capturing screenshot: %s", str(exc))
-        raise Exception(f"Screenshot failed: {str(exc)}")
+        logger.error("Error deleting objects from Blender: %s", str(exc))
+        return f"Error deleting objects: {str(exc)}"
 
 
 def execute_blender_code(ctx: Context, code: str) -> str:

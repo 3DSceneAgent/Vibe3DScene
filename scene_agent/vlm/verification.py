@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import os
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from langchain_core.messages import HumanMessage
 
@@ -11,10 +13,37 @@ from scene_agent.config import get_settings
 from scene_agent.vlm import get_vlm_provider
 
 
+def _resolve_local_renders_path(reference: str) -> str | None:
+    normalized = reference.strip()
+    if not normalized:
+        return None
+    parsed = urlparse(normalized)
+    render_path = parsed.path if parsed.scheme and parsed.netloc else normalized
+    if not render_path.startswith("/renders/"):
+        return None
+    filename = unquote(render_path.replace("/renders/", "", 1).strip("/"))
+    if not filename:
+        return None
+    from scene_agent.utils.rendering import RENDERS_DIR
+
+    candidate = os.path.join(str(RENDERS_DIR), filename)
+    return candidate if os.path.exists(candidate) else None
+
+
 def _image_to_data_url(path: str) -> str:
-    mime, _ = mimetypes.guess_type(path)
+    normalized = path.strip()
+    if normalized.startswith("data:"):
+        return normalized
+    if normalized.startswith("file://"):
+        normalized = normalized.replace("file://", "", 1)
+    resolved_local_renders_path = _resolve_local_renders_path(normalized)
+    if resolved_local_renders_path:
+        normalized = resolved_local_renders_path
+    elif normalized.startswith("http://") or normalized.startswith("https://"):
+        return normalized
+    mime, _ = mimetypes.guess_type(normalized)
     mime = mime or "image/png"
-    with open(path, "rb") as handle:
+    with open(normalized, "rb") as handle:
         payload = handle.read()
     encoded = base64.b64encode(payload).decode("ascii")
     return f"data:{mime};base64,{encoded}"

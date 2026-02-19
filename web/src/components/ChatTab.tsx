@@ -2,7 +2,8 @@ import type { Thread } from '../state/types'
 import { MessageList } from './MessageList'
 import { ChatComposer } from './ChatComposer'
 import { ReferenceImageStrip } from './ReferenceImageStrip'
-import type { ReferenceImage, VlmProviderOption } from '../api/types'
+import { GraphTimeline } from './GraphTimeline'
+import type { GraphNodeStream, ReferenceImage, VlmProviderOption } from '../api/types'
 
 type ChatTabProps = {
   thread: Thread | null
@@ -25,6 +26,7 @@ type ChatTabProps = {
   vlmError?: string | null
   vlmLocked?: boolean
   onVlmSelectionChange?: (provider: string, model: string) => void
+  graphEvents?: GraphNodeStream[]
 }
 
 type VlmSelectionOption = {
@@ -58,7 +60,8 @@ export function ChatTab({
   vlmLoading = false,
   vlmError = null,
   vlmLocked = false,
-  onVlmSelectionChange
+  onVlmSelectionChange,
+  graphEvents = []
 }: ChatTabProps) {
   if (!thread) {
     return <div className="empty-state">Create a conversation to begin.</div>
@@ -95,6 +98,7 @@ export function ChatTab({
           {streamStatus === 'streaming' ? 'Agent is building the scene' : 'Agent ready'}
         </span>
       </div>
+      <GraphTimeline events={graphEvents} />
       <div className="chat-scroll-area">
         <MessageList messages={thread.messages} backendUrl={backendUrl} />
       </div>

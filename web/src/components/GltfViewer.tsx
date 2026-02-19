@@ -491,9 +491,7 @@ export function GltfViewer({
     const loadToken = loadTokenRef.current + 1
     loadTokenRef.current = loadToken
     const preservedView =
-      hasLoadedModelRef.current &&
-      !alwaysAutoFrameCameraRef.current &&
-      hasUserCameraOverrideRef.current
+      hasLoadedModelRef.current && !alwaysAutoFrameCameraRef.current
         ? cameraViewRef.current
         : null
 

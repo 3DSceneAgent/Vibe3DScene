@@ -21,7 +21,7 @@ type SceneTabProps = {
   autoFetch: boolean
   onAutoFetchChange: (enabled: boolean) => void
   onEnvironmentChange: (preset: EnvironmentPreset) => void
-  onFetchRenders: () => void
+  onFetchRenders: (includeLocalWork?: boolean) => void
   onFetchGltf: () => void
   onDownloadGltf: () => void
   onDownloadBlend: () => void
@@ -195,6 +195,7 @@ export function SceneTab({
   const [objectsCollapsed, setObjectsCollapsed] = useState(true)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [alwaysAutoFrameCamera, setAlwaysAutoFrameCamera] = useState(false)
+  const [includeLocalWorkRenders, setIncludeLocalWorkRenders] = useState(false)
   const isSceneActionBusy = loading.scene || loading.renders || loading.gltf
   const handleHierarchyChange = useCallback(
     (hierarchy: SceneHierarchyNode[]) => onHierarchyChange(threadId, hierarchy),
@@ -276,7 +277,11 @@ export function SceneTab({
     <div className="scene-tab scene-pane">
       <div className="scene-action-bar">
         <div className="scene-actions-left">
-          <button className="primary-btn" onClick={onFetchRenders} disabled={isSceneActionBusy || !canRunActions}>
+          <button
+            className="primary-btn"
+            onClick={() => onFetchRenders(includeLocalWorkRenders)}
+            disabled={isSceneActionBusy || !canRunActions}
+          >
             Fetch Renders
           </button>
           <button className="primary-btn" onClick={onFetchGltf} disabled={isSceneActionBusy || !canRunActions}>
@@ -314,7 +319,13 @@ export function SceneTab({
         </div>
       )}
 
-      <RenderGallery renders={renders} isLoading={loading.renders} backendUrl={backendUrl} />
+      <RenderGallery
+        renders={renders}
+        isLoading={loading.renders}
+        backendUrl={backendUrl}
+        includeLocalWork={includeLocalWorkRenders}
+        onIncludeLocalWorkChange={setIncludeLocalWorkRenders}
+      />
 
       <div className="scene-core-shell">{coreLayout(false)}</div>
 

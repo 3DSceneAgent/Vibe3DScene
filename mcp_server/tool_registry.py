@@ -26,20 +26,18 @@ from mcp_server.tools.asset_retrieval.sketchfab import (
     search_sketchfab_models,
 )
 from mcp_server.tools.base import (
+    delete_objects,
     execute_blender_code,
     get_object_info,
     get_scene_info,
-    get_viewport_screenshot,
     import_glb_model,
 )
-from mcp_server.tools.memory.session_tools import (
-    get_session_persistence_status,
-    undo_last_snapshot,
-)
+from mcp_server.tools.memory.session_tools import undo_last_snapshot
 from mcp_server.tools.multimodal.camera_tools import (
     camera_act,
     camera_observe,
     camera_set_pose,
+    observe_scene_global,
     render_from_camera,
     render_from_objects,
 )
@@ -115,7 +113,7 @@ def register_mcp_tools(mcp, logger) -> list[str]:
     ] = [
         (get_scene_info, None, None, None),
         (get_object_info, None, None, None),
-        (get_viewport_screenshot, None, None, None),
+        (delete_objects, None, None, None),
         (execute_blender_code, None, None, None),
         (search_polyhaven_assets, None, None, None),
         (download_polyhaven_asset, None, None, None),
@@ -204,8 +202,8 @@ def register_mcp_tools(mcp, logger) -> list[str]:
         (camera_set_pose, None, None, None),
         (camera_observe, None, None, None),
         (camera_act, None, None, None),
+        (observe_scene_global, None, None, None),
         (undo_last_snapshot, None, None, None),
-        (get_session_persistence_status, None, None, None),
     ]
 
     enabled: list[str] = []

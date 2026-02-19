@@ -29,6 +29,33 @@ async def fake_get_failing_agent(_thread_id=None):
     return FailingAgent()
 
 
+class UpdatesAgent:
+    async def astream(self, *_args, **_kwargs):
+        yield ("messages", [{"type": "ai", "content": "hello"}])
+        yield (
+            "updates",
+            {
+                "verify": {
+                    "messages": [
+                        {
+                            "type": "tool",
+                            "name": "verification",
+                            "content": {"status": "match", "reason": "ok"},
+                        }
+                    ],
+                    "last_verified_path": "/renders/test.jpg",
+                },
+                "todo_check": {
+                    "todo_check": {"status": "continue", "reason": "pending_todos"},
+                },
+            },
+        )
+
+
+async def fake_get_updates_agent(_thread_id=None):
+    return UpdatesAgent()
+
+
 def test_chat_stream_sse(monkeypatch):
     monkeypatch.setattr(api_module, "get_agent", fake_get_agent)
     client = TestClient(api_module.app)
@@ -52,6 +79,27 @@ def test_chat_stream_sse(monkeypatch):
     assert deltas[:2] == ["hello", " world"]
     assert tool_payloads
     assert tool_payloads[0].get("scene_has_change") is True
+
+
+def test_chat_stream_emits_graph_node_events_and_update_messages(monkeypatch):
+    monkeypatch.setattr(api_module, "get_agent", fake_get_updates_agent)
+    client = TestClient(api_module.app)
+
+    with client.stream("POST", "/chat/stream", json={"message": "hi", "thread_id": "t-updates"}) as response:
+        assert response.status_code == 200
+        payloads = collect_sse_payloads(response.iter_lines())
+
+    graph_node_payloads = [payload for payload in payloads if payload.get("event") == "graph_node"]
+    assert graph_node_payloads
+    node_names = [payload.get("graph_node", {}).get("node") for payload in graph_node_payloads]
+    assert "verify" in node_names
+    assert "todo_check" in node_names
+
+    tool_payloads = [
+        payload for payload in payloads if "messages" in payload and payload["messages"][0].get("type") == "tool"
+    ]
+    assert tool_payloads
+    assert tool_payloads[0]["messages"][0].get("name") == "verification"
 
 
 def test_chat_stream_emits_done(monkeypatch):

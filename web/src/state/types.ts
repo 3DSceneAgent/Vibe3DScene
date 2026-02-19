@@ -1,4 +1,4 @@
-import type { ReferenceImage, RenderImage, SceneInfo, TodoItem } from '../api/types'
+import type { GraphNodeStream, ReferenceImage, RenderImage, SceneInfo, TodoItem } from '../api/types'
 
 export type MessageRole = 'user' | 'assistant' | 'tool'
 export type MessageStatus = 'streaming' | 'final' | 'error'
@@ -46,6 +46,7 @@ export type Thread = {
   sceneHierarchy?: SceneHierarchyNode[]
   sceneHasChange?: boolean
   referenceImages?: ReferenceImage[]
+  graphEvents?: GraphNodeStream[]
 }
 
 export type ThemeId = 'dark' | 'light'

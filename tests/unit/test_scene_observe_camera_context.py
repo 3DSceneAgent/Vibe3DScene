@@ -63,6 +63,125 @@ def test_update_scene_cameras_uses_injected_sender_without_runtime(monkeypatch):
     assert [name for name, _ in command_calls[1:]] == ["camera_observe"] * len(SCENE_CAMERA_NAMES)
 
 
+def test_update_scene_cameras_accepts_bbox_center_dimensions(monkeypatch):
+    command_calls: list[tuple[str, dict | None]] = []
+
+    def fail_runtime_lookup(_logger):
+        raise AssertionError("runtime.get_blender_connection should not be called")
+
+    def fake_process_and_save_render(
+        filepath: str,
+        thread_id: str,
+        camera_name: str,
+        *,
+        logger=None,
+    ) -> str:
+        _ = logger
+        return f"https://example.com/renders/{thread_id}/{camera_name}.png"
+
+    def fake_send_blender_command(command_type: str, params: dict | None = None) -> dict:
+        command_calls.append((command_type, params))
+        if command_type == "get_scene_info":
+            return {
+                "success": True,
+                "objects": [
+                    {
+                        "name": "Cube",
+                        "bbox": {
+                            "center": [1.0, 2.0, 0.5],
+                            "dimensions": [2.0, 4.0, 1.0],
+                        },
+                    }
+                ],
+            }
+        if command_type == "camera_observe":
+            filepath = str((params or {}).get("filepath", ""))
+            if filepath:
+                Path(filepath).write_bytes(b"fake-image")
+            return {"success": True, "filepath": filepath}
+        raise AssertionError(f"Unexpected command: {command_type}")
+
+    monkeypatch.setattr(
+        "mcp_server.tools.multimodal.camera_tools.runtime.get_blender_connection",
+        fail_runtime_lookup,
+    )
+    monkeypatch.setattr(
+        "mcp_server.tools.multimodal.camera_tools.process_and_save_render",
+        fake_process_and_save_render,
+    )
+
+    result = update_scene_cameras(
+        thread_id="thread-camera-bbox",
+        send_blender_command=fake_send_blender_command,
+    )
+
+    assert result["success"] is True
+    assert len(result["cameras"]) == len(SCENE_CAMERA_NAMES)
+    assert len(result["image_urls"]) == len(SCENE_CAMERA_NAMES)
+    assert command_calls[0][0] == "get_scene_info"
+    assert [name for name, _ in command_calls[1:]] == ["camera_observe"] * len(SCENE_CAMERA_NAMES)
+
+
+def test_update_scene_cameras_falls_back_to_scene_bbox(monkeypatch):
+    command_calls: list[tuple[str, dict | None]] = []
+
+    def fail_runtime_lookup(_logger):
+        raise AssertionError("runtime.get_blender_connection should not be called")
+
+    def fake_process_and_save_render(
+        filepath: str,
+        thread_id: str,
+        camera_name: str,
+        *,
+        logger=None,
+    ) -> str:
+        _ = logger
+        return f"https://example.com/renders/{thread_id}/{camera_name}.png"
+
+    def fake_send_blender_command(command_type: str, params: dict | None = None) -> dict:
+        command_calls.append((command_type, params))
+        if command_type == "get_scene_info":
+            return {
+                "success": True,
+                "objects": [
+                    {
+                        "name": "Camera",
+                        "type": "CAMERA",
+                    }
+                ],
+                "scene_bbox": {
+                    "center": [0.0, 0.0, 0.0],
+                    "dimensions": [3.0, 2.0, 1.0],
+                },
+            }
+        if command_type == "camera_observe":
+            filepath = str((params or {}).get("filepath", ""))
+            if filepath:
+                Path(filepath).write_bytes(b"fake-image")
+            return {"success": True, "filepath": filepath}
+        raise AssertionError(f"Unexpected command: {command_type}")
+
+    monkeypatch.setattr(
+        "mcp_server.tools.multimodal.camera_tools.runtime.get_blender_connection",
+        fail_runtime_lookup,
+    )
+    monkeypatch.setattr(
+        "mcp_server.tools.multimodal.camera_tools.process_and_save_render",
+        fake_process_and_save_render,
+    )
+
+    result = update_scene_cameras(
+        thread_id="thread-camera-scene-bbox",
+        send_blender_command=fake_send_blender_command,
+    )
+
+    assert result["success"] is True
+    assert len(result["cameras"]) == len(SCENE_CAMERA_NAMES)
+    assert len(result["image_urls"]) == len(SCENE_CAMERA_NAMES)
+    assert command_calls[0][0] == "get_scene_info"
+    assert [name for name, _ in command_calls[1:]] == ["camera_observe"] * len(SCENE_CAMERA_NAMES)
+
+
 def test_scene_observe_node_invalidates_render_path_on_failure(monkeypatch):
     """
     Regression test: when scene_observe_node detects a scene-mutating tool
@@ -146,3 +265,34 @@ def test_scene_observe_node_invalidates_render_path_on_exception(monkeypatch):
 
     # Should invalidate the stale render path
     assert result == {"last_render_path": None}
+
+
+def test_scene_observe_node_treats_delete_objects_as_scene_mutation(monkeypatch):
+    def fake_update_scene_cameras(*args, **kwargs):
+        return {
+            "success": True,
+            "scene_bbox": {"center": [0.0, 0.0, 0.0], "dimensions": [1.0, 1.0, 1.0]},
+            "cameras": [
+                {
+                    "camera_name": "SceneCamera_NE",
+                    "image_url": "https://example.com/renders/scene_ne.png",
+                }
+            ],
+            "image_urls": ["https://example.com/renders/scene_ne.png"],
+        }
+
+    monkeypatch.setattr(
+        "mcp_server.tools.multimodal.camera_tools.update_scene_cameras",
+        fake_update_scene_cameras,
+    )
+
+    state: AgentState = {
+        "thread_id": "test-thread",
+        "last_tool_batch_names": ["delete_objects"],
+        "messages": [],
+    }
+
+    result = scene_observe_node(state)
+
+    assert result.get("last_render_source") == "scene_observe"
+    assert result.get("last_render_path") == "https://example.com/renders/scene_ne.png"

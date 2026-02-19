@@ -185,9 +185,15 @@ export async function getTodos(baseUrl: string, threadId: string): Promise<TodoI
 export async function getSceneRenders(
   baseUrl: string,
   threadId: string,
+  includeLocalWork: boolean = false,
   signal?: AbortSignal
 ): Promise<RenderImage[]> {
-  const response = await fetch(`${baseUrl}/scene/${threadId}/renders`, { signal })
+  const query = new URLSearchParams()
+  if (includeLocalWork) {
+    query.set('include_local_work', 'true')
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : ''
+  const response = await fetch(`${baseUrl}/scene/${threadId}/renders${suffix}`, { signal })
   if (!response.ok) {
     throw new Error(`Failed to load renders (${response.status})`)
   }

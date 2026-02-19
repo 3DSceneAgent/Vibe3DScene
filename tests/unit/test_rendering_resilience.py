@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image as PILImage
 
 from mcp_server.tools.multimodal import camera_tools
 from scene_agent.blender.connection import BlenderCommandError, BlenderConnection
@@ -51,3 +52,95 @@ def test_blender_connection_preserves_command_error(monkeypatch):
 
     with pytest.raises(BlenderCommandError, match="No valid mesh objects found"):
         connection.send_command("render_from_objects", {"object_names": ["x"]})
+
+
+def test_observe_scene_global_returns_multi_view_markdown(monkeypatch):
+    monkeypatch.setattr(
+        camera_tools,
+        "update_scene_cameras",
+        lambda **kwargs: {
+            "success": True,
+            "scene_bbox": {"center": [0.0, 0.0, 0.5], "dimensions": [2.0, 2.0, 1.0]},
+            "cameras": [
+                {
+                    "camera_name": "SceneCamera_NE",
+                    "image_url": "https://example.test/ne.png",
+                },
+                {
+                    "camera_name": "SceneCamera_NW",
+                    "image_url": "https://example.test/nw.png",
+                },
+            ],
+            "image_urls": ["https://example.test/ne.png", "https://example.test/nw.png"],
+        },
+    )
+
+    ctx = SimpleNamespace(request_context={"thread_id": "thread-global-observe"})
+    result = camera_tools.observe_scene_global(ctx=ctx)
+
+    assert result.isError is False
+    assert result.content
+    payload = str(result.content[0])
+    assert "SceneCamera_NE" in payload
+    assert "https://example.test/ne.png" in payload
+    assert "scene_bbox.center" in payload
+
+
+def test_observe_scene_global_builds_grid_for_local_render_urls(monkeypatch):
+    filenames = []
+    for idx, color in enumerate(((255, 20, 20), (20, 255, 20), (20, 20, 255), (230, 200, 40))):
+        filename = f"observe_grid_src_{idx}.png"
+        image_path = camera_tools.RENDERS_DIR / filename
+        PILImage.new("RGB", (48, 32), color=color).save(image_path, format="PNG")
+        filenames.append(filename)
+
+    try:
+        monkeypatch.setattr(
+            camera_tools,
+            "update_scene_cameras",
+            lambda **kwargs: {
+                "success": True,
+                "scene_bbox": {"center": [0.0, 0.0, 0.5], "dimensions": [2.0, 2.0, 1.0]},
+                "cameras": [
+                    {"camera_name": "SceneCamera_NE", "image_url": f"/renders/{filenames[0]}"},
+                    {"camera_name": "SceneCamera_NW", "image_url": f"/renders/{filenames[1]}"},
+                    {"camera_name": "SceneCamera_SE", "image_url": f"/renders/{filenames[2]}"},
+                    {"camera_name": "SceneCamera_SW", "image_url": f"/renders/{filenames[3]}"},
+                ],
+            },
+        )
+        monkeypatch.setattr(
+            camera_tools,
+            "process_and_save_render",
+            lambda filepath, thread_id, camera_name, logger=None: f"/renders/{camera_name}_grid.jpg",
+        )
+
+        ctx = SimpleNamespace(request_context={"thread_id": "thread-global-grid"})
+        result = camera_tools.observe_scene_global(ctx=ctx)
+
+        assert result.isError is False
+        assert result.content
+        payload = str(result.content[0])
+        assert "SceneGlobalGrid" in payload
+        assert "/renders/SceneGlobalGrid_grid.jpg" in payload
+        assert "Captured views:" in payload
+    finally:
+        for filename in filenames:
+            try:
+                (camera_tools.RENDERS_DIR / filename).unlink()
+            except OSError:
+                pass
+
+
+def test_observe_scene_global_gracefully_reports_failure(monkeypatch):
+    monkeypatch.setattr(
+        camera_tools,
+        "update_scene_cameras",
+        lambda **kwargs: {"success": False, "error": "No mesh objects with bounding boxes found"},
+    )
+
+    ctx = SimpleNamespace(request_context={"thread_id": "thread-global-observe-fail"})
+    result = camera_tools.observe_scene_global(ctx=ctx)
+
+    assert result.isError is False
+    assert "Global scene observation failed" in str(result.content[0])

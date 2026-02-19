@@ -28,17 +28,18 @@ from mcp_server.tools.asset_retrieval import (
     set_texture,
 )
 from mcp_server.tools.base import (
+    delete_objects,
     execute_blender_code,
     get_object_info,
     get_scene_info,
-    get_viewport_screenshot,
     import_glb_model,
 )
-from mcp_server.tools.memory import get_session_persistence_status, undo_last_snapshot
+from mcp_server.tools.memory import undo_last_snapshot
 from mcp_server.tools.multimodal import (
     camera_act,
     camera_observe,
     camera_set_pose,
+    observe_scene_global,
     render_from_camera,
     render_from_objects,
 )
@@ -50,6 +51,8 @@ __all__ = [
     "camera_act",
     "camera_observe",
     "camera_set_pose",
+    "observe_scene_global",
+    "delete_objects",
     "download_polyhaven_asset",
     "download_sketchfab_model",
     "execute_blender_code",
@@ -61,9 +64,7 @@ __all__ = [
     "get_infinigen_available_assets",
     "get_object_info",
     "get_scene_info",
-    "get_session_persistence_status",
     "get_sketchfab_model_preview",
-    "get_viewport_screenshot",
     "import_generated_asset",
     "import_glb_model",
     "import_retrieved_asset",

@@ -57,6 +57,7 @@ function sanitizeThreads(threads: Thread[]): Thread[] {
       gltfUrl: null,
       sceneHierarchy: [],
       sceneHasChange: false,
+      graphEvents: [],
       referenceImages:
         thread.referenceImages?.map((image) => {
           const sanitizedImage = { ...image }

@@ -219,7 +219,7 @@ def _prepare_scene(bpy: Any, blend_path: str | None) -> None:
         if "Color" in background.inputs:
             background.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
         if "Strength" in background.inputs:
-            background.inputs["Strength"].default_value = 1.0
+            background.inputs["Strength"].default_value = 0.15
 
         has_background_link = any(
             link.from_node == background and link.to_node == world_output
@@ -227,7 +227,7 @@ def _prepare_scene(bpy: Any, blend_path: str | None) -> None:
         )
         if not has_background_link:
             node_tree.links.new(background.outputs["Background"], world_output.inputs["Surface"])
-        print("Configured world environment light with strength=1.0")
+        print("Configured world environment light with strength=0.15")
     except Exception as exc:
         print(f"Failed to configure world environment light: {exc}")
 

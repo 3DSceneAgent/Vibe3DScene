@@ -607,6 +607,80 @@ a.sidebar-icon-btn {
   min-height: 0;
 }
 
+.graph-timeline {
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: rgba(13, 16, 24, 0.68);
+  padding: 10px 12px;
+}
+
+.graph-timeline-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.graph-timeline-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.graph-timeline-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.graph-timeline-count {
+  font-size: 11px;
+  color: var(--color-muted);
+}
+
+.graph-timeline-list {
+  margin-top: 8px;
+  max-height: 110px;
+  min-height: 72px;
+  overflow-y: auto;
+  display: grid;
+  gap: 8px;
+  padding-right: 2px;
+}
+
+.graph-timeline-item {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: rgba(10, 13, 20, 0.72);
+  padding: 8px 10px;
+}
+
+.graph-timeline-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.graph-timeline-step {
+  font-size: 11px;
+  color: var(--color-muted);
+}
+
+.graph-timeline-node {
+  font-size: 12px;
+  font-weight: 600;
+  color: #d8e8ff;
+}
+
+.graph-timeline-keys,
+.graph-timeline-meta {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--color-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .chat-scroll-area {
   flex: 1;
   min-height: 0;

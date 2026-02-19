@@ -164,6 +164,40 @@ def _extract_graph_step_events(mode: str | None, payload: Any) -> list[dict[str,
     return steps
 
 
+def _sanitize_graph_state_patch(update: dict[str, Any]) -> dict[str, Any]:
+    patch: dict[str, Any] = {}
+    for key, value in update.items():
+        if key == "messages":
+            continue
+        patch[key] = _sanitize_stream_value(value)
+    return patch
+
+
+def _build_graph_node_event_payload(
+    *,
+    request_id: str,
+    thread_id: str,
+    node_name: str,
+    step_index: int,
+    update: dict[str, Any],
+) -> dict[str, Any]:
+    event_payload: dict[str, Any] = {
+        "event": "graph_node",
+        "graph_node": {
+            "request_id": request_id,
+            "thread_id": thread_id,
+            "node": node_name,
+            "step_index": step_index,
+            "update_keys": sorted(update.keys()),
+            "state_patch": _sanitize_graph_state_patch(update),
+        },
+    }
+    messages = update.get("messages")
+    if isinstance(messages, list):
+        event_payload["graph_node"]["message_count"] = len(messages)
+    return event_payload
+
+
 def _headless_timeout_seconds_for_session(settings: Any, session: Any | None = None) -> float:
     # Scene/render export operations are frequently heavier than tool RPCs.
     base_timeout = max(1.0, float(getattr(settings, "headless_request_timeout_seconds", 15)))
@@ -1030,7 +1064,9 @@ async def _render_scene_level_views(
                 "focal_length": _SCENE_LEVEL_RENDER_FOCAL_MM,
                 "azimuth": azimuth,
                 "elevation": _SCENE_LEVEL_RENDER_ELEVATION,
-                "reuse_cameras": False,
+                "reuse_cameras": True,
+                "camera_name": camera_name,
+                "camera_kind": "scene_level",
                 "filepath": temp_path,
             },
             thread_id,
@@ -1459,6 +1495,7 @@ async def chat_stream(request: ChatRequest, request_http: Request):
         request_id = f"{request.thread_id}:{int(time.time() * 1000)}"
         saw_message_stream = False
         saw_new_message = False
+        graph_step_index = 0
         existing_message_ids: set[str] = set()
         last_assistant_text: str | None = None
         scene_has_change = False
@@ -1542,9 +1579,38 @@ async def chat_stream(request: ChatRequest, request_http: Request):
                 if isinstance(payload, dict) and "todos" in payload and payload["todos"]:
                     yield f"data: {json.dumps({'todos': payload['todos']}, default=str)}\n\n"
 
+                update_mode_messages: list[Any] = []
+                if mode == "updates" and isinstance(payload, dict):
+                    for node_name, node_update in payload.items():
+                        if not isinstance(node_name, str) or not node_name:
+                            continue
+                        if not isinstance(node_update, dict):
+                            continue
+                        graph_step_index += 1
+                        graph_event_payload = _build_graph_node_event_payload(
+                            request_id=request_id,
+                            thread_id=request.thread_id,
+                            node_name=node_name,
+                            step_index=graph_step_index,
+                            update=node_update,
+                        )
+                        yield f"data: {json.dumps(graph_event_payload, default=str)}\n\n"
+
+                        todos_payload = node_update.get("todos")
+                        if isinstance(todos_payload, list) and len(todos_payload) > 0:
+                            yield f"data: {json.dumps({'todos': todos_payload}, default=str)}\n\n"
+
+                        node_messages = node_update.get("messages")
+                        if isinstance(node_messages, list):
+                            update_mode_messages.extend(node_messages)
+                        elif node_messages is not None:
+                            update_mode_messages.append(node_messages)
+
                 messages = None
                 if is_message_stream:
                     messages = payload if mode == "messages" else [mode]
+                elif update_mode_messages:
+                    messages = update_mode_messages
                 elif isinstance(payload, dict) and "messages" in payload:
                     if not saw_message_stream:
                         messages = payload["messages"]
@@ -1561,8 +1627,11 @@ async def chat_stream(request: ChatRequest, request_http: Request):
                         if message_type in {"human", "system"}:
                             continue
                         if message_type == "tool":
-                            payload = {"messages": [serialized_stream], "scene_has_change": scene_has_change}
-                            yield f"data: {json.dumps(payload, default=str)}\n\n"
+                            tool_event_payload = {
+                                "messages": [serialized_stream],
+                                "scene_has_change": scene_has_change,
+                            }
+                            yield f"data: {json.dumps(tool_event_payload, default=str)}\n\n"
                             continue
                         message_id = serialized_stream.get("id")
                         if isinstance(message_id, str) and message_id in existing_message_ids:
@@ -1582,8 +1651,8 @@ async def chat_stream(request: ChatRequest, request_http: Request):
                             event_payload = {"delta": delta, "message_id": message_id}
                             yield f"data: {json.dumps(event_payload, default=str)}\n\n"
                         else:
-                            payload = {"messages": [serialized_stream]}
-                            yield f"data: {json.dumps(payload, default=str)}\n\n"
+                            message_event_payload = {"messages": [serialized_stream]}
+                            yield f"data: {json.dumps(message_event_payload, default=str)}\n\n"
 
             done_payload = {"event": "done", "scene_has_change": scene_has_change}
             get_session_coordinator().touch_activity(request.thread_id)
@@ -1725,6 +1794,7 @@ async def get_scene_renders(
     request: Request,
     response: Response,
     mode: str = "rgb",
+    include_local_work: bool = False,
 ):
     """
     Render all cameras in the current Blender scene and return processed image URLs.
@@ -1853,6 +1923,141 @@ async def get_scene_renders(
                     "image_url": image_url
                 })
 
+        if include_local_work:
+            existing_camera_names = {
+                entry.get("camera_name")
+                for entry in renders
+                if isinstance(entry, dict) and isinstance(entry.get("camera_name"), str)
+            }
+            local_work_camera_names: list[str] = []
+            list_call = asyncio.to_thread(
+                send_blender_command_sync,
+                "get_camera_manager_cameras",
+                {
+                    "only_local": True,
+                    "include_invalid": False,
+                },
+                thread_id,
+            )
+            try:
+                if settings.blender_mode == "headless":
+                    camera_listing = await asyncio.wait_for(list_call, timeout=request_timeout_seconds)
+                else:
+                    camera_listing = await list_call
+            except asyncio.TimeoutError as exc:
+                elapsed_value = elapsed_ms(start_time)
+                diagnostics = build_headless_diagnostics(
+                    session=session,
+                    request_id=request_id,
+                    elapsed_ms_value=elapsed_value,
+                    status="timeout",
+                    target_ms=int(request_timeout_seconds * 1000),
+                )
+                log_event("error", "headless_local_work_camera_list_timeout", diagnostics)
+                _restart_headless_session_after_timeout(thread_id)
+                raise HTTPException(
+                    status_code=504,
+                    detail={"error": "Headless local-work camera listing timed out.", **diagnostics},
+                ) from exc
+            except Exception as exc:
+                log_event(
+                    "warning",
+                    "local_work_camera_list_failed",
+                    {"thread_id": thread_id, "error": str(exc)},
+                )
+                camera_listing = {}
+
+            if isinstance(camera_listing, dict):
+                raw_camera_entries = camera_listing.get("cameras")
+                if isinstance(raw_camera_entries, list):
+                    for entry in raw_camera_entries:
+                        if not isinstance(entry, dict):
+                            continue
+                        camera_name = entry.get("camera_name")
+                        camera_kind = entry.get("camera_kind")
+                        if (
+                            isinstance(camera_name, str)
+                            and camera_name
+                            and camera_name not in existing_camera_names
+                            and camera_kind == "local_work"
+                        ):
+                            local_work_camera_names.append(camera_name)
+
+            for camera_name in local_work_camera_names:
+                temp_path = os.path.join(
+                    tempfile.gettempdir(),
+                    f"blender_render_local_work_{camera_name}_{int(time.time() * 1000)}.png"
+                )
+                render_call = asyncio.to_thread(
+                    send_blender_command_sync,
+                    "render_from_camera",
+                    {
+                        "camera_name": camera_name,
+                        "object_names": None,
+                        "mode": mode,
+                        "filepath": temp_path
+                    },
+                    thread_id
+                )
+                if settings.blender_mode == "headless":
+                    try:
+                        result = await asyncio.wait_for(render_call, timeout=request_timeout_seconds)
+                    except asyncio.TimeoutError as exc:
+                        elapsed_value = elapsed_ms(start_time)
+                        diagnostics = build_headless_diagnostics(
+                            session=session,
+                            request_id=request_id,
+                            elapsed_ms_value=elapsed_value,
+                            status="timeout",
+                            target_ms=int(request_timeout_seconds * 1000),
+                        )
+                        log_event(
+                            "error",
+                            "headless_local_work_render_timeout",
+                            {**diagnostics, "camera_name": camera_name},
+                        )
+                        _restart_headless_session_after_timeout(thread_id)
+                        raise HTTPException(
+                            status_code=504,
+                            detail={"error": "Headless local-work camera render timed out.", **diagnostics},
+                        ) from exc
+                    except Exception as exc:
+                        log_event(
+                            "warning",
+                            "local_work_render_failed",
+                            {"thread_id": thread_id, "camera_name": camera_name, "error": str(exc)},
+                        )
+                        continue
+                else:
+                    try:
+                        result = await render_call
+                    except Exception as exc:
+                        log_event(
+                            "warning",
+                            "local_work_render_failed",
+                            {"thread_id": thread_id, "camera_name": camera_name, "error": str(exc)},
+                        )
+                        continue
+
+                filepath = result.get("filepath") or temp_path
+                if not os.path.exists(filepath):
+                    continue
+                image_url = process_and_save_render(
+                    filepath,
+                    thread_id,
+                    camera_name,
+                    log_event=log_event,
+                )
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
+                renders.append({
+                    "camera_name": camera_name,
+                    "image_url": image_url,
+                })
+                existing_camera_names.add(camera_name)
+
         if settings.blender_mode == "headless":
             elapsed_value = elapsed_ms(start_time)
             diagnostics = build_headless_diagnostics(
@@ -1863,7 +2068,12 @@ async def get_scene_renders(
                 target_ms=int(request_timeout_seconds * 1000),
             )
             log_event("info", "headless_renders_ok", diagnostics)
-        payload = {"thread_id": thread_id, "renders": renders, "diagnostics": diagnostics}
+        payload = {
+            "thread_id": thread_id,
+            "renders": renders,
+            "diagnostics": diagnostics,
+            "include_local_work": bool(include_local_work),
+        }
         _set_owner_headers(response, resolution)
         return payload
     except Exception as e:

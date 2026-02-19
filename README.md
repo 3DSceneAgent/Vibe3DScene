@@ -170,9 +170,9 @@ python main.py --mode cli
 
 | Category | Tools |
 | --- | --- |
-| Scene inspection and control | `get_scene_info`, `get_object_info`, `get_viewport_screenshot`, `execute_blender_code`, `import_glb_model` |
+| Scene inspection and control | `get_scene_info`, `get_object_info`, `observe_scene_global`, `execute_blender_code`, `import_glb_model` |
 | Camera and Rendering | `render_from_objects`, `render_from_camera`, `camera_observe`, `camera_act`, `camera_set_pose` |
-| Session Persistence | `undo_last_snapshot`, `get_session_persistence_status` |
+| Session Persistence | `undo_last_snapshot` |
 | PolyHaven | `search_polyhaven_assets`, `download_polyhaven_asset`, `set_texture` |
 | Objaverse Retrieval | `search_3d_assets_by_text`, `import_retrieved_asset` |
 | Sketchfab | `search_sketchfab_models`, `get_sketchfab_model_preview`, `download_sketchfab_model` |

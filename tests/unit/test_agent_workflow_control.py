@@ -2,8 +2,11 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from scene_agent.agent.graph import _route_after_post_agent, _route_after_todo_check
 from scene_agent.agent.nodes import (
+    _RENDER_VISION_MESSAGE_ID,
+    _SCENE_OBSERVE_MESSAGE_ID,
     _latest_human_message,
     checkpoint_gate_node,
+    finalize_node,
     post_agent_node,
     scene_observe_node,
     todo_check_node,
@@ -162,6 +165,29 @@ def test_route_after_post_agent_finalizes_after_retry_budget_exhausted():
     assert next_node == "checkpoint_finalize"
 
 
+def test_finalize_node_emits_summary_message():
+    result = finalize_node(
+        {
+            "agent_decision": {"should_call_tools": False},
+            "todo_check": {
+                "status": "completed",
+                "reason": "all_todos_terminal",
+                "pending_count": 0,
+                "in_progress_count": 0,
+                "completed_count": 2,
+                "failed_count": 0,
+            },
+            "messages": [],
+        }
+    )
+    assert result["agent_decision"]["workflow_status"] == "finished"
+    assert result["agent_decision"]["finish_reason"] == "todos_completed"
+    assert "messages" in result
+    assert len(result["messages"]) == 1
+    assert isinstance(result["messages"][0], AIMessage)
+    assert "Scene workflow finished" in result["messages"][0].content
+
+
 def test_scene_observe_node_routes_commands_via_api_sender(monkeypatch):
     calls: list[tuple[str, dict | None, str | None]] = []
 
@@ -225,6 +251,7 @@ def test_latest_human_message_skips_internal_render_and_scene_observe_messages()
         "messages": [
             HumanMessage(content="Create a red chair beside a wooden table."),
             HumanMessage(
+                id=_RENDER_VISION_MESSAGE_ID,
                 content=[
                     {"type": "text", "text": "Latest render from tool call."},
                     {
@@ -232,10 +259,9 @@ def test_latest_human_message_skips_internal_render_and_scene_observe_messages()
                         "image_url": {"url": "https://example.com/agent_render.png"},
                     },
                 ],
-                additional_kwargs={"internal_source": "tool_render_observe"},
             ),
-            # Legacy untagged message should still be ignored by prefix match.
             HumanMessage(
+                id=_SCENE_OBSERVE_MESSAGE_ID,
                 content=[
                     {
                         "type": "text",
@@ -245,7 +271,7 @@ def test_latest_human_message_skips_internal_render_and_scene_observe_messages()
                         "type": "image_url",
                         "image_url": {"url": "https://example.com/scene_ne.png"},
                     },
-                ]
+                ],
             ),
         ]
     }

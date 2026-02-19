@@ -6,12 +6,14 @@ import os
 import tempfile
 import time
 from typing import Any, Callable, Optional
+from urllib.parse import unquote, urlparse
 
 from mcp.server.fastmcp import Context
 from mcp.types import CallToolResult
+from PIL import Image as PILImage
 
 from mcp_server import runtime
-from scene_agent.utils.rendering import process_and_save_render
+from scene_agent.utils.rendering import RENDERS_DIR, process_and_save_render
 
 logger = logging.getLogger("BlenderMCPServer")
 BlenderCommandSender = Callable[[str, dict[str, Any] | None], dict[str, Any]]
@@ -25,10 +27,76 @@ _SCENE_CAMERA_ELEVATION = 30.0  # degrees
 _SCENE_CAMERA_FOCAL_MM = 50.0
 _SCENE_CAMERA_SENSOR_WIDTH = 36.0
 _SCENE_CAMERA_DISTANCE_MARGIN = 1.5
+_SCENE_GRID_CAMERA_NAME = "SceneGlobalGrid"
+
+
+def _coerce_xyz(value: Any) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        return None
+    try:
+        return [float(value[0]), float(value[1]), float(value[2])]
+    except (TypeError, ValueError):
+        return None
+
+
+def _center_dimensions_to_min_max(
+    center: Any,
+    dimensions: Any,
+) -> tuple[list[float], list[float]] | None:
+    center_xyz = _coerce_xyz(center)
+    dims_xyz = _coerce_xyz(dimensions)
+    if center_xyz is None or dims_xyz is None:
+        return None
+    half = [max(value, 0.0) / 2.0 for value in dims_xyz]
+    bbox_min = [center_xyz[i] - half[i] for i in range(3)]
+    bbox_max = [center_xyz[i] + half[i] for i in range(3)]
+    return bbox_min, bbox_max
+
+
+def _extract_bbox_min_max(raw_bbox: Any) -> tuple[list[float], list[float]] | None:
+    if isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) >= 2:
+        bbox_min = _coerce_xyz(raw_bbox[0])
+        bbox_max = _coerce_xyz(raw_bbox[1])
+        if bbox_min is not None and bbox_max is not None:
+            return bbox_min, bbox_max
+        return None
+
+    if not isinstance(raw_bbox, dict):
+        return None
+
+    for min_key, max_key in (
+        ("min", "max"),
+        ("bbox_min", "bbox_max"),
+        ("min_corner", "max_corner"),
+    ):
+        bbox_min = _coerce_xyz(raw_bbox.get(min_key))
+        bbox_max = _coerce_xyz(raw_bbox.get(max_key))
+        if bbox_min is not None and bbox_max is not None:
+            return bbox_min, bbox_max
+
+    return _center_dimensions_to_min_max(
+        raw_bbox.get("center"),
+        raw_bbox.get("dimensions"),
+    )
+
+
+def _extract_object_bbox_min_max(obj: dict[str, Any]) -> tuple[list[float], list[float]] | None:
+    for key in ("world_bounding_box", "bounding_box", "bbox"):
+        if key not in obj:
+            continue
+        parsed = _extract_bbox_min_max(obj.get(key))
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def _compute_union_aabb(scene_info: dict[str, Any]) -> dict[str, Any] | None:
-    """Compute union AABB from scene_info objects that have world_bounding_box."""
+    """Compute union AABB from scene info object bounds.
+
+    Supports both:
+    - world_bounding_box: [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+    - bbox: {"center": [...], "dimensions": [...]}
+    """
     objects = scene_info.get("objects") or scene_info.get("scene_objects") or {}
     if isinstance(objects, list):
         obj_list = objects
@@ -42,14 +110,20 @@ def _compute_union_aabb(scene_info: dict[str, Any]) -> dict[str, Any] | None:
     for obj in obj_list:
         if not isinstance(obj, dict):
             continue
-        bbox = obj.get("world_bounding_box")
-        if not isinstance(bbox, (list, tuple)) or len(bbox) < 2:
+        parsed = _extract_object_bbox_min_max(obj)
+        if parsed is None:
             continue
-        bbox_min, bbox_max = bbox[0], bbox[1]
-        if len(bbox_min) < 3 or len(bbox_max) < 3:
-            continue
-        all_min.append([float(v) for v in bbox_min[:3]])
-        all_max.append([float(v) for v in bbox_max[:3]])
+        bbox_min, bbox_max = parsed
+        all_min.append(bbox_min)
+        all_max.append(bbox_max)
+
+    # Fallback to scene-level bbox if object-level bboxes are unavailable.
+    if not all_min:
+        scene_bbox = _extract_bbox_min_max(scene_info.get("scene_bbox"))
+        if scene_bbox is not None:
+            bbox_min, bbox_max = scene_bbox
+            all_min.append(bbox_min)
+            all_max.append(bbox_max)
 
     if not all_min:
         return None
@@ -131,7 +205,9 @@ def update_scene_cameras(
                 "focal_length": _SCENE_CAMERA_FOCAL_MM,
                 "azimuth": azimuth,
                 "elevation": _SCENE_CAMERA_ELEVATION,
-                "reuse_cameras": False,
+                "reuse_cameras": True,
+                "camera_name": cam_name,
+                "camera_kind": "scene_level",
                 "filepath": temp_path,
             },
         )
@@ -169,6 +245,84 @@ def update_scene_cameras(
     }
 
 
+def observe_scene_global(ctx: Context) -> CallToolResult:
+    """Capture scene-wide 4-view observation using diagnostic cameras.
+
+    Use this when the agent needs a global understanding of composition, or when
+    local renders appear unreliable (for example, blank/black outputs).
+    """
+    thread_id = _extract_thread_id(ctx)
+    try:
+        result = update_scene_cameras(thread_id=thread_id)
+    except Exception as exc:
+        logger.error("Error running global scene observation: %s", str(exc))
+        raise Exception(f"Global scene observation failed: {str(exc)}")
+
+    if not result.get("success"):
+        error_message = str(result.get("error", "unknown error"))
+        return CallToolResult(
+            content=[
+                {
+                    "type": "text",
+                    "text": (
+                        "Global scene observation failed. "
+                        f"Reason: {error_message}. "
+                        "Try get_scene_info() first, then mutate or import scene objects before retrying."
+                    ),
+                }
+            ],
+            isError=False,
+        )
+
+    cameras = result.get("cameras", [])
+    image_entries: list[tuple[str, str]] = []
+    for camera in cameras:
+        if not isinstance(camera, dict):
+            continue
+        camera_name = camera.get("camera_name")
+        image_url = camera.get("image_url")
+        if isinstance(camera_name, str) and camera_name and isinstance(image_url, str) and image_url:
+            image_entries.append((camera_name, image_url))
+
+    if not image_entries:
+        return CallToolResult(
+            content=[
+                {
+                    "type": "text",
+                    "text": (
+                        "Global scene observation completed, but no render images were produced. "
+                        "Please retry after confirming scene objects exist."
+                    ),
+                }
+            ],
+            isError=False,
+        )
+
+    scene_bbox = result.get("scene_bbox")
+    lines: list[str] = ["Global scene observation (4-view diagnostic cameras):"]
+    if isinstance(scene_bbox, dict):
+        center = scene_bbox.get("center")
+        dimensions = scene_bbox.get("dimensions")
+        if isinstance(center, list) and isinstance(dimensions, list):
+            lines.append(f"- scene_bbox.center: {center}")
+            lines.append(f"- scene_bbox.dimensions: {dimensions}")
+
+    grid_url = _build_scene_grid_image(image_entries, thread_id=thread_id)
+    lines.append("")
+    if isinstance(grid_url, str) and grid_url:
+        # Keep the grid image first so downstream markdown extraction uses it.
+        lines.append(f"2x2 grid overview: ![{_SCENE_GRID_CAMERA_NAME}]({grid_url})")
+        lines.append("")
+    lines.append("Captured views:")
+    for camera_name, image_url in image_entries:
+        lines.append(f"- {camera_name}: ![{camera_name}]({image_url})")
+
+    return CallToolResult(
+        content=[{"type": "text", "text": "\n".join(lines)}],
+        isError=False,
+    )
+
+
 def _extract_thread_id(ctx: Context) -> str:
     thread_id = "unknown"
     if hasattr(ctx, "request_context") and ctx.request_context:
@@ -177,6 +331,93 @@ def _extract_thread_id(ctx: Context) -> str:
         elif isinstance(ctx.request_context, dict):
             thread_id = ctx.request_context.get("thread_id", "unknown")
     return thread_id
+
+
+def _resolve_render_url_to_local_path(image_url: str) -> str | None:
+    if not isinstance(image_url, str):
+        return None
+    normalized = image_url.strip()
+    if not normalized:
+        return None
+    if normalized.startswith("file://"):
+        normalized = normalized.replace("file://", "", 1)
+    if os.path.exists(normalized):
+        return normalized
+
+    parsed = urlparse(normalized)
+    render_path = parsed.path if parsed.scheme and parsed.netloc else normalized
+    if not render_path.startswith("/renders/"):
+        return None
+    filename = unquote(render_path.replace("/renders/", "", 1).strip("/"))
+    if not filename:
+        return None
+    candidate = RENDERS_DIR / filename
+    if candidate.exists():
+        return str(candidate)
+    return None
+
+
+def _build_scene_grid_image(
+    image_entries: list[tuple[str, str]],
+    *,
+    thread_id: str,
+) -> str | None:
+    if len(image_entries) < 2:
+        return None
+
+    local_entries: list[tuple[str, str]] = []
+    for camera_name, image_url in image_entries[:4]:
+        local_path = _resolve_render_url_to_local_path(image_url)
+        if not local_path:
+            return None
+        local_entries.append((camera_name, local_path))
+
+    opened_images: list[PILImage.Image] = []
+    temp_grid_path: str | None = None
+    try:
+        for _camera_name, local_path in local_entries:
+            opened_images.append(PILImage.open(local_path).convert("RGB"))
+        if not opened_images:
+            return None
+
+        cell_width = max(image.width for image in opened_images)
+        cell_height = max(image.height for image in opened_images)
+        canvas = PILImage.new("RGB", (cell_width * 2, cell_height * 2), color=(24, 24, 24))
+        positions = ((0, 0), (1, 0), (0, 1), (1, 1))
+
+        for index, image in enumerate(opened_images[:4]):
+            grid_x, grid_y = positions[index]
+            tile = image
+            if tile.size != (cell_width, cell_height):
+                tile = tile.resize((cell_width, cell_height), PILImage.Resampling.LANCZOS)
+            canvas.paste(tile, (grid_x * cell_width, grid_y * cell_height))
+
+        with tempfile.NamedTemporaryFile(
+            suffix="_scene_global_grid.jpg",
+            delete=False,
+        ) as tmp_file:
+            temp_grid_path = tmp_file.name
+        canvas.save(temp_grid_path, "JPEG", quality=88, optimize=True)
+        return process_and_save_render(
+            temp_grid_path,
+            thread_id,
+            _SCENE_GRID_CAMERA_NAME,
+            logger=logger,
+        )
+    except Exception as exc:
+        logger.warning("Failed to build scene global 2x2 grid: %s", exc)
+        return None
+    finally:
+        for image in opened_images:
+            try:
+                image.close()
+            except Exception:
+                pass
+        if temp_grid_path and os.path.exists(temp_grid_path):
+            try:
+                os.remove(temp_grid_path)
+            except OSError:
+                pass
 
 
 def _render_result_to_markdown(

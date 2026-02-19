@@ -46,6 +46,16 @@ export type ReferenceImage = {
   previewUrl?: string
 }
 
+export type GraphNodeStream = {
+  request_id: string
+  thread_id: string
+  node: string
+  step_index: number
+  update_keys: string[]
+  state_patch?: Record<string, unknown>
+  message_count?: number
+}
+
 export type StreamEvent = {
   messages?: unknown[]
   todos?: TodoItem[]
@@ -53,7 +63,8 @@ export type StreamEvent = {
   status_code?: number
   delta?: string
   message_id?: string | null
-  event?: 'done'
+  event?: 'done' | 'graph_node'
+  graph_node?: GraphNodeStream
   scene_has_change?: boolean
 }
 

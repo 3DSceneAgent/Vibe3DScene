@@ -87,7 +87,6 @@ class AgentState(TypedDict):
         enabled_tool_names: Optional runtime MCP tool allow-list for this request
         last_render_path: Latest render file path from tools
         last_verified_path: Latest render path verified by VLM
-        last_render_signature: Signature for last render sent to VLM
         tool_round_count: Number of tool batches executed in current request loop
         last_tool_batch_names: Tool names observed in latest tool batch
         agent_decision: Structured decision payload from agent responses
@@ -128,13 +127,13 @@ class AgentState(TypedDict):
     # Verification tracking
     last_render_path: str | None
     last_verified_path: str | None
-    last_render_signature: str | None
     tool_round_count: NotRequired[int]
     last_tool_batch_names: NotRequired[list[str]]
     agent_decision: dict
     todo_check_gate: NotRequired[dict]
     todo_check: NotRequired[dict]
     last_todo_check_round: NotRequired[int]
+    last_todo_check_verified_path: NotRequired[str | None]
     last_todo_snapshot: NotRequired[dict[str, str]]
     stagnation_count: NotRequired[int]
     
