@@ -377,3 +377,37 @@ def test_verify_node_stops_forced_recovery_after_budget_exhausted(monkeypatch):
     assert result["verify_forced_recovery"] is False
     assert result["catastrophic_recovery_attempts"] == 2
     assert all(not isinstance(message, AIMessage) for message in result["messages"])
+
+
+def test_verify_node_resets_stale_recovery_budget_after_new_scene_mutation(monkeypatch):
+    def fail_verify_render_with_references(**_kwargs):
+        raise AssertionError("verify_render_with_references should not be called for catastrophic precheck")
+
+    monkeypatch.setattr(
+        "scene_agent.agent.nodes.verify_render_with_references",
+        fail_verify_render_with_references,
+    )
+
+    state = {
+        "thread_id": "thread-catastrophic-reset-budget",
+        "messages": [HumanMessage(content="Continue building the scene.")],
+        "last_render_path": "/tmp/catastrophic_reset_budget.png",
+        "last_verified_path": None,
+        "scene_bbox": {"center": [0, 0, 0], "dimensions": [12000.0, 8000.0, 6000.0]},
+        # Previous incident exhausted budget.
+        "catastrophic_recovery_attempts": 2,
+        # New regular scene mutation happened (non-recovery), so this should be a fresh incident.
+        "last_tool_batch_names": ["execute_blender_code"],
+        "enabled_tool_names": ["undo_last_snapshot", "clear_scene", "get_scene_info", "observe_scene_global"],
+    }
+
+    result = verify_node(state)
+
+    assert result["verify_forced_recovery"] is True
+    assert result["catastrophic_recovery_attempts"] == 1
+    assert isinstance(result["messages"][-1], AIMessage)
+    assert [call["name"] for call in result["messages"][-1].tool_calls] == [
+        "undo_last_snapshot",
+        "get_scene_info",
+        "observe_scene_global",
+    ]

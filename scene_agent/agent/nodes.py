@@ -1939,6 +1939,27 @@ def _build_catastrophic_recovery_tool_calls(
     return primary_action, tool_calls
 
 
+def _should_reset_catastrophic_recovery_attempts(state: AgentState) -> bool:
+    """Start a fresh catastrophic-recovery budget for new non-recovery scene edits."""
+    latest_tools = state.get("last_tool_batch_names")
+    if not isinstance(latest_tools, list):
+        return False
+
+    for raw_name in latest_tools:
+        if not isinstance(raw_name, str):
+            continue
+        name = raw_name.strip()
+        if not name:
+            continue
+        if name in {"undo_last_snapshot", "clear_scene"}:
+            # This is a recovery step from the current incident; keep budget.
+            continue
+        if name in SCENE_MUTATING_TOOLS:
+            # A new regular scene mutation can introduce a new catastrophic incident.
+            return True
+    return False
+
+
 def verify_node(
     state: AgentState,
     *,
@@ -1968,6 +1989,8 @@ def verify_node(
         render_reference=render_path,
     )
     catastrophic_recovery_attempts = _coerce_non_negative_int(state.get("catastrophic_recovery_attempts"))
+    if _should_reset_catastrophic_recovery_attempts(state):
+        catastrophic_recovery_attempts = 0
     if catastrophic_report.get("is_catastrophic"):
         recovery_attempt = catastrophic_recovery_attempts + 1
         enabled_tool_set = _resolve_enabled_tool_set(state)

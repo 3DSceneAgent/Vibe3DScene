@@ -75,6 +75,7 @@ flowchart TD
   - 第 1 次：`undo_last_snapshot -> get_scene_info -> observe_scene_global`
   - 第 2 次：`clear_scene -> get_scene_info -> observe_scene_global`
   - 恢复动作会以结构化 `verification` payload 记录，并自动回到 `tools` 路径执行。
+  - 当最近一批工具包含新的常规 scene mutation（非 `undo_last_snapshot` / `clear_scene`）时，灾难恢复预算会重置为新事件，避免旧事件的 attempt 计数阻塞新一轮硬恢复。
 - `todo_check` 聚焦计划进度/停滞检测，`verify` 聚焦视觉质量与灾难恢复，两者职责分离。
 - `.blend` 自动持久化仅在显式 `scene-mutating` 命令执行后触发（已排除 `camera_act` / `camera_set_pose`）。
 
