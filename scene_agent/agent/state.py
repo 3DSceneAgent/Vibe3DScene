@@ -95,6 +95,8 @@ class AgentState(TypedDict):
         last_todo_check_round: Tool round index when todo_check last ran
         last_todo_snapshot: Last status snapshot used for stagnation detection
         stagnation_count: Consecutive todo_check rounds without todo status change
+        verify_forced_recovery: Whether verify node forced hard-recovery tool calls
+        catastrophic_recovery_attempts: Consecutive catastrophic hard-recovery attempts
         current_task: Description of current user request
         iteration_count: Number of agent iterations
         last_error: Last error message if any
@@ -136,6 +138,8 @@ class AgentState(TypedDict):
     last_todo_check_verified_path: NotRequired[str | None]
     last_todo_snapshot: NotRequired[dict[str, str]]
     stagnation_count: NotRequired[int]
+    verify_forced_recovery: NotRequired[bool]
+    catastrophic_recovery_attempts: NotRequired[int]
     
     # Scene-level camera state — updated by scene_observe_node
     scene_camera_params: Annotated[dict, merge_dicts]
@@ -167,12 +171,13 @@ def create_todo(description: str, status: str = "pending") -> TodoItem:
     Returns:
         New TodoItem
     """
+    completed_at = datetime.now().isoformat() if status == "completed" else None
     return TodoItem(
         id=f"todo_{datetime.now().timestamp()}",
         description=description,
         status=status,
         created_at=datetime.now().isoformat(),
-        completed_at=None
+        completed_at=completed_at
     )
 
 

@@ -21,9 +21,14 @@ BlenderCommandSender = Callable[[str, dict[str, Any] | None], dict[str, Any]]
 # ---------------------------------------------------------------------------
 # Scene-level camera constants
 # ---------------------------------------------------------------------------
-SCENE_CAMERA_NAMES = ("SceneCamera_NE", "SceneCamera_NW", "SceneCamera_SE", "SceneCamera_SW")
-_SCENE_CAMERA_AZIMUTHS = (45.0, 135.0, -45.0, -135.0)  # degrees
-_SCENE_CAMERA_ELEVATION = 30.0  # degrees
+_SCENE_CAMERA_VIEW_CONFIGS: tuple[tuple[str, float, float], ...] = (
+    ("SceneCamera_NE", 45.0, 30.0),
+    ("SceneCamera_NW", 135.0, 30.0),
+    ("SceneCamera_SE", -45.0, 30.0),
+    ("SceneCamera_SW", -135.0, 30.0),
+    ("SceneCamera_TopDown", 0.0, 89.0),
+)
+SCENE_CAMERA_NAMES = tuple(config[0] for config in _SCENE_CAMERA_VIEW_CONFIGS)
 _SCENE_CAMERA_FOCAL_MM = 50.0
 _SCENE_CAMERA_SENSOR_WIDTH = 36.0
 _SCENE_CAMERA_DISTANCE_MARGIN = 1.5
@@ -159,7 +164,7 @@ def update_scene_cameras(
     thread_id: str = "unknown",
     send_blender_command: BlenderCommandSender | None = None,
 ) -> dict[str, Any]:
-    """Render the scene from 4 FOV-aware diagnostic cameras.
+    """Render the scene from diagnostic cameras (4 corners + top-down bird view).
 
     This is an **internal** helper — NOT exposed as an MCP tool.  It is
     called by the ``scene_observe`` graph node after scene-mutating tools.
@@ -190,8 +195,8 @@ def update_scene_cameras(
     cameras: list[dict[str, Any]] = []
     image_paths: list[str] = []
 
-    for cam_name, azimuth in zip(SCENE_CAMERA_NAMES, _SCENE_CAMERA_AZIMUTHS):
-        location = _spherical_to_cartesian(center, distance, azimuth, _SCENE_CAMERA_ELEVATION)
+    for cam_name, azimuth, elevation in _SCENE_CAMERA_VIEW_CONFIGS:
+        location = _spherical_to_cartesian(center, distance, azimuth, elevation)
 
         temp_path = os.path.join(
             tempfile.gettempdir(),
@@ -204,7 +209,7 @@ def update_scene_cameras(
                 "mode": "single_view",
                 "focal_length": _SCENE_CAMERA_FOCAL_MM,
                 "azimuth": azimuth,
-                "elevation": _SCENE_CAMERA_ELEVATION,
+                "elevation": elevation,
                 "reuse_cameras": True,
                 "camera_name": cam_name,
                 "camera_kind": "scene_level",
@@ -227,7 +232,7 @@ def update_scene_cameras(
             "location": location,
             "focal_mm": _SCENE_CAMERA_FOCAL_MM,
             "azimuth": azimuth,
-            "elevation": _SCENE_CAMERA_ELEVATION,
+            "elevation": elevation,
             "filepath": filepath,
             "image_url": image_url,
         }
@@ -246,7 +251,7 @@ def update_scene_cameras(
 
 
 def observe_scene_global(ctx: Context) -> CallToolResult:
-    """Capture scene-wide 4-view observation using diagnostic cameras.
+    """Capture scene-wide 5-view observation using diagnostic cameras.
 
     Use this when the agent needs a global understanding of composition, or when
     local renders appear unreliable (for example, blank/black outputs).
@@ -299,7 +304,7 @@ def observe_scene_global(ctx: Context) -> CallToolResult:
         )
 
     scene_bbox = result.get("scene_bbox")
-    lines: list[str] = ["Global scene observation (4-view diagnostic cameras):"]
+    lines: list[str] = [f"Global scene observation ({len(SCENE_CAMERA_NAMES)}-view diagnostic cameras):"]
     if isinstance(scene_bbox, dict):
         center = scene_bbox.get("center")
         dimensions = scene_bbox.get("dimensions")
@@ -311,7 +316,7 @@ def observe_scene_global(ctx: Context) -> CallToolResult:
     lines.append("")
     if isinstance(grid_url, str) and grid_url:
         # Keep the grid image first so downstream markdown extraction uses it.
-        lines.append(f"2x2 grid overview: ![{_SCENE_GRID_CAMERA_NAME}]({grid_url})")
+        lines.append(f"Grid overview: ![{_SCENE_GRID_CAMERA_NAME}]({grid_url})")
         lines.append("")
     lines.append("Captured views:")
     for camera_name, image_url in image_entries:
@@ -366,7 +371,7 @@ def _build_scene_grid_image(
         return None
 
     local_entries: list[tuple[str, str]] = []
-    for camera_name, image_url in image_entries[:4]:
+    for camera_name, image_url in image_entries:
         local_path = _resolve_render_url_to_local_path(image_url)
         if not local_path:
             return None
@@ -382,11 +387,14 @@ def _build_scene_grid_image(
 
         cell_width = max(image.width for image in opened_images)
         cell_height = max(image.height for image in opened_images)
-        canvas = PILImage.new("RGB", (cell_width * 2, cell_height * 2), color=(24, 24, 24))
-        positions = ((0, 0), (1, 0), (0, 1), (1, 1))
+        image_count = len(opened_images)
+        columns = 2 if image_count <= 4 else 3
+        rows = math.ceil(image_count / columns)
+        canvas = PILImage.new("RGB", (cell_width * columns, cell_height * rows), color=(24, 24, 24))
 
-        for index, image in enumerate(opened_images[:4]):
-            grid_x, grid_y = positions[index]
+        for index, image in enumerate(opened_images):
+            grid_x = index % columns
+            grid_y = index // columns
             tile = image
             if tile.size != (cell_width, cell_height):
                 tile = tile.resize((cell_width, cell_height), PILImage.Resampling.LANCZOS)
@@ -405,7 +413,7 @@ def _build_scene_grid_image(
             logger=logger,
         )
     except Exception as exc:
-        logger.warning("Failed to build scene global 2x2 grid: %s", exc)
+        logger.warning("Failed to build scene global grid image: %s", exc)
         return None
     finally:
         for image in opened_images:

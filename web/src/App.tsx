@@ -949,7 +949,7 @@ function App() {
           (message) => !isHumanMessage(message) && !isToolMessage(message)
         )
         if (candidates.length === 0) return
-        let selected = candidates[candidates.length - 1]
+        let selected: (typeof candidates)[number] | null = null
         for (let i = candidates.length - 1; i >= 0; i -= 1) {
           const candidate = candidates[i]
           const candidateId =
@@ -962,6 +962,7 @@ function App() {
           selected = candidate
           break
         }
+        if (!selected) return
         const raw = extractMessageContent(selected)
         if (!raw) return
         const parsed = parseThinking(raw)
@@ -969,6 +970,9 @@ function App() {
           typeof selected === 'object' && selected !== null && 'id' in selected
             ? (selected as { id?: string | null }).id ?? null
             : null
+        if (streamId && knownStreamIdsRef.current.has(streamId)) {
+          return
+        }
         if (!receivedDeltaRef.current && previousAssistantContentRef.current === parsed.text) {
           return
         }

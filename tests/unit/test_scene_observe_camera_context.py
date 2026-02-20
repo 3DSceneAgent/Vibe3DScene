@@ -59,8 +59,16 @@ def test_update_scene_cameras_uses_injected_sender_without_runtime(monkeypatch):
     assert result["success"] is True
     assert len(result["cameras"]) == len(SCENE_CAMERA_NAMES)
     assert len(result["image_urls"]) == len(SCENE_CAMERA_NAMES)
+    assert [camera["camera_name"] for camera in result["cameras"]] == list(SCENE_CAMERA_NAMES)
+    assert "SceneCamera_TopDown" in SCENE_CAMERA_NAMES
     assert command_calls[0][0] == "get_scene_info"
     assert [name for name, _ in command_calls[1:]] == ["camera_observe"] * len(SCENE_CAMERA_NAMES)
+    top_down_call = next(
+        params
+        for name, params in command_calls[1:]
+        if name == "camera_observe" and isinstance(params, dict) and params.get("camera_name") == "SceneCamera_TopDown"
+    )
+    assert top_down_call.get("elevation") == 89.0
 
 
 def test_update_scene_cameras_accepts_bbox_center_dimensions(monkeypatch):
@@ -289,6 +297,37 @@ def test_scene_observe_node_treats_delete_objects_as_scene_mutation(monkeypatch)
     state: AgentState = {
         "thread_id": "test-thread",
         "last_tool_batch_names": ["delete_objects"],
+        "messages": [],
+    }
+
+    result = scene_observe_node(state)
+
+    assert result.get("last_render_source") == "scene_observe"
+    assert result.get("last_render_path") == "https://example.com/renders/scene_ne.png"
+
+
+def test_scene_observe_node_treats_clear_scene_as_scene_mutation(monkeypatch):
+    def fake_update_scene_cameras(*args, **kwargs):
+        return {
+            "success": True,
+            "scene_bbox": {"center": [0.0, 0.0, 0.0], "dimensions": [1.0, 1.0, 1.0]},
+            "cameras": [
+                {
+                    "camera_name": "SceneCamera_NE",
+                    "image_url": "https://example.com/renders/scene_ne.png",
+                }
+            ],
+            "image_urls": ["https://example.com/renders/scene_ne.png"],
+        }
+
+    monkeypatch.setattr(
+        "mcp_server.tools.multimodal.camera_tools.update_scene_cameras",
+        fake_update_scene_cameras,
+    )
+
+    state: AgentState = {
+        "thread_id": "test-thread",
+        "last_tool_batch_names": ["clear_scene"],
         "messages": [],
     }
 

@@ -18,6 +18,8 @@ class AssetWorkflowAvailability(TypedDict):
     rodin_ready: bool
     hunyuan_ready: bool
     retrieval_ready: bool
+    undo_ready: bool
+    clear_scene_ready: bool
 
 
 SKETCHFAB_WORKFLOW_TOOLS: frozenset[str] = frozenset(
@@ -49,6 +51,8 @@ RETRIEVAL_WORKFLOW_TOOLS: frozenset[str] = frozenset(
         "import_retrieved_asset",
     }
 )
+UNDO_WORKFLOW_TOOLS: frozenset[str] = frozenset({"undo_last_snapshot"})
+CLEAR_SCENE_WORKFLOW_TOOLS: frozenset[str] = frozenset({"clear_scene"})
 
 
 def _normalize_tool_names(available_tool_names: Iterable[str] | None) -> set[str]:
@@ -74,6 +78,8 @@ def infer_asset_workflow_availability(
         "rodin_ready": RODIN_WORKFLOW_TOOLS.issubset(tool_names),
         "hunyuan_ready": HUNYUAN_WORKFLOW_TOOLS.issubset(tool_names),
         "retrieval_ready": RETRIEVAL_WORKFLOW_TOOLS.issubset(tool_names),
+        "undo_ready": UNDO_WORKFLOW_TOOLS.issubset(tool_names),
+        "clear_scene_ready": CLEAR_SCENE_WORKFLOW_TOOLS.issubset(tool_names),
     }
 
 
@@ -85,6 +91,8 @@ def build_asset_creation_strategy_text(
     rodin_ready: bool,
     hunyuan_ready: bool,
     retrieval_ready: bool,
+    undo_ready: bool,
+    clear_scene_ready: bool,
 ) -> str:
     # Phase 0: Scene grounding
     lines: list[str] = [
@@ -92,9 +100,12 @@ def build_asset_creation_strategy_text(
         "",
         "0. Scene grounding first (NEVER skip):",
         "   - Run get_scene_info() to understand existing objects and scene scale.",
-        "   - If scene is visually complex, run observe_scene_global() for a 4-view global snapshot.",
-        "   - In early layout passes, prefer open composition (keep at least one side open",
-        "     or no ceiling) unless the user explicitly requests a fully enclosed interior.",
+        "   - If scene is visually complex, run observe_scene_global() for a 5-view global snapshot.",
+        "   - In early layout passes, prefer open composition: keep at least one major side open",
+        "     or keep ceiling off, and avoid fully sealed rooms/containers.",
+        "   - Even for indoor requests, stage as an open shell first; close enclosure only near finalization,",
+        "     after verification confirms object/layout/scale correctness.",
+        "   - If scene-level views cannot see primary objects because of enclosure, remove or open blockers first.",
         "",
     ]
 
@@ -103,7 +114,7 @@ def build_asset_creation_strategy_text(
         [
             "0.5. Automatic scene observation (system-managed):",
             "   - After every scene mutation (import, generate, execute_blender_code, set_texture),",
-            "     4 scene-level cameras auto-update and render. You will see a multi-view composite.",
+            "     5 scene-level cameras auto-update and render (4 corners + top-down bird view).",
             "   - These cameras track the full scene bounding box - do NOT modify them manually.",
             "   - For object-level inspection, use camera_act() and camera_observe().",
             "   - If object-level renders look unreliable (blank/black/repeatedly inconclusive),",
@@ -217,8 +228,11 @@ def build_asset_creation_strategy_text(
             "",
             "3. After every import/generation (REQUIRED):",
             "   a. Use get_object_info() to confirm world_bounding_box, dimensions, and transform.",
+            "   a.1 Scale safety: before changing object scale, inspect current dimensions/transform first.",
+            "       Prefer incremental scaling from current value; avoid blind absolute scale overrides.",
             "   b. Check for clipping/intersection/floating: compare bounding boxes of nearby objects.",
             "   c. Review the automatic scene-level renders for overall fit.",
+            "   c.1 Ensure at least one scene-level view has clear line-of-sight to main target objects.",
             '   d. Re-check with camera_observe(object_names, mode="multi_view") before asserting final placement.',
             "   e. Fix scale mismatch, clipping, or intersection immediately using Blender edits.",
             "   f. Ensure spatial relationships and target sizes are consistent across all objects.",
@@ -284,6 +298,31 @@ def build_asset_creation_strategy_text(
             "   - If mismatch persists, call render_from_objects(..., mode=\"annotated\") to pinpoint bad objects/regions.",
             "   - If verification reports problems (wrong scale, bad placement, missing objects):",
             "       -> fix immediately, then re-render the affected object to confirm the fix.",
+        ]
+    )
+    if undo_ready:
+        undo_recovery_lines = [
+            "   - If a single edit catastrophically breaks the scene (blank scene-level renders,"
+            " key objects disappear, or scale explodes), call undo_last_snapshot() immediately.",
+            "   - After undo, re-run get_scene_info() plus observe_scene_global() before continuing.",
+        ]
+        if clear_scene_ready:
+            undo_recovery_lines.append(
+                "   - If undo cannot recover the scene, run reset flow:"
+                " clear_scene() -> get_scene_info() -> observe_scene_global(), then rebuild from the first pending todo."
+            )
+        else:
+            undo_recovery_lines.append(
+                "   - If undo cannot recover the scene, run reset flow:"
+                " get_scene_info() -> delete_objects(all object names, mode=\"cascade\", strict=False,"
+                " ignore_missing=True), then rebuild from the first pending todo."
+            )
+        undo_recovery_lines.append(
+            "   - Do NOT use execute_blender_code for scene reset/deletion; raw delete code is blocked."
+        )
+        lines.extend(undo_recovery_lines)
+    lines.extend(
+        [
             "   - After local refinement, ALWAYS call a render tool so the system can verify.",
             "   - Do NOT claim the scene is complete without verification showing 'match' status.",
             "   - Do NOT mark a todo as completed without visual confirmation.",

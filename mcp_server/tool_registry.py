@@ -32,7 +32,7 @@ from mcp_server.tools.base import (
     get_scene_info,
     import_glb_model,
 )
-from mcp_server.tools.memory.session_tools import undo_last_snapshot
+from mcp_server.tools.memory.session_tools import clear_scene, undo_last_snapshot
 from mcp_server.tools.multimodal.camera_tools import (
     camera_act,
     camera_observe,
@@ -113,6 +113,7 @@ def register_mcp_tools(mcp, logger) -> list[str]:
     ] = [
         (get_scene_info, None, None, None),
         (get_object_info, None, None, None),
+        (clear_scene, None, None, None),
         (delete_objects, None, None, None),
         (execute_blender_code, None, None, None),
         (search_polyhaven_assets, None, None, None),

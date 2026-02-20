@@ -74,7 +74,9 @@ export function SceneInfoPanel({
           aria-label={collapsed ? 'Expand Scene Objects panel' : 'Collapse Scene Objects panel'}
           title={collapsed ? 'Expand' : 'Collapse'}
         >
-          {collapsed ? '>>' : '<<'}
+          <span className={`scene-objects-toggle-icon ${collapsed ? '' : 'expanded'}`} aria-hidden="true">
+            {'>'}
+          </span>
         </button>
       </div>
       {!collapsed && (

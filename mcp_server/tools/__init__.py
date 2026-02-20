@@ -34,7 +34,7 @@ from mcp_server.tools.base import (
     get_scene_info,
     import_glb_model,
 )
-from mcp_server.tools.memory import undo_last_snapshot
+from mcp_server.tools.memory import clear_scene, undo_last_snapshot
 from mcp_server.tools.multimodal import (
     camera_act,
     camera_observe,
@@ -51,6 +51,7 @@ __all__ = [
     "camera_act",
     "camera_observe",
     "camera_set_pose",
+    "clear_scene",
     "observe_scene_global",
     "delete_objects",
     "download_polyhaven_asset",

@@ -98,7 +98,7 @@ export function ChatTab({
           {streamStatus === 'streaming' ? 'Agent is building the scene' : 'Agent ready'}
         </span>
       </div>
-      <GraphTimeline events={graphEvents} />
+      <GraphTimeline events={graphEvents} isStreaming={streamStatus === 'streaming'} />
       <div className="chat-scroll-area">
         <MessageList messages={thread.messages} backendUrl={backendUrl} />
       </div>

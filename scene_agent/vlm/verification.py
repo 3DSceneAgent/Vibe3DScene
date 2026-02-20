@@ -86,12 +86,33 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 def _format_todo_context(todo_context: list[str] | None) -> str:
     if not todo_context:
         return ""
-    lines = ["Current todo objectives (prioritize these in your judgment):"]
+    normalized_items: list[str] = []
     for item in todo_context[:5]:
         normalized = " ".join(str(item).strip().split())
         if normalized:
-            lines.append(f"- {normalized}")
+            normalized_items.append(normalized)
+    if not normalized_items:
+        return ""
+    lines = ["Current todo objectives (primary verification target):"]
+    for item in normalized_items:
+        lines.append(f"- {item}")
     return "\n".join(lines)
+
+
+def _format_scene_context(scene_context: dict[str, Any] | None) -> str:
+    if not scene_context or not isinstance(scene_context, dict):
+        return ""
+    try:
+        serialized = json.dumps(scene_context, ensure_ascii=False, default=str)
+    except Exception:
+        return ""
+    if len(serialized) > 12000:
+        serialized = f"{serialized[:12000]}...[truncated]"
+    return (
+        "Structured scene context from get_scene_info / observation tools "
+        "(supplemental to the render):\n"
+        f"{serialized}"
+    )
 
 
 _SCENE_LEVEL_VERIFY_PROMPT = """\
@@ -142,6 +163,7 @@ def verify_render_with_references(
     user_request: str,
     render_source: str = "agent_camera",
     todo_context: list[str] | None = None,
+    scene_context: dict[str, Any] | None = None,
     provider_name: str | None = None,
     api_key: str | None = None,
     model: str | None = None,
@@ -169,6 +191,11 @@ def verify_render_with_references(
     else:
         base_prompt = _OBJECT_LEVEL_VERIFY_PROMPT
 
+    todo_text = _format_todo_context(todo_context)
+    has_todo_focus = bool(todo_text)
+    scene_context_text = _format_scene_context(scene_context)
+    has_scene_context = bool(scene_context_text)
+
     if has_references:
         prompt = (
             base_prompt
@@ -180,12 +207,37 @@ def verify_render_with_references(
             + "\n\nNo reference images provided — judge solely based on the text description."
         )
 
+    if has_todo_focus:
+        prompt += (
+            "\n\nIf current todo objectives are provided, treat them as the primary verification target. "
+            "Use the full user request only as background context."
+            "\nYou MUST include a `todo_assessment` JSON array with exactly one item per provided todo objective."
+            "\nEach item format: {\"objective\": \"...\", \"status\": \"done|not_done|uncertain\", \"reason\": \"...\"}."
+            "\nOnly mark status as `done` when there is clear visual evidence in the current render."
+        )
+
+    if has_scene_context:
+        prompt += (
+            "\n\nStructured scene context is provided below (objects/cameras/bounds from Blender tools). "
+            "Use it to improve object/layout/scale checks; if it conflicts with direct visual evidence, "
+            "prioritize what is visible in the render."
+        )
+
     content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-    content.append({"type": "text", "text": f"User request: {user_request}"})
-    if render_source != "scene_observe":
-        todo_text = _format_todo_context(todo_context)
-        if todo_text:
-            content.append({"type": "text", "text": todo_text})
+    if has_todo_focus:
+        content.append({"type": "text", "text": todo_text})
+        if user_request.strip():
+            content.append(
+                {
+                    "type": "text",
+                    "text": f"Original full user request (background context only): {user_request}",
+                }
+            )
+    else:
+        content.append({"type": "text", "text": f"User request: {user_request}"})
+
+    if has_scene_context:
+        content.append({"type": "text", "text": scene_context_text})
 
     render_data_url = _image_to_data_url(render_path)
     content.append(
@@ -202,7 +254,18 @@ def verify_render_with_references(
             }
         )
 
-    response = model.invoke([HumanMessage(content=content)])
+    # Prevent internal verification-model tokens from leaking into the
+    # outer agent stream (`stream_mode=["messages"]`).
+    invoke_model = model
+    if hasattr(model, "with_config"):
+        try:
+            invoke_model = model.with_config(
+                tags=["nostream"],
+                run_name="verification_internal",
+            )
+        except Exception:
+            invoke_model = model
+    response = invoke_model.invoke([HumanMessage(content=content)])
     response_text = _content_to_text(getattr(response, "content", response))
     parsed = _extract_json(response_text)
     if not isinstance(parsed, dict) or "status" not in parsed:

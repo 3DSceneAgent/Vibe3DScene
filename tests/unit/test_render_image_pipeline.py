@@ -461,3 +461,50 @@ class TestVerifyRenderImageDelivery:
             render_path.unlink()
         except OSError:
             pass
+
+    @pytest.mark.parametrize("render_source", ["scene_observe", "agent_camera"])
+    def test_todo_context_is_primary_verification_target(self, tmp_path, monkeypatch, render_source):
+        render_path = str(tmp_path / f"todo_target_{render_source}.png")
+        _save_test_image(render_path, fmt="PNG", color=(120, 120, 120))
+
+        captured_messages: list[Any] = []
+
+        class FakeModel:
+            def invoke(self, messages):
+                captured_messages.extend(messages)
+                return SimpleNamespace(
+                    content=json.dumps({"status": "partial", "reason": "todo target not fully matched"})
+                )
+
+        class FakeProvider:
+            def get_chat_model(self):
+                return FakeModel()
+
+        monkeypatch.setattr(
+            "scene_agent.vlm.verification.get_vlm_provider",
+            lambda **kwargs: FakeProvider(),
+        )
+
+        from scene_agent.vlm.verification import verify_render_with_references
+
+        verify_render_with_references(
+            render_path=render_path,
+            reference_paths=[],
+            user_request="Create a complete cozy living room scene with bookshelves and wall art.",
+            todo_context=["Move the sofa to align with the carpet center line."],
+            render_source=render_source,
+            provider_name="openai",
+            api_key="test-key",
+            model="gpt-4o",
+        )
+
+        msg = captured_messages[0]
+        text_items = [
+            item["text"] for item in msg.content
+            if isinstance(item, dict) and item.get("type") == "text"
+        ]
+        full_text = " ".join(text_items)
+        assert "current todo objectives (primary verification target)" in full_text.lower()
+        assert "move the sofa to align with the carpet center line." in full_text.lower()
+        assert "background context only" in full_text.lower()
+        assert "todo_assessment" in full_text

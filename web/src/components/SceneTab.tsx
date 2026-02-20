@@ -227,6 +227,13 @@ export function SceneTab({
           onHierarchyChange={handleHierarchyChange}
           isFullscreen={fullscreen}
           onToggleFullscreen={() => setIsFullscreen((value) => !value)}
+          headerTrailingControls={
+            objectsCollapsed ? (
+              <button className="ghost-btn viewer-show-hier-btn" onClick={() => setObjectsCollapsed(false)}>
+                Show Hier
+              </button>
+            ) : null
+          }
           headerControls={
             <>
               <label className="toggle-switch">
@@ -235,8 +242,8 @@ export function SceneTab({
                   checked={alwaysAutoFrameCamera}
                   onChange={(event) => setAlwaysAutoFrameCamera(event.target.checked)}
                 />
-                <span className="toggle-slider" />
-                <span className="toggle-label">AutoCamera</span>
+                {/* <span className="toggle-slider" /> */}
+                {/* <span className="toggle-label">AutoCamera</span> */}
               </label>
               <label className="select-label">
                 EnvLight
@@ -264,12 +271,14 @@ export function SceneTab({
           }
         />
       </div>
-      <SceneInfoPanel
-        hierarchy={sceneHierarchy}
-        collapsed={objectsCollapsed}
-        onToggleCollapse={() => setObjectsCollapsed((value) => !value)}
-        isSceneSyncing={loading.scene}
-      />
+      {!objectsCollapsed && (
+        <SceneInfoPanel
+          hierarchy={sceneHierarchy}
+          collapsed={false}
+          onToggleCollapse={() => setObjectsCollapsed((value) => !value)}
+          isSceneSyncing={loading.scene}
+        />
+      )}
     </div>
   )
 

@@ -1,6 +1,6 @@
 # 当前 Agent 工作流与配置机制分析（持久化版）
 
-更新时间：2026-02-15
+更新时间：2026-02-20
 
 本文基于当前仓库实现，对以下内容做落地说明：
 - Agent 生命周期：创建、调用、销毁
@@ -33,22 +33,23 @@ flowchart TD
     M --> N{"has tool calls?"}
     N -- "Yes" --> O["Node: tools(ToolNode)"]
     O --> P["Node: update_memory"]
-    P --> Q["Node: checkpoint_loop"]
-    Q --> R{"run todo_check?"}
-    R -- "Yes" --> S["Node: todo_check"]
-    R -- "No" --> T{"need verify?"}
-    T -- "Yes" --> U["Node: verify"]
-    U --> L
-    T -- "No" --> L
+    P --> Q["Node: scene_observe"]
+    Q --> R["Node: verify"]
+    R --> S{"catastrophic & forced recovery?"}
+    S -- "Yes" --> O
+    S -- "No" --> T["Node: checkpoint_loop"]
+    T --> U{"run todo_check?"}
+    U -- "Yes" --> V["Node: todo_check"]
+    U -- "No" --> L
 
-    N -- "No" --> V["Node: checkpoint_finalize"]
-    V --> W{"run todo_check?"}
-    W -- "Yes" --> S
-    W -- "No" --> X["Node: finalize"]
-    S --> Y{"stage == finalize?"}
-    Y -- "Yes" --> X
-    Y -- "No" --> T
-    X --> Z["END/return response"]
+    N -- "No" --> W["Node: checkpoint_finalize"]
+    W --> X{"run todo_check?"}
+    X -- "Yes" --> V
+    X -- "No" --> Y["Node: finalize"]
+    V --> Z{"stage == finalize?"}
+    Z -- "Yes" --> Y
+    Z -- "No" --> L
+    Y --> ZA["END/return response"]
 
     O --> BA["MCP Server tools"]
     BA --> BB["Blender socket addon server"]
@@ -69,7 +70,13 @@ flowchart TD
 - `post_agent` 在每次 assistant 响应后执行，负责提取并落库 `agent_decision` / `todos`（不再依赖 tool path）。
 - `todo_check` 采用 checkpoint 稀疏触发，不会在每次工具调用后都执行（支持 interval + milestone + pre-final guard）。
 - 当 assistant 未产生 tool call 时：若 `agent_decision.should_call_tools=true` 且仍在重试预算内，会先回到 `agent` 重试一次；否则走 `checkpoint_finalize`，仅在存在 todo 时做一次 `todo_check` 兜底后再 `finalize`。
-- `verify` 聚焦结果质量校验，`todo_check` 聚焦计划进度/停滞检测，两者职责分离。
+- `verify` 采用分层校验顺序：`catastrophic gate -> todo context progress -> request consistency`。
+- 若 `verify` 检测到灾难性状态（例如场景尺度爆炸、位置异常、渲染异常平坦/灰图），会触发**硬自动恢复**而不是等待 agent 自行思考：
+  - 第 1 次：`undo_last_snapshot -> get_scene_info -> observe_scene_global`
+  - 第 2 次：`clear_scene -> get_scene_info -> observe_scene_global`
+  - 恢复动作会以结构化 `verification` payload 记录，并自动回到 `tools` 路径执行。
+- `todo_check` 聚焦计划进度/停滞检测，`verify` 聚焦视觉质量与灾难恢复，两者职责分离。
+- `.blend` 自动持久化仅在显式 `scene-mutating` 命令执行后触发（已排除 `camera_act` / `camera_set_pose`）。
 
 关键实现：
 - Agent 获取与线程缓存：`scene_agent/interfaces/api.py`
@@ -169,6 +176,10 @@ sequenceDiagram
 | 渲染图缓存 | `/tmp/scene_agent_renders` | 有限 | 临时目录，策略依赖系统与清理行为 |
 | 前端会话数据 | IndexedDB / localStorage | 是（浏览器本地） | 与后端状态解耦 |
 
+补充（2026-02-20）：
+- 增加 `verify_forced_recovery` 与 `catastrophic_recovery_attempts` 状态字段，用于硬恢复路由与预算控制。
+- 新增 MCP 工具 `clear_scene`（addon 端命令），用于全场景重置。
+
 ---
 
 ## 5. 潜在风险分析（按优先级）
@@ -197,18 +208,23 @@ sequenceDiagram
 7. MCP 启用与运行中健康状态漂移  
    工具启用由启动时探测决定，运行期间依赖服务若下线，仍可能显示可用但调用失败。
 
+8. 灾难检测阈值依赖经验参数  
+   当前 catastrophic gate 使用阈值（bbox/位置/尺寸/图像平坦度）做快速判定，极端但合法的艺术场景可能触发误报，需结合线上日志持续调参。
+
 ---
 
 ## 6. 关键代码定位（便于继续深挖）
 
 - Agent 图构建：`scene_agent/agent/graph.py`
 - Agent 节点与工具过滤：`scene_agent/agent/nodes.py`
+- Verify 灾难检测与硬恢复：`scene_agent/agent/nodes.py`
 - API 线程级 VLM 与 get_agent：`scene_agent/interfaces/api.py`
 - MCP 工具注册与开关：`mcp_server/tool_registry.py`
 - MCP 运行时连接与环境：`mcp_server/runtime.py`
 - Headless 会话与进程管理：`scene_agent/blender/session_manager.py`
 - Blender Socket 客户端：`scene_agent/blender/connection.py`
 - Addon 持久化与 snapshot：`addon/blender_mcpv_addon/server.py`
+- Addon 场景重置命令：`addon/blender_mcpv_addon/server_scene_tools_mixin.py`
 - 前端模型与 MCP 工具选择：`web/src/components/ChatComposer.tsx`
 - 前端本地持久化：`web/src/state/storage.ts`、`web/src/state/indexeddb.ts`
 

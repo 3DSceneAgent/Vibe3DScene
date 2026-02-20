@@ -3,6 +3,7 @@ import type { GraphNodeStream } from '../api/types'
 
 type GraphTimelineProps = {
   events: GraphNodeStream[]
+  isStreaming?: boolean
 }
 
 function stringifyPatchValue(value: unknown): string {
@@ -27,14 +28,13 @@ function summarizePatch(patch: Record<string, unknown> | undefined): string | nu
     .join(' · ')
 }
 
-export function GraphTimeline({ events }: GraphTimelineProps) {
-  const [collapsed, setCollapsed] = useState(false)
+export function GraphTimeline({ events, isStreaming = false }: GraphTimelineProps) {
+  const [collapsed, setCollapsed] = useState(true)
   const listRef = useRef<HTMLDivElement | null>(null)
   const latestEvent = useMemo(
     () => (events.length > 0 ? events[events.length - 1] : null),
     [events]
   )
-  const visibleEvents = useMemo(() => (latestEvent ? [latestEvent] : []), [latestEvent])
 
   useEffect(() => {
     if (collapsed) return
@@ -48,16 +48,38 @@ export function GraphTimeline({ events }: GraphTimelineProps) {
       <div className="graph-timeline-header">
         <div className="graph-timeline-title">Graph timeline</div>
         <div className="graph-timeline-actions">
-          <span className="graph-timeline-count">{events.length} steps</span>
+          {!collapsed && <span className="graph-timeline-count">{events.length} steps</span>}
           <button className="text-btn" onClick={() => setCollapsed((prev) => !prev)}>
             {collapsed ? 'Show' : 'Hide'}
           </button>
         </div>
       </div>
-      {!collapsed && (
+      {collapsed ? (
+        <div className="graph-timeline-collapsed">
+          {latestEvent ? (
+            <div
+              className={`graph-timeline-collapsed-chip ${
+                isStreaming ? 'is-streaming' : 'is-static'
+              }`}
+            >
+              <span
+                className={`graph-timeline-collapsed-dot ${
+                  isStreaming ? 'is-streaming' : 'is-static'
+                }`}
+                aria-hidden="true"
+              />
+              <span className="graph-timeline-node graph-timeline-collapsed-node">
+                {latestEvent.node}
+              </span>
+            </div>
+          ) : (
+            <span className="muted">No node updates yet.</span>
+          )}
+        </div>
+      ) : (
         <div className="graph-timeline-list" ref={listRef}>
-          {visibleEvents.length === 0 && <div className="muted">No node updates yet.</div>}
-          {visibleEvents.map((event) => {
+          {events.length === 0 && <div className="muted">No node updates yet.</div>}
+          {events.map((event) => {
             const summary = summarizePatch(event.state_patch)
             return (
               <div className="graph-timeline-item" key={`${event.request_id}-${event.step_index}-${event.node}`}>

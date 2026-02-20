@@ -1,10 +1,17 @@
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from scene_agent.agent.graph import _route_after_post_agent, _route_after_todo_check
+from scene_agent.agent.graph import (
+    _route_after_blocked_recovery_action,
+    _route_after_post_agent,
+    _route_after_verify,
+    _route_after_todo_check,
+)
 from scene_agent.agent.nodes import (
     _RENDER_VISION_MESSAGE_ID,
     _SCENE_OBSERVE_MESSAGE_ID,
     _latest_human_message,
+    blocked_recovery_action_node,
+    blocked_recovery_node,
     checkpoint_gate_node,
     finalize_node,
     post_agent_node,
@@ -131,6 +138,30 @@ def test_route_after_todo_check_continues_when_finalize_stage_not_terminal():
     assert next_node == "agent"
 
 
+def test_route_after_todo_check_routes_blocked_to_recovery_within_grace():
+    next_node = _route_after_todo_check(
+        {
+            "todo_check_gate": {"stage": "finalize"},
+            "todo_check": {"status": "blocked", "stagnation_count": 2},
+            "last_render_path": None,
+            "agent_decision": {"should_verify": False},
+        }
+    )
+    assert next_node == "blocked_recovery"
+
+
+def test_route_after_todo_check_finalizes_after_recovery_budget_exhausted():
+    next_node = _route_after_todo_check(
+        {
+            "todo_check_gate": {"stage": "finalize"},
+            "todo_check": {"status": "blocked", "stagnation_count": 4},
+            "last_render_path": None,
+            "agent_decision": {"should_verify": False},
+        }
+    )
+    assert next_node == "finalize"
+
+
 def test_route_after_todo_check_finalizes_when_finalize_stage_terminal():
     next_node = _route_after_todo_check(
         {
@@ -141,6 +172,108 @@ def test_route_after_todo_check_finalizes_when_finalize_stage_terminal():
         }
     )
     assert next_node == "finalize"
+
+
+def test_blocked_recovery_node_prioritizes_undo_when_available():
+    result = blocked_recovery_node(
+        {
+            "todo_check": {"status": "blocked", "stagnation_count": 2},
+            "enabled_tool_names": ["get_scene_info", "observe_scene_global", "undo_last_snapshot"],
+        }
+    )
+    message = result["messages"][0]
+    content = message.content
+    assert "Recovery mode" in content
+    assert "undo_last_snapshot" in content
+
+
+def test_blocked_recovery_node_second_attempt_forces_reset_even_with_undo_available():
+    result = blocked_recovery_node(
+        {
+            "todo_check": {"status": "blocked", "stagnation_count": 3},
+            "enabled_tool_names": ["get_scene_info", "observe_scene_global", "undo_last_snapshot"],
+        }
+    )
+    message = result["messages"][0]
+    content = message.content
+    assert "Skip undo and run full reset now." in content
+    assert "delete_objects(object_names=[...], mode=\"cascade\", strict=False, ignore_missing=True)" in content
+
+
+def test_blocked_recovery_node_prefers_clear_scene_when_available():
+    result = blocked_recovery_node(
+        {
+            "todo_check": {"status": "blocked", "stagnation_count": 2},
+            "enabled_tool_names": ["clear_scene", "get_scene_info", "observe_scene_global"],
+        }
+    )
+    message = result["messages"][0]
+    content = message.content
+    assert "clear_scene()" in content
+    assert "delete_objects(object_names=[...]" not in content
+
+
+def test_blocked_recovery_node_uses_clear_and_rebuild_when_undo_unavailable():
+    result = blocked_recovery_node(
+        {
+            "todo_check": {"status": "blocked", "stagnation_count": 2},
+            "enabled_tool_names": ["get_scene_info", "delete_objects"],
+        }
+    )
+    message = result["messages"][0]
+    content = message.content
+    assert "undo_last_snapshot` is unavailable" in content
+    assert "delete_objects" in content
+
+
+def test_blocked_recovery_action_node_attempt_one_prefers_undo_and_observe():
+    result = blocked_recovery_action_node(
+        {
+            "todo_check": {"status": "blocked", "stagnation_count": 2},
+            "enabled_tool_names": ["undo_last_snapshot", "get_scene_info", "observe_scene_global"],
+        }
+    )
+    message = result["messages"][0]
+    tool_names = [call["name"] for call in message.tool_calls]
+    assert tool_names == ["undo_last_snapshot", "get_scene_info", "observe_scene_global"]
+
+
+def test_blocked_recovery_action_node_attempt_two_prefers_clear_scene():
+    result = blocked_recovery_action_node(
+        {
+            "todo_check": {"status": "blocked", "stagnation_count": 3},
+            "enabled_tool_names": ["clear_scene", "get_scene_info", "observe_scene_global"],
+        }
+    )
+    message = result["messages"][0]
+    tool_names = [call["name"] for call in message.tool_calls]
+    assert tool_names == ["clear_scene", "get_scene_info", "observe_scene_global"]
+
+
+def test_route_after_blocked_recovery_action_routes_to_tools_on_forced_calls():
+    next_node = _route_after_blocked_recovery_action(
+        {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "clear_scene", "args": {}, "id": "tc-reset", "type": "tool_call"},
+                    ],
+                )
+            ]
+        }
+    )
+    assert next_node == "tools"
+
+
+def test_route_after_verify_routes_to_tools_when_forced_recovery_enabled():
+    next_node = _route_after_verify({"verify_forced_recovery": True})
+    assert next_node == "tools"
+
+
+def test_route_after_verify_routes_to_checkpoint_when_no_forced_recovery():
+    next_node = _route_after_verify({"verify_forced_recovery": False})
+    assert next_node == "checkpoint_loop"
 
 
 def test_route_after_post_agent_retries_once_when_tools_expected_but_missing():
@@ -186,6 +319,94 @@ def test_finalize_node_emits_summary_message():
     assert len(result["messages"]) == 1
     assert isinstance(result["messages"][0], AIMessage)
     assert "Scene workflow finished" in result["messages"][0].content
+
+
+def test_finalize_summary_uses_todo_check_counts_for_consistency():
+    result = finalize_node(
+        {
+            "agent_decision": {"should_call_tools": False},
+            # Historical todo revisions can contain duplicates by description.
+            "todos": [
+                _todo("todo-1", "Create cube", "pending"),
+                _todo("todo-1b", "Create cube", "completed", completed_at="2026-01-01T00:10:00"),
+            ],
+            "todo_check": {
+                "status": "completed",
+                "reason": "all_todos_terminal",
+                "pending_count": 0,
+                "in_progress_count": 0,
+                "completed_count": 1,
+                "failed_count": 0,
+            },
+            "messages": [],
+        }
+    )
+    content = result["messages"][0].content
+    assert "Total todos: 1." in content
+    assert "Completed: 1, in progress: 0, pending: 0, failed: 0." in content
+
+
+def test_finalize_node_prefers_model_generated_summary_when_available():
+    class _StubFinalizer:
+        def __init__(self):
+            self.configs: list[dict] = []
+
+        def with_config(self, **kwargs):
+            self.configs.append(kwargs)
+            return self
+
+        def invoke(self, _messages):
+            return AIMessage(content="Result\nModel summary output.")
+
+    model = _StubFinalizer()
+    result = finalize_node(
+        {
+            "agent_decision": {"should_call_tools": False},
+            "todo_check": {
+                "status": "blocked",
+                "reason": "todo_progress_stagnant",
+                "pending_count": 1,
+                "in_progress_count": 0,
+                "completed_count": 0,
+                "failed_count": 0,
+            },
+            "messages": [HumanMessage(content="Build a dungeon.")],
+        },
+        finalizer_model=model,
+    )
+    assert result["messages"][0].content == "Result\nModel summary output."
+    assert any(
+        cfg.get("tags") == ["nostream"] and cfg.get("run_name") == "finalize_summary_internal"
+        for cfg in model.configs
+    )
+
+
+def test_finalize_fallback_does_not_dump_raw_verification_dict_string():
+    verification_raw = (
+        "{'status': 'mismatch', 'object_feedback': 'Pot of gold is missing.', "
+        "'layout_feedback': 'Dragon is present but scene is incomplete.', 'reason': 'Key asset missing.'}"
+    )
+    result = finalize_node(
+        {
+            "agent_decision": {"should_call_tools": False},
+            "todo_check": {
+                "status": "blocked",
+                "reason": "todo_progress_stagnant",
+                "pending_count": 2,
+                "in_progress_count": 1,
+                "completed_count": 0,
+                "failed_count": 0,
+            },
+            "messages": [
+                HumanMessage(content="Build a dungeon with a dragon and pot of gold."),
+                ToolMessage(name="verification", content=verification_raw, tool_call_id="verification_test"),
+            ],
+        },
+        finalizer_model=None,
+    )
+    content = result["messages"][0].content
+    assert "Verification note: Key asset missing." in content
+    assert "Verification note: {'status': 'mismatch'" not in content
 
 
 def test_scene_observe_node_routes_commands_via_api_sender(monkeypatch):

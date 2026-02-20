@@ -79,6 +79,31 @@ python tests/manual/test_headless_automanaged.py
 - Render functionality works
 - Process IDs are recorded
 
+### 5. `validate_prompt.py`
+Manual end-to-end prompt validator (API mode or pure invoke mode).
+
+```bash
+# API streaming mode (requires API server running)
+python tests/manual/validate_prompt.py \
+  --mode api \
+  --base-url http://127.0.0.1:8000 \
+  --proxy http://127.0.0.1:7890 \
+  --prompt "Create a low poly scene in a dungeon, with a dragon guarding a pot of gold"
+
+# Pure Python invoke mode (no /chat API required)
+python tests/manual/validate_prompt.py \
+  --mode invoke \
+  --proxy http://127.0.0.1:7890 \
+  --prompt "Create a blue cube"
+```
+
+**What it reports:**
+- Graph step progression and tail nodes
+- Latest verification payload (if present)
+- Todo states (`latest_todos_event` + persisted `todos_state`)
+- Final assistant summary tail
+- Error event / done event metadata
+
 ## Running All Tests
 
 ```bash

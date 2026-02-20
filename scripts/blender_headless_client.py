@@ -199,6 +199,14 @@ def _prepare_scene(bpy: Any, blend_path: str | None) -> None:
         print(f"Failed to remove default Cube: {exc}")
 
     try:
+        camera = bpy.data.objects.get("Camera")
+        if camera is not None:
+            bpy.data.objects.remove(camera, do_unlink=True)
+            print("Removed default Camera object")
+    except Exception as exc:
+        print(f"Failed to remove default Camera: {exc}")
+
+    try:
         scene = bpy.context.scene
         world = scene.world
         if world is None:

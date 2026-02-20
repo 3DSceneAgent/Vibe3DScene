@@ -4,6 +4,7 @@ import json
 import pytest
 import requests
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage
 from scene_agent.interfaces import api as api_module
 from .streaming_helpers import collect_sse_payloads, find_payload
 
@@ -56,6 +57,54 @@ async def fake_get_updates_agent(_thread_id=None):
     return UpdatesAgent()
 
 
+class VerifyNodeMessageAgent:
+    async def astream(self, *_args, **_kwargs):
+        yield (
+            AIMessage(content='{"status":"match"}'),
+            {"langgraph_node": "verify"},
+        )
+        yield (
+            "updates",
+            {
+                "verify": {
+                    "messages": [
+                        {
+                            "type": "tool",
+                            "name": "verification",
+                            "content": {"status": "match", "reason": "ok"},
+                        }
+                    ],
+                },
+            },
+        )
+
+
+async def fake_get_verify_message_agent(_thread_id=None):
+    return VerifyNodeMessageAgent()
+
+
+class DuplicateAssistantFromUpdatesAgent:
+    async def astream(self, *_args, **_kwargs):
+        yield (
+            "messages",
+            [{"type": "ai", "id": "assistant-final", "content": "Final summary text"}],
+        )
+        yield (
+            "updates",
+            {
+                "finalize": {
+                    "messages": [
+                        {"type": "ai", "id": "assistant-final", "content": "Final summary text"}
+                    ],
+                },
+            },
+        )
+
+
+async def fake_get_duplicate_assistant_agent(_thread_id=None):
+    return DuplicateAssistantFromUpdatesAgent()
+
+
 def test_chat_stream_sse(monkeypatch):
     monkeypatch.setattr(api_module, "get_agent", fake_get_agent)
     client = TestClient(api_module.app)
@@ -100,6 +149,43 @@ def test_chat_stream_emits_graph_node_events_and_update_messages(monkeypatch):
     ]
     assert tool_payloads
     assert tool_payloads[0]["messages"][0].get("name") == "verification"
+
+
+def test_chat_stream_filters_verify_internal_message_stream(monkeypatch):
+    monkeypatch.setattr(api_module, "get_agent", fake_get_verify_message_agent)
+    client = TestClient(api_module.app)
+
+    with client.stream("POST", "/chat/stream", json={"message": "hi", "thread_id": "t-verify-filter"}) as response:
+        assert response.status_code == 200
+        payloads = collect_sse_payloads(response.iter_lines())
+
+    deltas = [payload for payload in payloads if "delta" in payload]
+    assert not deltas
+
+    tool_payloads = [
+        payload for payload in payloads if "messages" in payload and payload["messages"][0].get("type") == "tool"
+    ]
+    assert tool_payloads
+    assert tool_payloads[0]["messages"][0].get("name") == "verification"
+
+
+def test_chat_stream_skips_non_tool_update_messages_after_message_stream(monkeypatch):
+    monkeypatch.setattr(api_module, "get_agent", fake_get_duplicate_assistant_agent)
+    client = TestClient(api_module.app)
+
+    with client.stream("POST", "/chat/stream", json={"message": "hi", "thread_id": "t-dup-assistant"}) as response:
+        assert response.status_code == 200
+        payloads = collect_sse_payloads(response.iter_lines())
+
+    deltas = [payload["delta"] for payload in payloads if "delta" in payload]
+    assert deltas == ["Final summary text"]
+
+    assistant_messages = [
+        payload
+        for payload in payloads
+        if "messages" in payload and payload["messages"][0].get("type") == "ai"
+    ]
+    assert not assistant_messages
 
 
 def test_chat_stream_emits_done(monkeypatch):

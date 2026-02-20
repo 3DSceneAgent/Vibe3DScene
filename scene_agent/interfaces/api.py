@@ -84,13 +84,13 @@ _VLM_PROVIDER_DISPLAY_NAMES = {
     "anthropic": "Anthropic",
     "gemini": "Gemini",
 }
-_SCENE_LEVEL_RENDER_CAMERA_CONFIGS: tuple[tuple[str, float], ...] = (
-    ("SceneCamera_NE", 45.0),
-    ("SceneCamera_NW", 135.0),
-    ("SceneCamera_SE", -45.0),
-    ("SceneCamera_SW", -135.0),
+_SCENE_LEVEL_RENDER_CAMERA_CONFIGS: tuple[tuple[str, float, float], ...] = (
+    ("SceneCamera_NE", 45.0, 30.0),
+    ("SceneCamera_NW", 135.0, 30.0),
+    ("SceneCamera_SE", -45.0, 30.0),
+    ("SceneCamera_SW", -135.0, 30.0),
+    ("SceneCamera_TopDown", 0.0, 89.0),
 )
-_SCENE_LEVEL_RENDER_ELEVATION = 30.0
 _SCENE_LEVEL_RENDER_FOCAL_MM = 50.0
 _DEFAULT_API_LOG_PATH = Path(__file__).resolve().parents[2] / "logs" / "api_server.log"
 _API_LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
@@ -1043,14 +1043,14 @@ async def _render_scene_level_views(
     request_timeout_seconds: float | None,
 ) -> list[dict[str, str]]:
     """
-    Render canonical 4 scene-level viewpoints (NE/NW/SE/SW).
+    Render canonical 5 scene-level viewpoints (NE/NW/SE/SW + top-down bird view).
 
     This path does not depend on pre-existing camera objects in scene info.
     It uses camera_observe in single_view mode and labels outputs with
     deterministic scene-level camera names.
     """
     renders: list[dict[str, str]] = []
-    for camera_name, azimuth in _SCENE_LEVEL_RENDER_CAMERA_CONFIGS:
+    for camera_name, azimuth, elevation in _SCENE_LEVEL_RENDER_CAMERA_CONFIGS:
         temp_path = os.path.join(
             tempfile.gettempdir(),
             f"scene_level_render_{camera_name}_{int(time.time() * 1000)}.png",
@@ -1063,7 +1063,7 @@ async def _render_scene_level_views(
                 "mode": "single_view",
                 "focal_length": _SCENE_LEVEL_RENDER_FOCAL_MM,
                 "azimuth": azimuth,
-                "elevation": _SCENE_LEVEL_RENDER_ELEVATION,
+                "elevation": elevation,
                 "reuse_cameras": True,
                 "camera_name": camera_name,
                 "camera_kind": "scene_level",
@@ -1579,7 +1579,23 @@ async def chat_stream(request: ChatRequest, request_http: Request):
                 if isinstance(payload, dict) and "todos" in payload and payload["todos"]:
                     yield f"data: {json.dumps({'todos': payload['todos']}, default=str)}\n\n"
 
-                update_mode_messages: list[Any] = []
+                stream_payload: Any = payload
+                stream_source_node: str | None = None
+                if is_message_stream:
+                    if mode == "messages" and isinstance(payload, tuple) and len(payload) == 2:
+                        stream_payload = payload[0]
+                        raw_meta = payload[1]
+                        if isinstance(raw_meta, dict):
+                            raw_node_name = raw_meta.get("langgraph_node")
+                            if isinstance(raw_node_name, str) and raw_node_name:
+                                stream_source_node = raw_node_name
+                    elif isinstance(payload, dict):
+                        raw_node_name = payload.get("langgraph_node")
+                        if isinstance(raw_node_name, str) and raw_node_name:
+                            stream_source_node = raw_node_name
+
+                update_mode_tool_messages: list[Any] = []
+                update_mode_non_tool_messages: list[Any] = []
                 if mode == "updates" and isinstance(payload, dict):
                     for node_name, node_update in payload.items():
                         if not isinstance(node_name, str) or not node_name:
@@ -1601,16 +1617,26 @@ async def chat_stream(request: ChatRequest, request_http: Request):
                             yield f"data: {json.dumps({'todos': todos_payload}, default=str)}\n\n"
 
                         node_messages = node_update.get("messages")
+                        node_messages_list: list[Any] = []
                         if isinstance(node_messages, list):
-                            update_mode_messages.extend(node_messages)
+                            node_messages_list = node_messages
                         elif node_messages is not None:
-                            update_mode_messages.append(node_messages)
+                            node_messages_list = [node_messages]
+                        for node_message in node_messages_list:
+                            serialized_node_message = serialize_message(node_message)
+                            if message_is_tool(serialized_node_message):
+                                update_mode_tool_messages.append(node_message)
+                            else:
+                                update_mode_non_tool_messages.append(node_message)
 
                 messages = None
                 if is_message_stream:
-                    messages = payload if mode == "messages" else [mode]
-                elif update_mode_messages:
-                    messages = update_mode_messages
+                    messages = stream_payload if mode == "messages" else [mode]
+                elif update_mode_tool_messages:
+                    messages = update_mode_tool_messages
+                elif update_mode_non_tool_messages and not saw_message_stream:
+                    # Fallback only when token streaming is unavailable.
+                    messages = update_mode_non_tool_messages
                 elif isinstance(payload, dict) and "messages" in payload:
                     if not saw_message_stream:
                         messages = payload["messages"]
@@ -1620,9 +1646,18 @@ async def chat_stream(request: ChatRequest, request_http: Request):
                         messages = [messages]
                     for message in messages:
                         serialized = serialize_message(message)
+                        is_tool_message = message_is_tool(serialized)
+                        if (
+                            is_message_stream
+                            and stream_source_node == "verify"
+                            and not is_tool_message
+                        ):
+                            # verify node is internal; user-facing output comes from
+                            # ToolMessage(name="verification") only.
+                            continue
                         serialized_stream = sanitize_message_for_stream(serialized)
                         message_type = serialized_stream.get("type")
-                        if message_has_tool_calls(serialized) or message_is_tool(serialized):
+                        if message_has_tool_calls(serialized) or is_tool_message:
                             scene_has_change = True
                         if message_type in {"human", "system"}:
                             continue

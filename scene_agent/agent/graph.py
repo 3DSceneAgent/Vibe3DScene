@@ -17,8 +17,11 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from scene_agent.agent.state import AgentState
 from scene_agent.agent.redis_checkpointer import get_graph_checkpointer
 from scene_agent.agent.nodes import (
+    TODO_BLOCKED_RECOVERY_ATTEMPTS,
     TODO_STAGNATION_LIMIT,
     agent_node,
+    blocked_recovery_action_node,
+    blocked_recovery_node,
     checkpoint_gate_node,
     finalize_node,
     post_agent_node,
@@ -34,7 +37,6 @@ from scene_agent.tools import get_blender_tools
 
 _TOOL_RETRY_MAX_ATTEMPTS = 2
 _TOOL_RETRY_BASE_DELAY_SECONDS = 0.2
-_FINALIZE_BLOCK_GRACE_CHECKS = 2
 _RETRYABLE_TOOL_ERROR_MARKERS = (
     "validation error",
     "input should",
@@ -291,7 +293,7 @@ def _route_after_finalize_checkpoint(state: AgentState) -> Literal["todo_check",
     return "finalize"
 
 
-def _route_after_todo_check(state: AgentState) -> Literal["finalize", "agent"]:
+def _route_after_todo_check(state: AgentState) -> Literal["finalize", "agent", "blocked_recovery"]:
     gate = state.get("todo_check_gate")
     if isinstance(gate, dict) and gate.get("stage") == "finalize":
         todo_check = state.get("todo_check")
@@ -303,13 +305,29 @@ def _route_after_todo_check(state: AgentState) -> Literal["finalize", "agent"]:
                 stagnation_count = todo_check.get("stagnation_count")
                 if (
                     isinstance(stagnation_count, int)
-                    and stagnation_count < (TODO_STAGNATION_LIMIT + _FINALIZE_BLOCK_GRACE_CHECKS)
+                    and stagnation_count < (TODO_STAGNATION_LIMIT + TODO_BLOCKED_RECOVERY_ATTEMPTS)
                 ):
-                    return "agent"
+                    return "blocked_recovery"
                 return "finalize"
         else:
             return "finalize"
     return "agent"
+
+
+def _route_after_blocked_recovery_action(state: AgentState) -> Literal["tools", "agent"]:
+    messages = state.get("messages") or []
+    for message in reversed(list(messages)):
+        if isinstance(message, AIMessage):
+            if _message_has_tool_calls(message):
+                return "tools"
+            return "agent"
+    return "agent"
+
+
+def _route_after_verify(state: AgentState) -> Literal["tools", "checkpoint_loop"]:
+    if bool(state.get("verify_forced_recovery")):
+        return "tools"
+    return "checkpoint_loop"
 
 
 async def create_agent_graph(
@@ -398,6 +416,8 @@ async def create_agent_graph(
         lambda state: checkpoint_gate_node(state, stage="finalize"),
     )
     builder.add_node("todo_check", todo_check_node)
+    builder.add_node("blocked_recovery", blocked_recovery_node)
+    builder.add_node("blocked_recovery_action", blocked_recovery_action_node)
     builder.add_node(
         "verify",
         lambda state: verify_node(
@@ -426,7 +446,10 @@ async def create_agent_graph(
     builder.add_edge("tools", "update_memory")
     builder.add_edge("update_memory", "scene_observe")
     builder.add_edge("scene_observe", "verify")
-    builder.add_edge("verify", "checkpoint_loop")
+    builder.add_conditional_edges(
+        "verify",
+        _route_after_verify,
+    )
     builder.add_conditional_edges(
         "checkpoint_loop",
         _route_after_loop_checkpoint,
@@ -438,6 +461,11 @@ async def create_agent_graph(
     builder.add_conditional_edges(
         "todo_check",
         _route_after_todo_check,
+    )
+    builder.add_edge("blocked_recovery", "blocked_recovery_action")
+    builder.add_conditional_edges(
+        "blocked_recovery_action",
+        _route_after_blocked_recovery_action,
     )
     builder.add_edge("finalize", END)
     

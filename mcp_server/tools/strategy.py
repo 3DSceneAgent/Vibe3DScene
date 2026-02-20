@@ -33,4 +33,6 @@ def asset_creation_strategy_text(
         rodin_ready=rodin_ready,
         hunyuan_ready=hunyuan_ready,
         retrieval_ready=retrieval_ready,
+        undo_ready=True,
+        clear_scene_ready=True,
     )

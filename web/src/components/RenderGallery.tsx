@@ -29,7 +29,7 @@ export function RenderGallery({
             onChange={(event) => onIncludeLocalWorkChange(event.target.checked)}
           />
           <span className="toggle-slider" />
-          <span className="toggle-label">Include Local Cameras</span>
+          <span className="toggle-label">Show Local Camera</span>
         </label>
       </div>
       {!hasRenders && <div className="muted">{isLoading ? 'Fetching renders...' : 'No renders loaded yet.'}</div>}

@@ -22,6 +22,7 @@ type GltfViewerProps = {
   isFullscreen?: boolean
   onToggleFullscreen?: () => void
   headerControls?: ReactNode
+  headerTrailingControls?: ReactNode
   alwaysAutoFrameCamera?: boolean
 }
 
@@ -190,6 +191,7 @@ export function GltfViewer({
   isFullscreen = false,
   onToggleFullscreen,
   headerControls,
+  headerTrailingControls,
   alwaysAutoFrameCamera = false
 }: GltfViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -209,6 +211,7 @@ export function GltfViewer({
   const hasLoadedModelRef = useRef(false)
   const cameraViewRef = useRef<{ position: THREE.Vector3; target: THREE.Vector3 } | null>(null)
   const hasUserCameraOverrideRef = useRef(false)
+  const resizeRendererRef = useRef<(() => void) | null>(null)
 
   const preset = useMemo(() => environmentPresets[environment], [environment])
   const resolvedViewportTheme: UiTheme =
@@ -298,6 +301,7 @@ export function GltfViewer({
       camera.aspect = width / height
       camera.updateProjectionMatrix()
     }
+    resizeRendererRef.current = resizeRenderer
 
     resizeRenderer()
     container.appendChild(renderer.domElement)
@@ -345,11 +349,30 @@ export function GltfViewer({
         renderer.domElement.parentElement.removeChild(renderer.domElement)
       }
       scene.clear()
+      resizeRendererRef.current = null
       hasLoadedModelRef.current = false
       cameraViewRef.current = null
       hasUserCameraOverrideRef.current = false
     }
   }, [])
+
+  useEffect(() => {
+    const resize = resizeRendererRef.current
+    if (!resize) return
+
+    const frame = window.requestAnimationFrame(() => {
+      resize()
+      const renderer = rendererRef.current
+      const scene = sceneRef.current
+      const camera = cameraRef.current
+      if (renderer && scene && camera) {
+        renderer.render(scene, camera)
+      }
+    })
+    return () => {
+      window.cancelAnimationFrame(frame)
+    }
+  }, [gltfUrl, isFullscreen])
 
   useEffect(() => {
     if (!lightRef.current) return
@@ -491,7 +514,9 @@ export function GltfViewer({
     const loadToken = loadTokenRef.current + 1
     loadTokenRef.current = loadToken
     const preservedView =
-      hasLoadedModelRef.current && !alwaysAutoFrameCameraRef.current
+      hasLoadedModelRef.current &&
+      !alwaysAutoFrameCameraRef.current &&
+      hasUserCameraOverrideRef.current
         ? cameraViewRef.current
         : null
 
@@ -542,12 +567,15 @@ export function GltfViewer({
           controls.update()
         } else {
           frameCameraToBox(camera, controls, box, size, center)
+          hasUserCameraOverrideRef.current = false
         }
         hasLoadedModelRef.current = true
         cameraViewRef.current = {
           position: camera.position.clone(),
           target: controls.target.clone()
         }
+        resizeRendererRef.current?.()
+        rendererRef.current?.render(scene, camera)
 
         const roots =
           gltf.scene.children.length > 0
@@ -577,6 +605,7 @@ export function GltfViewer({
               {isFullscreen ? 'Exit' : 'Fullscreen'}
             </button>
           )}
+          {headerTrailingControls}
         </div>
       </div>
       <div className={`viewer viewport-${resolvedViewportTheme}`}>

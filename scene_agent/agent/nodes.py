@@ -3,6 +3,7 @@ LangGraph node implementations.
 Nodes follow best practices: return partial state updates only.
 """
 import base64
+import ast
 import hashlib
 import json
 import mimetypes
@@ -20,6 +21,7 @@ from scene_agent.vlm.verification import verify_render_with_references
 
 TODO_CHECK_INTERVAL_ROUNDS = 3
 TODO_STAGNATION_LIMIT = 2
+TODO_BLOCKED_RECOVERY_ATTEMPTS = 2
 TODO_MILESTONE_TOOL_MARKERS = (
     "render_from_camera",
     "render_from_objects",
@@ -29,6 +31,7 @@ TODO_MILESTONE_TOOL_MARKERS = (
 )
 
 SCENE_MUTATING_TOOLS: frozenset[str] = frozenset({
+    "clear_scene",
     "execute_blender_code",
     "delete_objects",
     "import_glb_model",
@@ -42,6 +45,7 @@ SCENE_MUTATING_TOOLS: frozenset[str] = frozenset({
     "generate_hunyuan3d_model",
     "generate_hyper3d_model_via_text",
     "generate_hyper3d_model_via_images",
+    "undo_last_snapshot",
 })
 
 OBJECT_LEVEL_TOOLS: frozenset[str] = frozenset({
@@ -57,6 +61,19 @@ OBJECT_LEVEL_TOOLS: frozenset[str] = frozenset({
 # no unbounded accumulation across turns.
 _RENDER_VISION_MESSAGE_ID = "render_vision_current"
 _SCENE_OBSERVE_MESSAGE_ID = "scene_observe_current"
+_TODO_BLOCKED_RECOVERY_MESSAGE_ID = "todo_blocked_recovery_current"
+_TODO_BLOCKED_RECOVERY_ACTION_MESSAGE_ID = "todo_blocked_recovery_action_current"
+_CATASTROPHIC_RECOVERY_ACTION_MESSAGE_ID = "catastrophic_recovery_action_current"
+_CATASTROPHIC_RECOVERY_NOTE_MESSAGE_ID = "catastrophic_recovery_note_current"
+
+_CATASTROPHIC_SCENE_DIMENSION_THRESHOLD = 5000.0
+_CATASTROPHIC_OBJECT_COORD_THRESHOLD = 5000.0
+_CATASTROPHIC_OBJECT_DIMENSION_THRESHOLD = 2000.0
+_CATASTROPHIC_RENDER_STDDEV_THRESHOLD = 2.0
+_CATASTROPHIC_RENDER_GRAY_DRIFT_THRESHOLD = 3.0
+_CATASTROPHIC_RENDER_BLACK_MEAN_THRESHOLD = 4.0
+_CATASTROPHIC_RENDER_WHITE_MEAN_THRESHOLD = 251.0
+_CATASTROPHIC_RECOVERY_MAX_FORCED_ATTEMPTS = 2
 
 
 def agent_node(
@@ -185,46 +202,123 @@ def _compose_finalize_summary(
     *,
     finalizer_model: Any | None = None,
 ) -> str:
-    fallback = _build_finalize_summary(state, decision)
     generated = _build_finalize_summary_with_model(
         state,
         decision,
         finalizer_model=finalizer_model,
     )
-    return generated or fallback
+    if generated:
+        return generated
+    return _build_finalize_summary(state, decision)
 
 
 def _build_finalize_summary(state: AgentState, decision: dict[str, Any]) -> str:
     finish_reason = str(decision.get("finish_reason", "unknown"))
-    lines: list[str] = [f"Scene workflow finished ({finish_reason})."]
+    todo_counts = _collect_current_todo_counts(state)
+    total_todos = todo_counts["total"]
+    pending = todo_counts["pending"]
+    in_progress = todo_counts["in_progress"]
+    completed = todo_counts["completed"]
+    failed = todo_counts["failed"]
+
+    lines: list[str] = [
+        "Result",
+        f"Scene workflow finished ({finish_reason}).",
+    ]
 
     todo_check = state.get("todo_check")
+    todo_check_status: str | None = None
+    todo_check_reason: str | None = None
     if isinstance(todo_check, dict):
         status = todo_check.get("status")
         reason = todo_check.get("reason")
-        pending = todo_check.get("pending_count")
-        in_progress = todo_check.get("in_progress_count")
-        completed = todo_check.get("completed_count")
-        failed = todo_check.get("failed_count")
         if isinstance(status, str) and status:
-            if isinstance(reason, str) and reason:
-                lines.append(f"Todo check: {status} ({reason}).")
-            else:
-                lines.append(f"Todo check: {status}.")
-        counts = [pending, in_progress, completed, failed]
-        if all(isinstance(value, int) for value in counts):
-            lines.append(
-                "Todo summary: "
-                f"completed={completed}, in_progress={in_progress}, pending={pending}, failed={failed}."
-            )
+            todo_check_status = status
+        if isinstance(reason, str) and reason:
+            todo_check_reason = reason
+
+    lines.extend(
+        [
+            "",
+            "Todo Progress",
+            (
+                f"Total todos: {total_todos}. "
+                f"Completed: {completed}, in progress: {in_progress}, pending: {pending}, failed: {failed}."
+            ),
+        ]
+    )
+    if todo_check_status:
+        if todo_check_reason:
+            lines.append(f"Todo check status: {todo_check_status} ({todo_check_reason}).")
+        else:
+            lines.append(f"Todo check status: {todo_check_status}.")
 
     verification_status, verification_reason = _latest_verification_feedback(state)
+    lines.extend(["", "Verification Highlights"])
     if verification_status:
         lines.append(f"Latest verification: {verification_status}.")
     if verification_reason:
         lines.append(f"Verification note: {verification_reason}.")
+    if not verification_status and not verification_reason:
+        lines.append("No verification payload was captured in the final state.")
+
+    next_action = _build_finalize_next_action(state, finish_reason, pending, in_progress)
+    lines.extend(["", "Suggested Next Action", next_action])
 
     return "\n".join(lines)
+
+
+def _collect_current_todo_counts(state: AgentState) -> dict[str, int]:
+    todo_check = state.get("todo_check")
+    if isinstance(todo_check, dict):
+        pending = todo_check.get("pending_count")
+        in_progress = todo_check.get("in_progress_count")
+        completed = todo_check.get("completed_count")
+        failed = todo_check.get("failed_count")
+        if all(
+            isinstance(value, int) and value >= 0
+            for value in (pending, in_progress, completed, failed)
+        ):
+            total = pending + in_progress + completed + failed
+            return {
+                "total": total,
+                "pending": pending,
+                "in_progress": in_progress,
+                "completed": completed,
+                "failed": failed,
+            }
+
+    todos = _coerce_todos(state.get("todos"))
+    latest_by_description = _latest_todos_by_description(todos)
+    effective_todos = list(latest_by_description.values()) if latest_by_description else todos
+    return {
+        "total": len(effective_todos),
+        "pending": sum(1 for todo in effective_todos if todo.get("status") == "pending"),
+        "in_progress": sum(1 for todo in effective_todos if todo.get("status") == "in_progress"),
+        "completed": sum(1 for todo in effective_todos if todo.get("status") == "completed"),
+        "failed": sum(1 for todo in effective_todos if todo.get("status") == "failed"),
+    }
+
+
+def _build_finalize_next_action(
+    state: AgentState,
+    finish_reason: str,
+    pending_count: int,
+    in_progress_count: int,
+) -> str:
+    if pending_count == 0 and in_progress_count == 0:
+        return "If the result looks correct, export the scene artifacts (render/GLB/BLEND)."
+
+    focus = _active_todo_context(state)
+    if focus:
+        return (
+            "Continue from the next unfinished todo: "
+            + focus[0]
+            + ". Apply edits, then render and verify again."
+        )
+    if finish_reason == "todo_check_blocked":
+        return "Resolve the highest-impact scene mismatch first, then re-run render + verification."
+    return "Continue iterating on unfinished todos, then render and verify before finalizing."
 
 
 def _build_finalize_summary_with_model(
@@ -246,17 +340,31 @@ def _build_finalize_summary_with_model(
         "4) Suggested Next Action\n"
         "Requirements:\n"
         "- Never dump raw dict/JSON.\n"
+        "- Never copy machine field names (e.g., status/object_feedback/layout_feedback/todo_assessment).\n"
+        "- Convert structured inputs into natural-language summary sentences.\n"
         "- Keep concrete and readable for end users.\n"
         "- Match the user's language inferred from latest_user_request."
     )
     context_json = json.dumps(summary_payload, ensure_ascii=False, default=str)
+    summarize_messages = [
+        SystemMessage(content=summarize_prompt),
+        HumanMessage(content=f"workflow_state:\n{context_json}"),
+    ]
     try:
-        response = finalizer_model.invoke(
-            [
-                SystemMessage(content=summarize_prompt),
-                HumanMessage(content=f"workflow_state:\n{context_json}"),
-            ]
-        )
+        if hasattr(finalizer_model, "with_config"):
+            invoke_model = finalizer_model.with_config(
+                tags=["nostream"],
+                run_name="finalize_summary_internal",
+            )
+            response = invoke_model.invoke(summarize_messages)
+        else:
+            try:
+                response = finalizer_model.invoke(
+                    summarize_messages,
+                    config={"tags": ["nostream"], "run_name": "finalize_summary_internal"},
+                )
+            except TypeError:
+                response = finalizer_model.invoke(summarize_messages)
     except Exception:
         return None
 
@@ -299,6 +407,9 @@ def _build_finalize_summary_context(
 def _sanitize_verification_payload(payload: Any) -> Any:
     if isinstance(payload, str):
         text = payload.strip()
+        parsed = _coerce_verification_payload_from_text(text)
+        if isinstance(parsed, dict):
+            return _sanitize_verification_payload(parsed)
         return text[:600] if len(text) > 600 else text
     if not isinstance(payload, dict):
         return payload
@@ -358,8 +469,65 @@ def _latest_verification_feedback(state: AgentState) -> tuple[str | None, str | 
         reason_value = reason if isinstance(reason, str) and reason else None
         return status_value, reason_value
     if isinstance(payload, str):
-        return None, payload
+        parsed = _coerce_verification_payload_from_text(payload)
+        if isinstance(parsed, dict):
+            status = parsed.get("status")
+            reason = parsed.get("reason")
+            status_value = status if isinstance(status, str) and status else None
+            if isinstance(reason, str) and reason:
+                return status_value, reason
+
+            # Fallback to a concise synthesized reason from feedback fields.
+            for key in (
+                "object_feedback",
+                "layout_feedback",
+                "placement_feedback",
+                "material_feedback",
+                "scale_feedback",
+                "environment_feedback",
+            ):
+                value = parsed.get(key)
+                if isinstance(value, str) and value.strip():
+                    return status_value, value.strip()
+            return status_value, None
+        normalized = " ".join(payload.strip().split())
+        if not normalized:
+            return None, None
+        if len(normalized) > 300:
+            normalized = f"{normalized[:300]}..."
+        return None, normalized
     return None, None
+
+
+def _coerce_verification_payload_from_text(text: str) -> dict[str, Any] | None:
+    if not isinstance(text, str):
+        return None
+    normalized = text.strip()
+    if not normalized:
+        return None
+
+    candidates: list[str] = [normalized]
+    first_brace = normalized.find("{")
+    last_brace = normalized.rfind("}")
+    if first_brace >= 0 and last_brace > first_brace:
+        snippet = normalized[first_brace : last_brace + 1].strip()
+        if snippet and snippet not in candidates:
+            candidates.append(snippet)
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+        try:
+            parsed_literal = ast.literal_eval(candidate)
+            if isinstance(parsed_literal, dict):
+                return parsed_literal
+        except Exception:
+            pass
+    return None
 
 
 def _resolve_effective_available_tools(
@@ -491,7 +659,7 @@ def update_memory_node(state: AgentState) -> Dict[str, Any]:
 
 
 def scene_observe_node(state: AgentState) -> Dict[str, Any]:
-    """Auto-render 4 scene-level cameras after scene-mutating tool calls.
+    """Auto-render 5 scene-level cameras after scene-mutating tool calls.
 
     This node fires only when the latest tool batch contains a scene-mutating
     tool (import, generate, execute_blender_code, etc.).  For object-level
@@ -559,7 +727,7 @@ def scene_observe_node(state: AgentState) -> Dict[str, Any]:
         {
             "type": "text",
             "text": (
-                "Auto scene observation — 4-view render after scene mutation. "
+                "Auto scene observation — 5-view render after scene mutation (4 corners + top-down bird view). "
                 "Review these views to assess overall composition, scale, and layout."
             ),
         },
@@ -772,6 +940,162 @@ def todo_check_node(state: AgentState) -> Dict[str, Any]:
     }
 
 
+def blocked_recovery_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Inject a one-shot internal recovery instruction when finalize-stage todo_check is blocked.
+    """
+    todo_check = state.get("todo_check")
+    if not isinstance(todo_check, dict):
+        return {}
+    if todo_check.get("status") != "blocked":
+        return {}
+
+    stagnation_count = _coerce_non_negative_int(todo_check.get("stagnation_count"))
+    recovery_attempt = max(1, stagnation_count - TODO_STAGNATION_LIMIT + 1)
+
+    enabled_tool_names = state.get("enabled_tool_names")
+    enabled_tool_set: set[str] = set()
+    if isinstance(enabled_tool_names, list):
+        enabled_tool_set = {
+            name.strip()
+            for name in enabled_tool_names
+            if isinstance(name, str) and name.strip()
+        }
+
+    undo_known_available = not enabled_tool_set or "undo_last_snapshot" in enabled_tool_set
+    clear_scene_known_available = not enabled_tool_set or "clear_scene" in enabled_tool_set
+    if clear_scene_known_available:
+        reset_line = (
+            "- Full reset flow: call `clear_scene()`, then call `get_scene_info()` and "
+            "`observe_scene_global()` to confirm an empty baseline before rebuilding from the first pending todo."
+        )
+    else:
+        reset_line = (
+            "- Full reset flow: call `get_scene_info()`, collect all current object names, then call "
+            "`delete_objects(object_names=[...], mode=\"cascade\", strict=False, ignore_missing=True)` "
+            "to clear the scene before rebuilding from the first pending todo."
+        )
+
+    if undo_known_available and recovery_attempt <= 1:
+        recovery_lines = [
+            "- First recovery action: call `undo_last_snapshot()` once.",
+            "- Validate rollback with `get_scene_info()` and `observe_scene_global()`.",
+            "- If undo fails or the scene is still broken, immediately run full reset:",
+            reset_line,
+        ]
+    elif undo_known_available:
+        recovery_lines = [
+            "- Previous recovery did not restore progress. Skip undo and run full reset now.",
+            reset_line,
+        ]
+    else:
+        recovery_lines = [
+            "- `undo_last_snapshot` is unavailable. Run full reset now.",
+            reset_line,
+        ]
+
+    guidance = "\n".join(
+        [
+            "Recovery mode: todo progress was flagged as blocked in finalize checkpoint.",
+            f"Recovery attempt {recovery_attempt}/{TODO_BLOCKED_RECOVERY_ATTEMPTS}.",
+            "Do not finalize now. You must call tools in this turn.",
+            "- Do NOT use `execute_blender_code` for scene deletion/reset; addon enforces hierarchy-safe deletion via `delete_objects`.",
+            *recovery_lines,
+            "- After recovery edits, call a render tool so verification receives fresh visual evidence.",
+        ]
+    )
+
+    return {
+        "messages": [
+            SystemMessage(
+                id=_TODO_BLOCKED_RECOVERY_MESSAGE_ID,
+                content=guidance,
+            )
+        ]
+    }
+
+
+def blocked_recovery_action_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Dispatch deterministic recovery tool calls to reduce LLM hesitation.
+    """
+    todo_check = state.get("todo_check")
+    if not isinstance(todo_check, dict):
+        return {}
+    if todo_check.get("status") != "blocked":
+        return {}
+
+    stagnation_count = _coerce_non_negative_int(todo_check.get("stagnation_count"))
+    recovery_attempt = max(1, stagnation_count - TODO_STAGNATION_LIMIT + 1)
+
+    enabled_tool_names = state.get("enabled_tool_names")
+    enabled_tool_set: set[str] = set()
+    if isinstance(enabled_tool_names, list):
+        enabled_tool_set = {
+            name.strip()
+            for name in enabled_tool_names
+            if isinstance(name, str) and name.strip()
+        }
+
+    def _tool_available(name: str) -> bool:
+        if not enabled_tool_set:
+            return True
+        return name in enabled_tool_set
+
+    tool_calls: list[dict[str, Any]] = []
+    if recovery_attempt <= 1 and _tool_available("undo_last_snapshot"):
+        tool_calls.append(
+            {
+                "name": "undo_last_snapshot",
+                "args": {},
+                "id": "recovery-undo-1",
+                "type": "tool_call",
+            }
+        )
+    elif _tool_available("clear_scene"):
+        tool_calls.append(
+            {
+                "name": "clear_scene",
+                "args": {},
+                "id": "recovery-clear-1",
+                "type": "tool_call",
+            }
+        )
+
+    # Always request fresh grounding evidence when available.
+    if _tool_available("get_scene_info"):
+        tool_calls.append(
+            {
+                "name": "get_scene_info",
+                "args": {},
+                "id": "recovery-scene-info-1",
+                "type": "tool_call",
+            }
+        )
+    if _tool_available("observe_scene_global"):
+        tool_calls.append(
+            {
+                "name": "observe_scene_global",
+                "args": {},
+                "id": "recovery-observe-1",
+                "type": "tool_call",
+            }
+        )
+
+    if not tool_calls:
+        return {}
+
+    return {
+        "messages": [
+            AIMessage(
+                id=_TODO_BLOCKED_RECOVERY_ACTION_MESSAGE_ID,
+                content="",
+                tool_calls=tool_calls,
+            )
+        ]
+    }
+
+
 def _message_content_to_text(content: Any) -> str:
     if content is None:
         return ""
@@ -851,8 +1175,36 @@ def _align_todo_updates_with_existing(
     return aligned
 
 
+_TODO_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "to",
+        "of",
+        "for",
+        "with",
+        "and",
+        "on",
+        "in",
+        "at",
+        "by",
+        "from",
+    }
+)
+
+
 def _normalize_todo_description(description: str) -> str:
-    return re.sub(r"\s+", " ", description).strip().lower()
+    if not isinstance(description, str):
+        return ""
+    lowered = description.strip().lower()
+    if not lowered:
+        return ""
+    alnum = re.sub(r"[^a-z0-9]+", " ", lowered)
+    tokens = [token for token in alnum.split() if token and token not in _TODO_STOPWORDS]
+    if not tokens:
+        return re.sub(r"\s+", " ", lowered).strip()
+    return " ".join(tokens)
 
 
 def _latest_todos_by_description(todos: list[TodoItem]) -> dict[str, TodoItem]:
@@ -1185,6 +1537,408 @@ def _active_todo_context(state: AgentState) -> list[str]:
     return (in_progress + pending)[:5]
 
 
+def _normalize_verification_todo_status(raw_status: Any) -> str | None:
+    if not isinstance(raw_status, str):
+        return None
+    normalized = raw_status.strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in {"done", "completed", "complete"}:
+        return "completed"
+    if normalized in {"not_done", "pending", "in_progress", "uncertain", "unknown"}:
+        return "not_completed"
+    return None
+
+
+def _tokenize_todo_text(text: str) -> set[str]:
+    if not isinstance(text, str):
+        return set()
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", text.lower())
+        if len(token) >= 3
+    }
+
+
+def _match_todo_by_objective(
+    latest_todos: dict[str, TodoItem],
+    objective: str,
+) -> TodoItem | None:
+    objective_key = _normalize_todo_description(objective)
+    if not objective_key:
+        return None
+
+    exact = latest_todos.get(objective_key)
+    if exact:
+        return exact
+
+    if len(objective_key) >= 8:
+        for key, todo in latest_todos.items():
+            if objective_key in key or key in objective_key:
+                return todo
+
+    objective_tokens = _tokenize_todo_text(objective_key)
+    if not objective_tokens:
+        return None
+
+    best_todo: TodoItem | None = None
+    best_score = 0.0
+    for key, todo in latest_todos.items():
+        todo_tokens = _tokenize_todo_text(key)
+        if not todo_tokens:
+            continue
+        overlap = objective_tokens & todo_tokens
+        if not overlap:
+            continue
+        score = len(overlap) / max(len(objective_tokens), len(todo_tokens))
+        if score > best_score:
+            best_score = score
+            best_todo = todo
+
+    if best_score >= 0.5:
+        return best_todo
+    return None
+
+
+def _extract_verification_todo_assessments(
+    verification: dict[str, Any],
+) -> list[dict[str, str]]:
+    raw_assessment = verification.get("todo_assessment")
+    if not isinstance(raw_assessment, list):
+        return []
+
+    assessments: list[dict[str, str]] = []
+    for item in raw_assessment:
+        if not isinstance(item, dict):
+            continue
+        objective = item.get("objective")
+        status = item.get("status")
+        reason = item.get("reason")
+        if not isinstance(objective, str) or not objective.strip():
+            continue
+        normalized_status = _normalize_verification_todo_status(status)
+        if normalized_status is None:
+            continue
+        assessments.append(
+            {
+                "objective": objective.strip(),
+                "status": normalized_status,
+                "reason": reason.strip() if isinstance(reason, str) else "",
+            }
+        )
+    return assessments
+
+
+def _build_todo_updates_from_verification(
+    state: AgentState,
+    verification: dict[str, Any],
+) -> tuple[list[TodoItem], list[dict[str, str]]]:
+    todos = _coerce_todos(state.get("todos"))
+    if not todos:
+        return [], []
+
+    latest_todos = _latest_todos_by_description(todos)
+    if not latest_todos:
+        return [], []
+
+    assessments = _extract_verification_todo_assessments(verification)
+    if not assessments:
+        return [], []
+
+    updates_by_id: dict[str, TodoItem] = {}
+    update_records: list[dict[str, str]] = []
+    now_iso = datetime.now().isoformat()
+
+    for assessment in assessments:
+        if assessment["status"] != "completed":
+            continue
+        matched = _match_todo_by_objective(latest_todos, assessment["objective"])
+        if not matched:
+            continue
+        if matched.get("status") == "completed":
+            continue
+
+        updated = dict(matched)
+        updated["status"] = "completed"
+        updated["completed_at"] = now_iso
+        todo_item = TodoItem(**updated)
+        updates_by_id[todo_item["id"]] = todo_item
+        update_records.append(
+            {
+                "objective": assessment["objective"],
+                "matched_todo": str(matched.get("description", "")),
+                "status": "completed",
+                "reason": assessment.get("reason", ""),
+            }
+        )
+
+    return list(updates_by_id.values()), update_records
+
+
+def _build_verification_scene_context(state: AgentState) -> dict[str, Any] | None:
+    context: dict[str, Any] = {}
+
+    scene_objects = state.get("scene_objects")
+    if isinstance(scene_objects, dict) and scene_objects:
+        object_names = sorted(name for name in scene_objects.keys() if isinstance(name, str))
+        selected_names = object_names[:60]
+        compact_objects: dict[str, Any] = {}
+        for name in selected_names:
+            raw_object = scene_objects.get(name)
+            if isinstance(raw_object, dict):
+                compact: dict[str, Any] = {}
+                for key in ("type", "location", "dimensions", "bounding_box", "visible", "material_count"):
+                    if key in raw_object:
+                        compact[key] = raw_object.get(key)
+                compact_objects[name] = compact or raw_object
+            else:
+                compact_objects[name] = raw_object
+        context["scene_objects"] = compact_objects
+        context["scene_object_count"] = len(object_names)
+        if len(object_names) > len(selected_names):
+            context["scene_objects_truncated"] = True
+
+    scene_bbox = state.get("scene_bbox")
+    if isinstance(scene_bbox, dict) and scene_bbox:
+        context["scene_bbox"] = scene_bbox
+
+    scene_camera_params = state.get("scene_camera_params")
+    if isinstance(scene_camera_params, dict) and scene_camera_params:
+        context["scene_camera_params"] = scene_camera_params
+
+    persistent_cameras = state.get("persistent_cameras")
+    if isinstance(persistent_cameras, list) and persistent_cameras:
+        cameras = [name for name in persistent_cameras if isinstance(name, str)]
+        if cameras:
+            context["persistent_cameras"] = cameras[:12]
+
+    return context or None
+
+
+def _coerce_numeric_triplet(raw_value: Any) -> list[float]:
+    if not isinstance(raw_value, (list, tuple)):
+        return []
+    values: list[float] = []
+    for item in raw_value[:3]:
+        if isinstance(item, (int, float)):
+            values.append(float(item))
+    return values
+
+
+def _bbox_dimensions_from_bounds(raw_bbox: Any) -> list[float]:
+    if (
+        not isinstance(raw_bbox, (list, tuple))
+        or len(raw_bbox) != 2
+        or not isinstance(raw_bbox[0], (list, tuple))
+        or not isinstance(raw_bbox[1], (list, tuple))
+    ):
+        return []
+    min_corner = _coerce_numeric_triplet(raw_bbox[0])
+    max_corner = _coerce_numeric_triplet(raw_bbox[1])
+    if len(min_corner) != 3 or len(max_corner) != 3:
+        return []
+    return [
+        abs(max_corner[0] - min_corner[0]),
+        abs(max_corner[1] - min_corner[1]),
+        abs(max_corner[2] - min_corner[2]),
+    ]
+
+
+def _resolve_render_path_for_analysis(render_reference: Any) -> str | None:
+    if not isinstance(render_reference, str):
+        return None
+    normalized = render_reference.strip()
+    if not normalized or normalized.startswith("data:"):
+        return None
+    if normalized.startswith("file://"):
+        normalized = normalized.replace("file://", "", 1)
+
+    parsed = urlparse(normalized)
+    candidate_path = parsed.path if parsed.scheme and parsed.netloc else normalized
+    if candidate_path.startswith("/renders/"):
+        filename = unquote(candidate_path.replace("/renders/", "", 1).strip("/"))
+        if not filename:
+            return None
+        try:
+            from scene_agent.utils.rendering import RENDERS_DIR
+
+            local_path = os.path.join(str(RENDERS_DIR), filename)
+            if os.path.exists(local_path):
+                return local_path
+        except Exception:
+            return None
+    if os.path.exists(candidate_path):
+        return candidate_path
+    return None
+
+
+def _analyze_render_flatness(render_reference: Any) -> dict[str, Any] | None:
+    local_path = _resolve_render_path_for_analysis(render_reference)
+    if not local_path:
+        return None
+
+    try:
+        from PIL import Image, ImageStat
+
+        with Image.open(local_path) as image:
+            rgb = image.convert("RGB")
+            stat = ImageStat.Stat(rgb)
+    except Exception:
+        return None
+
+    means = [float(value) for value in stat.mean[:3]]
+    stddevs = [float(value) for value in stat.stddev[:3]]
+    if not means or not stddevs:
+        return None
+
+    mean_intensity = sum(means) / len(means)
+    stddev_intensity = sum(stddevs) / len(stddevs)
+    max_channel_drift = max(abs(channel - mean_intensity) for channel in means)
+    is_flat = stddev_intensity <= _CATASTROPHIC_RENDER_STDDEV_THRESHOLD
+    is_grayish = max_channel_drift <= _CATASTROPHIC_RENDER_GRAY_DRIFT_THRESHOLD
+    is_black_or_white = (
+        mean_intensity <= _CATASTROPHIC_RENDER_BLACK_MEAN_THRESHOLD
+        or mean_intensity >= _CATASTROPHIC_RENDER_WHITE_MEAN_THRESHOLD
+    )
+    return {
+        "path": local_path,
+        "mean_intensity": round(mean_intensity, 3),
+        "stddev_intensity": round(stddev_intensity, 3),
+        "max_channel_drift": round(max_channel_drift, 3),
+        "is_flat": bool(is_flat),
+        "is_grayish": bool(is_grayish),
+        "is_black_or_white": bool(is_black_or_white),
+    }
+
+
+def _detect_catastrophic_scene_state(
+    state: AgentState,
+    *,
+    render_reference: Any,
+) -> dict[str, Any]:
+    signals: list[str] = []
+    metrics: dict[str, Any] = {}
+
+    scene_bbox = state.get("scene_bbox")
+    if isinstance(scene_bbox, dict):
+        dims = _coerce_numeric_triplet(scene_bbox.get("dimensions"))
+        if len(dims) == 3:
+            max_dim = max(abs(value) for value in dims)
+            metrics["scene_bbox_dimensions"] = [round(value, 4) for value in dims]
+            metrics["scene_bbox_max_dimension"] = round(max_dim, 4)
+            if max_dim > _CATASTROPHIC_SCENE_DIMENSION_THRESHOLD:
+                signals.append("scene_bbox_dimension_exploded")
+            positive_dims = [abs(value) for value in dims if abs(value) > 1e-6]
+            if positive_dims:
+                span_ratio = max(positive_dims) / min(positive_dims)
+                metrics["scene_bbox_span_ratio"] = round(span_ratio, 4)
+                if max_dim > 100.0 and span_ratio > 10000.0:
+                    signals.append("scene_bbox_span_ratio_extreme")
+
+    scene_objects = state.get("scene_objects")
+    if isinstance(scene_objects, dict) and scene_objects:
+        far_objects: list[str] = []
+        huge_objects: list[str] = []
+        for name, payload in list(scene_objects.items())[:300]:
+            if not isinstance(name, str):
+                continue
+            if not isinstance(payload, dict):
+                continue
+
+            location = _coerce_numeric_triplet(payload.get("location"))
+            if location and max(abs(value) for value in location) > _CATASTROPHIC_OBJECT_COORD_THRESHOLD:
+                far_objects.append(name)
+
+            dimensions = _coerce_numeric_triplet(payload.get("dimensions"))
+            if not dimensions:
+                dimensions = _bbox_dimensions_from_bounds(payload.get("bounding_box"))
+            if not dimensions and isinstance(payload.get("bbox"), dict):
+                dimensions = _coerce_numeric_triplet(payload["bbox"].get("dimensions"))
+            if dimensions and max(abs(value) for value in dimensions) > _CATASTROPHIC_OBJECT_DIMENSION_THRESHOLD:
+                huge_objects.append(name)
+
+            if len(far_objects) >= 5 and len(huge_objects) >= 5:
+                break
+
+        if far_objects:
+            signals.append("object_location_outlier")
+            metrics["object_location_outliers"] = far_objects[:5]
+        if huge_objects:
+            signals.append("object_dimension_outlier")
+            metrics["object_dimension_outliers"] = huge_objects[:5]
+
+    render_stats = _analyze_render_flatness(render_reference)
+    if isinstance(render_stats, dict):
+        metrics["render_flatness"] = render_stats
+        if render_stats.get("is_flat") and (
+            render_stats.get("is_grayish") or render_stats.get("is_black_or_white")
+        ):
+            signals.append("render_flat_gray_or_blank")
+
+    return {
+        "is_catastrophic": bool(signals),
+        "signals": sorted(set(signals)),
+        "metrics": metrics,
+    }
+
+
+def _resolve_enabled_tool_set(state: AgentState) -> set[str]:
+    enabled_tool_names = state.get("enabled_tool_names")
+    if not isinstance(enabled_tool_names, list):
+        return set()
+    return {
+        name.strip()
+        for name in enabled_tool_names
+        if isinstance(name, str) and name.strip()
+    }
+
+
+def _tool_is_available(enabled_tool_set: set[str], tool_name: str) -> bool:
+    if not enabled_tool_set:
+        return True
+    return tool_name in enabled_tool_set
+
+
+def _build_catastrophic_recovery_tool_calls(
+    *,
+    enabled_tool_set: set[str],
+    recovery_attempt: int,
+) -> tuple[str | None, list[dict[str, Any]]]:
+    primary_action: str | None = None
+    if recovery_attempt <= 1 and _tool_is_available(enabled_tool_set, "undo_last_snapshot"):
+        primary_action = "undo_last_snapshot"
+    elif _tool_is_available(enabled_tool_set, "clear_scene"):
+        primary_action = "clear_scene"
+
+    tool_calls: list[dict[str, Any]] = []
+    if primary_action:
+        tool_calls.append(
+            {
+                "name": primary_action,
+                "args": {},
+                "id": f"catastrophic-{primary_action}-{recovery_attempt}",
+                "type": "tool_call",
+            }
+        )
+        if _tool_is_available(enabled_tool_set, "get_scene_info"):
+            tool_calls.append(
+                {
+                    "name": "get_scene_info",
+                    "args": {},
+                    "id": f"catastrophic-scene-info-{recovery_attempt}",
+                    "type": "tool_call",
+                }
+            )
+        if _tool_is_available(enabled_tool_set, "observe_scene_global"):
+            tool_calls.append(
+                {
+                    "name": "observe_scene_global",
+                    "args": {},
+                    "id": f"catastrophic-observe-{recovery_attempt}",
+                    "type": "tool_call",
+                }
+            )
+    return primary_action, tool_calls
+
+
 def verify_node(
     state: AgentState,
     *,
@@ -1192,21 +1946,109 @@ def verify_node(
     api_key: str | None = None,
     model: str | None = None,
 ) -> Dict[str, Any]:
-    """Verify the latest render against references / user request.
+    """Verify the latest render against references and current todo focus.
 
     As a fixed sequential node (scene_observe -> verify -> checkpoint_loop),
     this skips silently when there is no new unverified render.
     """
     render_path = state.get("last_render_path")
     if not render_path:
-        return {}
+        return {"verify_forced_recovery": False}
 
     # Already verified this exact render — skip
     if state.get("last_verified_path") == render_path:
-        return {}
+        return {"verify_forced_recovery": False}
 
     render_source = state.get("last_render_source", "agent_camera")
-    todo_context = _active_todo_context(state) if render_source != "scene_observe" else []
+    scene_context = _build_verification_scene_context(state)
+
+    # Phase 1: catastrophic scene-state gate (hard recovery before todo/consistency checks).
+    catastrophic_report = _detect_catastrophic_scene_state(
+        state,
+        render_reference=render_path,
+    )
+    catastrophic_recovery_attempts = _coerce_non_negative_int(state.get("catastrophic_recovery_attempts"))
+    if catastrophic_report.get("is_catastrophic"):
+        recovery_attempt = catastrophic_recovery_attempts + 1
+        enabled_tool_set = _resolve_enabled_tool_set(state)
+        recovery_action, recovery_tool_calls = _build_catastrophic_recovery_tool_calls(
+            enabled_tool_set=enabled_tool_set,
+            recovery_attempt=recovery_attempt,
+        )
+        forced_recovery = (
+            bool(recovery_action)
+            and recovery_attempt <= _CATASTROPHIC_RECOVERY_MAX_FORCED_ATTEMPTS
+            and len(recovery_tool_calls) > 0
+        )
+
+        verification = {
+            "status": "catastrophic",
+            "reason": "Catastrophic scene-state signal detected; hard recovery gate activated.",
+            "render_path": render_path,
+            "render_source": render_source,
+            "catastrophic_signals": catastrophic_report.get("signals", []),
+            "catastrophic_metrics": catastrophic_report.get("metrics", {}),
+            "hard_recovery": {
+                "forced": forced_recovery,
+                "attempt": recovery_attempt,
+                "max_forced_attempts": _CATASTROPHIC_RECOVERY_MAX_FORCED_ATTEMPTS,
+                "action": recovery_action or "none",
+                "tool_calls": [call.get("name") for call in recovery_tool_calls if isinstance(call, dict)],
+            },
+        }
+        if recovery_action == "clear_scene":
+            verification["todo_rebuild_recommended"] = True
+
+        guidance_text = _build_verification_guidance_message(state, verification)
+        if guidance_text:
+            verification["guidance"] = guidance_text
+
+        verification_tool_call_id = (
+            "verification_"
+            + hashlib.sha1(str(render_path).encode("utf-8")).hexdigest()[:12]
+        )
+        messages: list[Any] = [
+            ToolMessage(
+                name="verification",
+                content=verification,
+                tool_call_id=verification_tool_call_id,
+            )
+        ]
+        if recovery_action == "clear_scene":
+            messages.append(
+                SystemMessage(
+                    id=_CATASTROPHIC_RECOVERY_NOTE_MESSAGE_ID,
+                    content=(
+                        "Hard recovery executed clear_scene. Re-evaluate current todos against an empty baseline "
+                        "and rebuild the todo plan if old tasks assume deleted scene assets."
+                    ),
+                )
+            )
+        if forced_recovery:
+            messages.append(
+                AIMessage(
+                    id=_CATASTROPHIC_RECOVERY_ACTION_MESSAGE_ID,
+                    content="",
+                    tool_calls=recovery_tool_calls,
+                )
+            )
+
+        result: Dict[str, Any] = {
+            "messages": messages,
+            "last_verified_path": render_path,
+            "verify_forced_recovery": forced_recovery,
+            "catastrophic_recovery_attempts": (
+                min(recovery_attempt, _CATASTROPHIC_RECOVERY_MAX_FORCED_ATTEMPTS)
+                if forced_recovery
+                else catastrophic_recovery_attempts
+            ),
+        }
+        return result
+
+    # Phase 2: normal verification against active todos and user request.
+    # Verify should follow active todo objectives in both scene-level and
+    # object-level paths whenever todos exist.
+    todo_context = _active_todo_context(state)
 
     thread_id = state.get("thread_id", "default")
     memory = get_reference_image_memory()
@@ -1222,6 +2064,7 @@ def verify_node(
             user_request=_latest_human_message(state),
             render_source=render_source,
             todo_context=todo_context,
+            scene_context=scene_context,
             provider_name=provider_name,
             api_key=api_key,
             model=model,
@@ -1248,7 +2091,14 @@ def verify_node(
     if guidance_text:
         verification["guidance"] = guidance_text
 
-    return {
+    todo_updates, todo_update_records = _build_todo_updates_from_verification(
+        state,
+        verification,
+    )
+    if todo_update_records:
+        verification["todo_status_updates"] = todo_update_records
+
+    result: Dict[str, Any] = {
         "messages": [
             ToolMessage(
                 name="verification",
@@ -1257,7 +2107,13 @@ def verify_node(
             )
         ],
         "last_verified_path": render_path,
+        "verify_forced_recovery": False,
+        "catastrophic_recovery_attempts": 0,
     }
+    if todo_updates:
+        result["todos"] = todo_updates
+
+    return result
 
 
 def _build_verification_guidance_message(
@@ -1266,6 +2122,28 @@ def _build_verification_guidance_message(
 ) -> str:
     status_value = verification.get("status")
     status = status_value.strip().lower() if isinstance(status_value, str) else ""
+    if status == "catastrophic":
+        hard_recovery = verification.get("hard_recovery")
+        if isinstance(hard_recovery, dict):
+            action = hard_recovery.get("action")
+            attempt = hard_recovery.get("attempt")
+            forced = bool(hard_recovery.get("forced"))
+            if action == "undo_last_snapshot" and forced:
+                return (
+                    f"Catastrophic state detected (attempt {attempt}). "
+                    "Hard recovery is forcing undo_last_snapshot, then scene re-grounding."
+                )
+            if action == "clear_scene" and forced:
+                return (
+                    f"Catastrophic state detected (attempt {attempt}). "
+                    "Hard recovery is forcing clear_scene; rebuild todos if they assume deleted assets."
+                )
+            if action in {"undo_last_snapshot", "clear_scene"} and not forced:
+                return (
+                    f"Catastrophic state detected (attempt {attempt}), but automatic recovery budget is exhausted. "
+                    "Continue with manual remediation and consider rebuilding todos if scene state was reset."
+                )
+        return "Catastrophic state detected; no automatic recovery tool is currently available."
     if status == "match":
         return "Latest verification is match. Continue with the next pending todo."
 
