@@ -26,6 +26,7 @@ type ChatComposerProps = {
 }
 
 const MAX_REFERENCE_IMAGES = 3
+const MAX_EXAMPLE_PROMPTS = 10
 
 export function ChatComposer({
   disabled,
@@ -160,7 +161,7 @@ export function ChatComposer({
     }, 120)
   }
 
-  const promptOptions = examplePrompts.slice(0, 5)
+  const promptOptions = examplePrompts.slice(0, MAX_EXAMPLE_PROMPTS)
   const showPromptPopover = isInputFocused && input.trim().length === 0 && promptOptions.length > 0
   const modelSelectDisabled = modelLocked || modelLoading || modelOptions.length === 0
   const hasPendingImages = pendingImages.length > 0

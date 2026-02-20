@@ -19,6 +19,23 @@ npm install
 npm run dev
 ```
 
+### Configure backend URL by environment
+
+The UI reads backend URL defaults from Vite env vars (build-time):
+
+- `VITE_BACKEND_URL_DEV`: used in development mode (`npm run dev`)
+- `VITE_BACKEND_URL_PROD`: used in production mode (`npm run build` / `npm run preview`)
+- `VITE_BACKEND_URL`: shared fallback for both modes
+
+Precedence is: mode-specific > shared > `http://localhost:8000`.
+
+Create env files under `web/` as needed:
+
+- `web/.env.development`
+- `web/.env.production`
+
+You can copy from `web/.env.example` as a starting point.
+
 ### Backend requirements
 
 - Start the API server: `python main.py --mode api --port 8000`

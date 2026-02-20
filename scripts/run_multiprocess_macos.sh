@@ -179,7 +179,7 @@ if ! resolve_blender_headless_cmd; then
         CACHE_DIR="${BLENDER_DOWNLOAD_CACHE_DIR:-$HOME/.cache/3dsceneagent/blender}"
         VERSION="${BLENDER_VERSION:-4.2.15}"
         echo -e "${YELLOW}Blender binary not found; downloading cached macOS x64 package...${NC}"
-        download_output="$(python scripts/download_blender_4_2.py \
+        download_output="$(python scripts/download_blender.py \
             --platform macos-x64 \
             --version "$VERSION" \
             --cache-dir "$CACHE_DIR" \

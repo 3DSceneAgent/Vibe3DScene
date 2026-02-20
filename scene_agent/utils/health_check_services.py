@@ -80,7 +80,7 @@ class ServiceHealthChecker:
                 host_env_key="INFINIGEN_HOST",
                 port_env_key="INFINIGEN_PORT",
                 default_port=8003,
-                path="/healthy",
+                path="/health",
                 expected_fields={"status": "healthy", "service": "PCGIntegrator3D"},
             ),
         }

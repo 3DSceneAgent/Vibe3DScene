@@ -18,6 +18,7 @@ coverage/
 
 .env
 docker/.env.multiprocess
+docker/.env.singleprocess
 .vscode/
 .idea/
 

@@ -1,6 +1,6 @@
 # Vibe3DScene: Create Your Own 3D Scene With Words
 
-[![Website](https://img.shields.io/badge/Website-Coming%20Soon-lightgrey)](#1-overview)
+[![Website](https://img.shields.io/badge/Website-Coming%20Soon-lightgrey)](https://3dsceneagent.github.io/vibe3dscene/)
 [![GitHub Stars](https://img.shields.io/github/stars/3DSceneAgent/Vibe3DScene?style=social)](https://github.com/3DSceneAgent/Vibe3DScene/stargazers)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE)
 [![Demo](https://img.shields.io/badge/Demo-YouTube-red)](#1-overview)
@@ -21,9 +21,8 @@ Vibe3DScene converts natural-language intent into Blender scenes through a LangG
 ## 1. Overview
 
 ### Website and Demo
-- Website: add your project website link here.
+- Website: [https://3dsceneagent.github.io/vibe3dscene/](https://3dsceneagent.github.io/vibe3dscene/)
 - Demo Page: add your public demo link here.
-- YouTube: add your YouTube demo link here.
 
 MP4 placeholder (replace `YOUR_DEMO_VIDEO.mp4` with your real file path or URL):
 
@@ -67,9 +66,12 @@ tests/           Unit / integration / contract / manual tests
 - Redis (recommended for headless multi-worker/session coordination)
 - Docker (optional, for tool servers)
 
-### Install Dependencies
+
+### Clone this Repo and Install Dependencies
 
 ```bash
+git clone --recurse-submodules https://github.com/3DSceneAgent/Vibe3DScene
+
 # python 
 python -m venv .venv
 source .venv/bin/activate
@@ -84,7 +86,8 @@ For Docker multiprocess builds, set:
 - `BLENDER_VERSION=4.2.15`
 
 Note: Docker multiprocess workers are pinned to `linux/amd64`.
-You can also use the [helper script](scripts/download_blender_4_2.py) to download Blender release.
+Single-process Docker (`docker-compose.singleprocess.yml`) is also pinned to `linux/amd64`.
+You can also use the [helper script](scripts/download_blender.py) to download Blender release.
 
 ### Configure Environment
 
@@ -118,12 +121,21 @@ Option1: Run single API worker directly (current baseline):
 python main.py --mode api --host 0.0.0.0 --port 8000 --workers 1
 ```
 
-Option2: Run multi-worker deployment (Linux-x86-64, Docker + Owner-Proxy Arch):
+Option2: Run multi-worker deployment (Linux-x86-64, Docker + Owner-Proxy Arch, 4 workers):
 
 ```bash
 cp docker/.env.multiprocess.example docker/.env.multiprocess
 # edit docker/.env.multiprocess and set provider/API key
 docker compose -f docker-compose.multiprocess.yml up --build
+```
+This profile builds a shared `scene-agent-api:latest` image once and reuses it across worker-1~worker-4.
+
+Option3: Run single-process headless deployment (Dockerized `run_headless.sh`, linux/amd64):
+
+```bash
+cp docker/.env.singleprocess.example docker/.env.singleprocess
+# edit docker/.env.singleprocess and set provider/API key
+docker compose -f docker-compose.singleprocess.yml up --build
 ```
 
 Run multi-worker deployment on macOS (nginx + local workers):
@@ -148,7 +160,7 @@ python scripts/smoke_multiprocess_macos.py --gateway-url http://127.0.0.1:8000 -
 python scripts/smoke_multiprocess_macos.py --gateway-url http://127.0.0.1:8000 --worker1-url http://127.0.0.1:18001 --worker2-url http://127.0.0.1:18002
 ```
 
-Option3: use helper scripts:
+Option4: use helper scripts:
 
 ```bash
 # Default BLENDER_MODE=headless
@@ -233,6 +245,8 @@ If you change ports in `tool_servers/.env`, sync the root `.env` values used by 
 ```bash
 # single worker
 ./scripts/run_headless.sh
+# single worker (dockerized run_headless.sh, linux/amd64)
+docker compose -f docker-compose.singleprocess.yml up --build
 # multi worker (macos)
 ./scripts/run_multiprocess_macos.sh
 # multi workers (linux x86-64)

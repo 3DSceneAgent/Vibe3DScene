@@ -104,6 +104,7 @@ function App() {
   const REQUEST_TIMEOUT_MS = 35000
   const MCP_REQUEST_TIMEOUT_MS = 10000
   const VLM_REQUEST_TIMEOUT_MS = 10000
+  const MAX_EXAMPLE_PROMPTS = 10
   const [threads, setThreads] = useState<Thread[]>(() => loadThreads())
   const [activeThreadId, setActiveThreadId] = useState<string | null>(() => loadThreads()[0]?.id ?? null)
   const [settings, setSettings] = useState(() => loadSettings())
@@ -111,6 +112,7 @@ function App() {
   const [isStreaming, setIsStreaming] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
+  const [isStorageHydrated, setIsStorageHydrated] = useState(false)
   const [backendStatus, setBackendStatus] = useState<'online' | 'offline' | 'checking'>('checking')
   const [backendMode, setBackendMode] = useState<'headless' | 'local-client' | null>(null)
   const [examplePrompts, setExamplePrompts] = useState<string[]>([])
@@ -188,19 +190,25 @@ function App() {
   useEffect(() => {
     let mounted = true
     const loadData = async () => {
-      const [loadedThreads, loadedSettings] = await Promise.all([
-        loadThreadsAsync(),
-        loadSettingsAsync()
-      ])
-      if (mounted) {
-        if (loadedThreads.length > 0) {
-          setThreads(loadedThreads)
-          setActiveThreadId((current) => current ?? loadedThreads[0]?.id ?? null)
+      try {
+        const [loadedThreads, loadedSettings] = await Promise.all([
+          loadThreadsAsync(),
+          loadSettingsAsync()
+        ])
+        if (mounted) {
+          if (loadedThreads.length > 0) {
+            setThreads(loadedThreads)
+            setActiveThreadId((current) => current ?? loadedThreads[0]?.id ?? null)
+          }
+          setSettings(loadedSettings)
         }
-        setSettings(loadedSettings)
+      } finally {
+        if (mounted) {
+          setIsStorageHydrated(true)
+        }
       }
     }
-    loadData()
+    void loadData()
     return () => {
       mounted = false
     }
@@ -213,6 +221,9 @@ function App() {
   }, [threads, activeThreadId])
 
   useEffect(() => {
+    if (!isStorageHydrated) {
+      return
+    }
     if (saveThreadsTimerRef.current !== null) {
       window.clearTimeout(saveThreadsTimerRef.current)
     }
@@ -226,13 +237,16 @@ function App() {
         saveThreadsTimerRef.current = null
       }
     }
-  }, [threads])
+  }, [threads, isStorageHydrated])
 
   useEffect(() => {
-    saveSettings(settings)
     document.documentElement.dataset.theme = settings.theme
     settingsRef.current = settings
-  }, [settings])
+    if (!isStorageHydrated) {
+      return
+    }
+    saveSettings(settings)
+  }, [settings, isStorageHydrated])
 
   useEffect(() => {
     loadingRef.current = loadingByThread
@@ -295,7 +309,7 @@ function App() {
       try {
         const prompts = await getExamplePrompts(settings.backendUrl)
         if (!cancelled) {
-          setExamplePrompts(prompts)
+          setExamplePrompts(prompts.slice(0, MAX_EXAMPLE_PROMPTS))
         }
       } catch {
         if (!cancelled) {
@@ -307,7 +321,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [settings.backendUrl])
+  }, [settings.backendUrl, MAX_EXAMPLE_PROMPTS])
 
   useEffect(() => {
     let cancelled = false
@@ -1276,8 +1290,8 @@ function App() {
         ? 'Local'
         : null
   const statusText = modeLabel ? `Server ${statusLabel} • ${modeLabel}` : `Server ${statusLabel}`
-  const projectWebsiteUrl = 'https://github.com/3DSceneAgent/3DSceneAgent#readme'
-  const projectGithubUrl = 'https://github.com/3DSceneAgent/3DSceneAgent'
+  const projectWebsiteUrl = 'https://3dsceneagent.github.io/vibe3dscene/'
+  const projectGithubUrl = 'https://github.com/3DSceneAgent/Vibe3DScene'
 
   return (
     <div className="app-shell">

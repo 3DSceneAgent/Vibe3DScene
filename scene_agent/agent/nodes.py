@@ -35,6 +35,7 @@ SCENE_MUTATING_TOOLS: frozenset[str] = frozenset({
     "execute_blender_code",
     "delete_objects",
     "import_glb_model",
+    "import_blend_contents",
     "download_polyhaven_asset",
     "set_texture",
     "generate_trellis2_model",

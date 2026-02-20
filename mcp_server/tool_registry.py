@@ -30,6 +30,7 @@ from mcp_server.tools.base import (
     execute_blender_code,
     get_object_info,
     get_scene_info,
+    import_blend_contents,
     import_glb_model,
 )
 from mcp_server.tools.memory.session_tools import clear_scene, undo_last_snapshot
@@ -120,6 +121,7 @@ def register_mcp_tools(mcp, logger) -> list[str]:
         (download_polyhaven_asset, None, None, None),
         (set_texture, None, None, None),
         (import_glb_model, None, None, None),
+        (import_blend_contents, None, None, None),
         (
             get_infinigen_available_assets,
             "pcg_integrator",

@@ -33,6 +33,7 @@ INFINIGEN_WORKFLOW_TOOLS: frozenset[str] = frozenset(
     {
         "get_infinigen_available_assets",
         "generate_infinigen_assets",
+        "import_blend_contents",
     }
 )
 TRELLIS2_WORKFLOW_TOOLS: frozenset[str] = frozenset({"generate_trellis2_model"})
@@ -170,7 +171,9 @@ def build_asset_creation_strategy_text(
         lines.extend(
             [
                 "   - Infinigen (Procedural Content Generation)",
-                '     - Flow: get_infinigen_available_assets() -> generate_infinigen_assets(asset_type="...")',
+                "     - Flow: get_infinigen_available_assets() -> generate_infinigen_assets(asset_type=\"...\")"
+                " -> import_blend_contents(blend_file_path=\"...\")",
+                "     - Do NOT assume collection name equals asset_type when importing .blend outputs",
                 "     - Best for natural assets and procedural indoor/architectural variations",
             ]
         )

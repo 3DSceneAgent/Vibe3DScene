@@ -133,3 +133,16 @@ def test_mcp_strategy_skips_runtime_probe_with_explicit_tool_list(monkeypatch):
     )
 
     assert "3D Asset Retrieval Database" in prompt
+
+
+def test_strategy_includes_blend_import_guidance_for_infinigen():
+    prompt = get_full_system_prompt(
+        [
+            "get_infinigen_available_assets",
+            "generate_infinigen_assets",
+            "import_blend_contents",
+        ]
+    )
+
+    assert "import_blend_contents(blend_file_path=\"...\")" in prompt
+    assert "Do NOT assume collection name equals asset_type" in prompt

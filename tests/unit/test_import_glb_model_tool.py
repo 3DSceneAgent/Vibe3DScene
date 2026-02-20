@@ -1,0 +1,71 @@
+from mcp_server.tools import base
+
+
+def test_import_glb_model_handles_structured_dict_response(monkeypatch):
+    calls: list[tuple[str, dict]] = []
+
+    class FakeBlender:
+        def send_command(self, command_type: str, params=None):
+            calls.append((command_type, params or {}))
+            return {
+                "success": True,
+                "imported_objects": ["Table_A"],
+                "bounding_box": {"min": [0, 0, 0], "max": [1, 1, 1]},
+            }
+
+    monkeypatch.setattr(base.runtime, "get_blender_connection", lambda _logger: FakeBlender())
+
+    result = base.import_glb_model(
+        ctx=None,
+        model_url="https://example.com/table.glb",
+        object_name="Table_A",
+    )
+
+    assert calls == [
+        (
+            "import_glb_model",
+            {
+                "model_url": "https://example.com/table.glb",
+                "object_name": "Table_A",
+            },
+        )
+    ]
+    assert "Successfully imported model" in result
+    assert "Imported 1 object(s): Table_A" in result
+    assert "Bounding box: min=[0, 0, 0], max=[1, 1, 1]" in result
+
+
+def test_import_glb_model_handles_legacy_list_response(monkeypatch):
+    class FakeBlender:
+        def send_command(self, command_type: str, params=None):
+            _ = (command_type, params)
+            return ["Table_A", "Table_A.001"]
+
+    monkeypatch.setattr(base.runtime, "get_blender_connection", lambda _logger: FakeBlender())
+
+    result = base.import_glb_model(
+        ctx=None,
+        model_url="https://example.com/table.glb",
+        object_name="Table_A",
+    )
+
+    assert "Successfully imported model" in result
+    assert "Imported 2 object(s): Table_A, Table_A.001" in result
+
+
+def test_import_glb_model_handles_json_string_list_response(monkeypatch):
+    class FakeBlender:
+        def send_command(self, command_type: str, params=None):
+            _ = (command_type, params)
+            return "[\"Desk\", \"Desk.001\"]"
+
+    monkeypatch.setattr(base.runtime, "get_blender_connection", lambda _logger: FakeBlender())
+
+    result = base.import_glb_model(
+        ctx=None,
+        model_url="https://example.com/desk.glb",
+        object_name="Desk",
+    )
+
+    assert "Successfully imported model" in result
+    assert "Imported 2 object(s): Desk, Desk.001" in result

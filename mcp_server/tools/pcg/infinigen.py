@@ -105,6 +105,10 @@ def generate_infinigen_assets(
             "output_dir": str(target_dir),
             "downloaded_bytes": blend_file_path.stat().st_size,
             "cleanup_required": temp_dir_created and not cleanup,
+            "recommended_next_tool": "import_blend_contents",
+            "recommended_next_action": (
+                "Call import_blend_contents(blend_file_path=...) to merge this .blend into the current scene."
+            ),
         }
         if cleanup and temp_dir_created:
             try:

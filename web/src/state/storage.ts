@@ -11,9 +11,24 @@ const THREADS_KEY = 'sceneAgentThreads'
 const SETTINGS_KEY = 'sceneAgentSettings'
 const MAX_MESSAGES_PER_THREAD = 100
 const MAX_STORED_MESSAGE_CHARS = 24000
+const FALLBACK_BACKEND_URL = 'http://localhost:8000'
+
+function normalizeBackendUrl(value: string | null | undefined): string {
+  const trimmed = typeof value === 'string' ? value.trim() : ''
+  if (!trimmed) return ''
+  return trimmed.replace(/\/+$/, '')
+}
+
+function resolveDefaultBackendUrl(): string {
+  const modeSpecific = normalizeBackendUrl(
+    import.meta.env.DEV ? import.meta.env.VITE_BACKEND_URL_DEV : import.meta.env.VITE_BACKEND_URL_PROD
+  )
+  const shared = normalizeBackendUrl(import.meta.env.VITE_BACKEND_URL)
+  return modeSpecific || shared || FALLBACK_BACKEND_URL
+}
 
 export const defaultSettings: Settings = {
-  backendUrl: 'http://localhost:8000',
+  backendUrl: resolveDefaultBackendUrl(),
   theme: 'dark',
   autoRefreshScene: true,
   autoFetchIntervalSeconds: 10,
@@ -182,9 +197,10 @@ function normalizeSettings(settings: Partial<Settings> | null | undefined): Sett
     Number.isFinite(rawAutoFetchIntervalSeconds) && rawAutoFetchIntervalSeconds > 0
       ? Math.min(300, Math.max(1, Math.round(rawAutoFetchIntervalSeconds)))
       : defaultSettings.autoFetchIntervalSeconds
+  const normalizedBackendUrl = normalizeBackendUrl(settings?.backendUrl)
 
   return {
-    backendUrl: settings?.backendUrl || defaultSettings.backendUrl,
+    backendUrl: normalizedBackendUrl || defaultSettings.backendUrl,
     theme: nextTheme,
     autoRefreshScene: settings?.autoRefreshScene ?? defaultSettings.autoRefreshScene,
     autoFetchIntervalSeconds: nextAutoFetchIntervalSeconds,
@@ -193,8 +209,9 @@ function normalizeSettings(settings: Partial<Settings> | null | undefined): Sett
 }
 
 function saveSettingsToLocalStorage(settings: Settings): boolean {
+  const normalizedSettings = normalizeSettings(settings)
   try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(normalizedSettings))
     return true
   } catch (error) {
     console.error('Failed to save settings to localStorage:', error)
@@ -239,12 +256,13 @@ export async function loadSettingsAsync(): Promise<Settings> {
 }
 
 export function saveSettings(settings: Settings) {
+  const normalizedSettings = normalizeSettings(settings)
   if (useIndexedDB) {
-    saveSettingsToIndexedDB(settings).catch((error) => {
+    saveSettingsToIndexedDB(normalizedSettings).catch((error) => {
       console.error('Failed to save settings to IndexedDB, falling back to localStorage:', error)
-      saveSettingsToLocalStorage(settings)
+      saveSettingsToLocalStorage(normalizedSettings)
     })
   } else {
-    saveSettingsToLocalStorage(settings)
+    saveSettingsToLocalStorage(normalizedSettings)
   }
 }

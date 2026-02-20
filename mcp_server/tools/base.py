@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any
 
 from mcp.server.fastmcp import Context
 
@@ -134,13 +135,70 @@ def execute_blender_code(ctx: Context, code: str) -> str:
 
 def import_glb_model(ctx: Context, model_url: str, object_name: str = None) -> str:
     """Import a GLB model from URL into Blender."""
+    def _extract_object_names(raw: Any) -> list[str]:
+        if not isinstance(raw, (list, tuple, set)):
+            return []
+        names: list[str] = []
+        for item in raw:
+            name = ""
+            if isinstance(item, str):
+                name = item.strip()
+            elif isinstance(item, dict):
+                for key in ("name", "object_name", "id"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value.strip():
+                        name = value.strip()
+                        break
+            elif item is not None:
+                name = str(item).strip()
+            if name:
+                names.append(name)
+        return names
+
+    def _normalize_import_result(raw_result: Any) -> dict[str, Any]:
+        if isinstance(raw_result, dict):
+            return raw_result
+
+        if isinstance(raw_result, str):
+            text = raw_result.strip()
+            if text:
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError:
+                    return {"success": False, "message": text}
+                return _normalize_import_result(parsed)
+            return {"success": False, "message": "Empty response from Blender import command."}
+
+        names = _extract_object_names(raw_result)
+        if names:
+            return {
+                "success": True,
+                "imported_objects": names,
+                "num_objects": len(names),
+                "bounding_box": None,
+            }
+
+        return {
+            "success": False,
+            "message": (
+                "Unexpected import response type from Blender: "
+                f"{type(raw_result).__name__}"
+            ),
+        }
+
     try:
         blender = runtime.get_blender_connection(logger)
         object_name = object_name or "ImportedModel"
-        result = blender.send_command(
+        raw_result = blender.send_command(
             "import_glb_model",
             {"model_url": model_url, "object_name": object_name},
         )
+        result = _normalize_import_result(raw_result)
+        if not isinstance(raw_result, dict):
+            logger.warning(
+                "import_glb_model received non-dict result from Blender (%s); normalized response applied.",
+                type(raw_result).__name__,
+            )
         if "error" in result:
             return f"Error importing model: {result['error']}"
         if result.get("success"):
@@ -155,3 +213,93 @@ def import_glb_model(ctx: Context, model_url: str, object_name: str = None) -> s
     except Exception as exc:
         logger.error("Error importing GLB model: %s", str(exc))
         return f"Error importing GLB model: {str(exc)}"
+
+
+def import_blend_contents(
+    ctx: Context,
+    blend_file_path: str,
+    import_mode: str = "auto",
+    collection_names: list[str] | str | None = None,
+    object_names: list[str] | str | None = None,
+    link: bool = False,
+) -> str:
+    """Import collections/objects from a local .blend file into the current scene."""
+    try:
+        def _dedupe_keep_order(values: list[str]) -> list[str]:
+            deduped: list[str] = []
+            seen: set[str] = set()
+            for value in values:
+                if value in seen:
+                    continue
+                seen.add(value)
+                deduped.append(value)
+            return deduped
+
+        normalized_collections = (
+            _dedupe_keep_order(_normalize_object_names(collection_names))
+            if collection_names
+            else []
+        )
+        normalized_objects = (
+            _dedupe_keep_order(_normalize_object_names(object_names))
+            if object_names
+            else []
+        )
+
+        blender = runtime.get_blender_connection(logger)
+        result = blender.send_command(
+            "import_blend_contents",
+            {
+                "blend_file_path": blend_file_path,
+                "import_mode": import_mode,
+                "collection_names": normalized_collections,
+                "object_names": normalized_objects,
+                "link": bool(link),
+            },
+        )
+
+        if not isinstance(result, dict):
+            return f"Failed to import blend contents: unexpected response type {type(result).__name__}"
+        if "error" in result:
+            return f"Failed to import blend contents: {result['error']}"
+        if not result.get("success"):
+            return f"Failed to import blend contents: {result.get('message', 'Unknown error')}"
+
+        imported_collections = result.get("imported_collections", [])
+        imported_objects = result.get("imported_objects", [])
+        linked_scene_collections = result.get("linked_scene_collections", [])
+        linked_scene_objects = result.get("linked_scene_objects", [])
+        missing_collections = result.get("requested_collections_missing", [])
+        missing_objects = result.get("requested_objects_missing", [])
+
+        message_lines = [
+            f"Successfully imported blend file: {result.get('blend_file_path', blend_file_path)}",
+            (
+                "Import mode: "
+                f"{result.get('import_mode', import_mode)} (link={bool(result.get('link', link))})"
+            ),
+            (
+                "Imported collections: "
+                f"{len(imported_collections)} ({', '.join(imported_collections) if imported_collections else 'none'})"
+            ),
+            (
+                "Imported objects: "
+                f"{len(imported_objects)} ({', '.join(imported_objects) if imported_objects else 'none'})"
+            ),
+        ]
+
+        if linked_scene_collections:
+            message_lines.append(
+                "Linked scene collections: " + ", ".join(linked_scene_collections)
+            )
+        if linked_scene_objects:
+            message_lines.append("Linked scene objects: " + ", ".join(linked_scene_objects))
+        if missing_collections:
+            message_lines.append("Requested collections not found: " + ", ".join(missing_collections))
+        if missing_objects:
+            message_lines.append("Requested objects not found: " + ", ".join(missing_objects))
+
+        return "\n".join(message_lines)
+    except Exception as exc:
+        logger.error("Error importing blend contents: %s", str(exc))
+        return f"Error importing blend contents: {str(exc)}"

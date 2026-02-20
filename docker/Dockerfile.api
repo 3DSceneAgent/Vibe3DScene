@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 ARG INSTALL_BLENDER=false
 ARG BLENDER_VERSION=4.2.15
 
-COPY scripts/download_blender_4_2.py /tmp/download_blender_4_2.py
+COPY scripts/download_blender.py /tmp/download_blender.py
 RUN set -eux; \
     rm -f /etc/apt/sources.list.d/yarn.list || true; \
     if [ "$INSTALL_BLENDER" = "true" ]; then \
@@ -20,7 +20,7 @@ RUN set -eux; \
       apt-get update; \
       apt-get install -y --no-install-recommends ca-certificates xz-utils; \
       rm -rf /var/lib/apt/lists/*; \
-      python /tmp/download_blender_4_2.py \
+      python /tmp/download_blender.py \
         --platform "linux-x86-64" \
         --version "$BLENDER_VERSION" \
         --cache-dir /var/cache/blender/packages \

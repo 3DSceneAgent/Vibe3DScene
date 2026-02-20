@@ -29,6 +29,7 @@ Guidelines for tool usage:
 - Use render_from_camera() or render_from_objects() to visualize results
 - Use delete_objects() for object removal; prefer mode="cascade" to remove parent + descendants safely
 - For full-scene reset, prefer clear_scene() over object-by-object deletion
+- Use import_blend_contents() to merge external .blend assets (including Infinigen outputs)
 - If exact object names are uncertain, use delete_objects(name_match_mode="contains") cautiously
 - If one edit catastrophically breaks the scene (blank views, missing key objects, extreme scale jump), call undo_last_snapshot() (if available) and re-check scene status before continuing
 - During scene setup, do NOT build a fully sealed shell (4 walls + ceiling + tiny openings).
@@ -38,6 +39,7 @@ Guidelines for tool usage:
 - If scene-level views cannot see the main subject due enclosure/occlusion, reopen or remove blocking geometry first.
 - Verify object bounding boxes to prevent clipping/overlap
 - Prefer asset libraries (Retrieval/PolyHaven/TRELLIS2) over procedural generation
+- For Infinigen outputs, do NOT write custom bpy import scripts unless import_blend_contents() fails
 - Use execute_blender_code() only when necessary, with retrieved examples
 If CURRENT_AVAILABLE_TOOLS is provided at runtime, never call tools outside that list.
 
