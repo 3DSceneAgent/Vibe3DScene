@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     )
     rodin_mode: str = Field(
         default="MAIN_SITE",
-        description="Rodin backend mode: MAIN_SITE or FAL_AI"
+        description="Rodin backend mode (currently only MAIN_SITE is supported)"
     )
     # MCP Server
     mcp_server_host: str = Field(
@@ -232,7 +232,7 @@ class Settings(BaseSettings):
     @field_validator("rodin_mode")
     @classmethod
     def validate_rodin_mode(cls, v: str) -> str:
-        valid_modes = {"MAIN_SITE", "FAL_AI"}
+        valid_modes = {"MAIN_SITE"}
         v_upper = v.upper()
         if v_upper not in valid_modes:
             raise ValueError(

@@ -17,18 +17,17 @@ class _FakeResponse:
 def _enable_rodin_main_site(monkeypatch) -> None:
     monkeypatch.setattr(rodin.runtime, "is_rodin_tool_enabled", lambda: True)
     monkeypatch.setattr(rodin.runtime, "get_rodin_api_key", lambda: "rodin-api-key")
-    monkeypatch.setattr(rodin.runtime, "get_rodin_mode", lambda: "MAIN_SITE")
 
 
-def test_poll_rodin_main_site_requires_subscription_key(monkeypatch):
+def test_poll_rodin_main_site_requires_subscription_id(monkeypatch):
     _enable_rodin_main_site(monkeypatch)
 
     result = rodin.poll_rodin_job_status(None)
 
-    assert "requires subscription_key" in result
+    assert "requires subscription_id" in result
 
 
-def test_poll_rodin_main_site_uses_subscription_key(monkeypatch):
+def test_poll_rodin_main_site_uses_subscription_id(monkeypatch):
     _enable_rodin_main_site(monkeypatch)
     captured_payload: dict[str, str] = {}
 
@@ -40,9 +39,9 @@ def test_poll_rodin_main_site_uses_subscription_key(monkeypatch):
 
     monkeypatch.setattr(rodin.requests, "post", fake_post)
 
-    result = rodin.poll_rodin_job_status(None, subscription_key="sub-key-123")
+    result = rodin.poll_rodin_job_status(None, subscription_id="sub-id-123")
 
-    assert captured_payload == {"subscription_key": "sub-key-123"}
+    assert captured_payload == {"subscription_id": "sub-id-123"}
     assert json.loads(result) == {"status_list": ["Done"]}
 
 

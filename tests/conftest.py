@@ -14,7 +14,6 @@ def _set_test_env():
     os.environ.setdefault("VLM_API_KEY", "test-key")
     os.environ.setdefault("ENABLE_RODIN", "false")
     os.environ.setdefault("RODIN_API_KEY", "")
-    os.environ.setdefault("RODIN_MODE", "MAIN_SITE")
     yield
 
 @pytest.fixture(scope="session")

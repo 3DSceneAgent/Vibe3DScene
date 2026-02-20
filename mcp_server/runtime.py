@@ -97,13 +97,6 @@ def get_rodin_api_key() -> str:
     return os.getenv("RODIN_API_KEY", "").strip()
 
 
-def get_rodin_mode() -> str:
-    raw = os.getenv("RODIN_MODE", "MAIN_SITE").strip().upper()
-    if raw in {"MAIN_SITE", "FAL_AI"}:
-        return raw
-    return "MAIN_SITE"
-
-
 def is_trellis2_tool_enabled() -> bool:
     return get_blender_mode() == "headless" and parse_env_bool("ENABLE_TRELLIS2", False)
 
