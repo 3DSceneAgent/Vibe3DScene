@@ -30,6 +30,7 @@ from mcp_server.tools.base import (
     execute_blender_code,
     get_object_info,
     get_scene_info,
+    get_viewport_screenshot,
     import_blend_contents,
     import_glb_model,
 )
@@ -77,6 +78,12 @@ def register_mcp_tools(mcp, logger) -> list[str]:
     def _is_sketchfab_fully_enabled() -> bool:
         return runtime.is_sketchfab_tool_enabled() and bool(runtime.get_sketchfab_api_key())
 
+    def _is_local_client_mode() -> bool:
+        return runtime.get_blender_mode() == "local-client"
+
+    def _is_headless_mode() -> bool:
+        return runtime.get_blender_mode() == "headless"
+
     enabled_generator_switches = [
         name for name, is_enabled in generator_switches.items() if is_enabled
     ]
@@ -114,6 +121,12 @@ def register_mcp_tools(mcp, logger) -> list[str]:
     ] = [
         (get_scene_info, None, None, None),
         (get_object_info, None, None, None),
+        (
+            get_viewport_screenshot,
+            None,
+            _is_local_client_mode,
+            "requires BLENDER_MODE=local-client",
+        ),
         (clear_scene, None, None, None),
         (delete_objects, None, None, None),
         (execute_blender_code, None, None, None),
@@ -200,13 +213,48 @@ def register_mcp_tools(mcp, logger) -> list[str]:
             runtime.is_retrieval_tool_enabled,
             "requires ENABLE_RETRIEVAL=true",
         ),
-        (render_from_objects, None, None, None),
-        (render_from_camera, None, None, None),
-        (camera_set_pose, None, None, None),
-        (camera_observe, None, None, None),
-        (camera_act, None, None, None),
-        (observe_scene_global, None, None, None),
-        (undo_last_snapshot, None, None, None),
+        (
+            render_from_objects,
+            None,
+            _is_headless_mode,
+            "requires BLENDER_MODE=headless",
+        ),
+        (
+            render_from_camera,
+            None,
+            _is_headless_mode,
+            "requires BLENDER_MODE=headless",
+        ),
+        (
+            camera_set_pose,
+            None,
+            _is_headless_mode,
+            "requires BLENDER_MODE=headless",
+        ),
+        (
+            camera_observe,
+            None,
+            _is_headless_mode,
+            "requires BLENDER_MODE=headless",
+        ),
+        (
+            camera_act,
+            None,
+            _is_headless_mode,
+            "requires BLENDER_MODE=headless",
+        ),
+        (
+            observe_scene_global,
+            None,
+            _is_headless_mode,
+            "requires BLENDER_MODE=headless",
+        ),
+        (
+            undo_last_snapshot,
+            None,
+            _is_headless_mode,
+            "requires BLENDER_MODE=headless",
+        ),
     ]
 
     enabled: list[str] = []

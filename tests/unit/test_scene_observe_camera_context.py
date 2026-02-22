@@ -210,6 +210,7 @@ def test_scene_observe_node_invalidates_render_path_on_failure(monkeypatch):
     state: AgentState = {
         "thread_id": "test-thread",
         "last_tool_batch_names": ["execute_blender_code"],
+        "enabled_tool_names": ["camera_observe", "render_from_camera"],
         "last_render_path": "https://old-render.png",  # stale render
         "messages": [],
     }
@@ -238,6 +239,7 @@ def test_scene_observe_node_invalidates_render_path_when_no_images(monkeypatch):
     state: AgentState = {
         "thread_id": "test-thread",
         "last_tool_batch_names": ["import_glb_model"],
+        "enabled_tool_names": ["camera_observe", "render_from_camera"],
         "last_render_path": "https://old-render.png",
         "messages": [],
     }
@@ -265,6 +267,7 @@ def test_scene_observe_node_invalidates_render_path_on_exception(monkeypatch):
     state: AgentState = {
         "thread_id": "test-thread",
         "last_tool_batch_names": ["generate_trellis2_model"],
+        "enabled_tool_names": ["camera_observe", "render_from_camera"],
         "last_render_path": "https://old-render.png",
         "messages": [],
     }
@@ -297,6 +300,7 @@ def test_scene_observe_node_treats_delete_objects_as_scene_mutation(monkeypatch)
     state: AgentState = {
         "thread_id": "test-thread",
         "last_tool_batch_names": ["delete_objects"],
+        "enabled_tool_names": ["camera_observe", "render_from_camera"],
         "messages": [],
     }
 
@@ -328,6 +332,7 @@ def test_scene_observe_node_treats_clear_scene_as_scene_mutation(monkeypatch):
     state: AgentState = {
         "thread_id": "test-thread",
         "last_tool_batch_names": ["clear_scene"],
+        "enabled_tool_names": ["camera_observe", "render_from_camera"],
         "messages": [],
     }
 
@@ -335,3 +340,110 @@ def test_scene_observe_node_treats_clear_scene_as_scene_mutation(monkeypatch):
 
     assert result.get("last_render_source") == "scene_observe"
     assert result.get("last_render_path") == "https://example.com/renders/scene_ne.png"
+
+
+def test_scene_observe_node_uses_viewport_screenshot_in_local_client(monkeypatch):
+    command_calls: list[tuple[str, dict | None, str | None]] = []
+
+    def fail_update_scene_cameras(*args, **kwargs):
+        raise AssertionError("update_scene_cameras should not run in local-client screenshot mode")
+
+    def fake_process_and_save_render(
+        filepath: str,
+        thread_id: str,
+        camera_name: str,
+        *,
+        logger=None,
+    ) -> str:
+        _ = logger
+        assert Path(filepath).exists()
+        assert camera_name == "SceneObserveViewport"
+        return f"https://example.com/renders/{thread_id}/viewport.jpg"
+
+    def fake_send_blender_command_sync(
+        command_type: str,
+        params: dict | None = None,
+        thread_id: str | None = None,
+    ) -> dict:
+        command_calls.append((command_type, params, thread_id))
+        if command_type != "get_viewport_screenshot":
+            raise AssertionError(f"Unexpected command: {command_type}")
+        filepath = str((params or {}).get("filepath", ""))
+        if filepath:
+            Path(filepath).write_bytes(b"fake-image")
+        return {"success": True, "filepath": filepath, "width": 640, "height": 360}
+
+    monkeypatch.setattr(
+        "mcp_server.tools.multimodal.camera_tools.update_scene_cameras",
+        fail_update_scene_cameras,
+    )
+    monkeypatch.setattr(
+        "scene_agent.interfaces.api.send_blender_command_sync",
+        fake_send_blender_command_sync,
+    )
+    monkeypatch.setattr(
+        "scene_agent.utils.rendering.process_and_save_render",
+        fake_process_and_save_render,
+    )
+
+    state: AgentState = {
+        "thread_id": "thread-local-client",
+        "last_tool_batch_names": ["execute_blender_code"],
+        "enabled_tool_names": ["get_scene_info", "get_viewport_screenshot", "clear_scene"],
+        "messages": [],
+    }
+
+    result = scene_observe_node(state)
+
+    assert result.get("last_render_source") == "scene_observe"
+    assert result.get("last_render_path") == "https://example.com/renders/thread-local-client/viewport.jpg"
+    messages = result.get("messages")
+    assert isinstance(messages, list) and len(messages) == 1
+    message_content = messages[0].content
+    assert isinstance(message_content, list)
+    assert any(
+        isinstance(item, dict)
+        and item.get("type") == "image_url"
+        and isinstance(item.get("image_url"), dict)
+        and item["image_url"].get("url") == "https://example.com/renders/thread-local-client/viewport.jpg"
+        for item in message_content
+    )
+    assert command_calls[0][0] == "get_viewport_screenshot"
+    assert command_calls[0][2] == "thread-local-client"
+
+
+def test_scene_observe_node_invalidates_render_path_when_local_screenshot_fails(monkeypatch):
+    def fail_update_scene_cameras(*args, **kwargs):
+        raise AssertionError("update_scene_cameras should not run in local-client screenshot mode")
+
+    def fake_send_blender_command_sync(
+        command_type: str,
+        params: dict | None = None,
+        thread_id: str | None = None,
+    ) -> dict:
+        _ = params
+        _ = thread_id
+        if command_type != "get_viewport_screenshot":
+            raise AssertionError(f"Unexpected command: {command_type}")
+        return {"error": "No active 3D viewport found"}
+
+    monkeypatch.setattr(
+        "mcp_server.tools.multimodal.camera_tools.update_scene_cameras",
+        fail_update_scene_cameras,
+    )
+    monkeypatch.setattr(
+        "scene_agent.interfaces.api.send_blender_command_sync",
+        fake_send_blender_command_sync,
+    )
+
+    state: AgentState = {
+        "thread_id": "thread-local-client",
+        "last_tool_batch_names": ["import_blend_contents"],
+        "enabled_tool_names": ["get_scene_info", "get_viewport_screenshot", "clear_scene"],
+        "last_render_path": "https://old-render.png",
+        "messages": [],
+    }
+
+    result = scene_observe_node(state)
+
+    assert result == {"last_render_path": None}

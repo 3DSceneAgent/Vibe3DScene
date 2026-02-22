@@ -9,6 +9,7 @@ import json
 import mimetypes
 import os
 import re
+import tempfile
 from datetime import datetime
 from typing import Any, Dict, Literal
 from urllib.parse import unquote, urlparse
@@ -699,6 +700,13 @@ def scene_observe_node(state: AgentState) -> Dict[str, Any]:
             exc,
         )
 
+    if _should_use_viewport_scene_observe(state):
+        return _run_viewport_scene_observe(
+            state=state,
+            thread_id=thread_id,
+            send_blender_command=send_blender_command,
+        )
+
     try:
         from mcp_server.tools.multimodal.camera_tools import update_scene_cameras
 
@@ -787,6 +795,131 @@ def scene_observe_node(state: AgentState) -> Dict[str, Any]:
         "scene_bbox": scene_bbox,
         "last_scene_observe_round": tool_round,
     }
+
+
+def _should_use_viewport_scene_observe(state: AgentState) -> bool:
+    enabled_tool_set = _resolve_enabled_tool_set(state)
+    if enabled_tool_set:
+        return "get_viewport_screenshot" in enabled_tool_set
+
+    try:
+        return get_settings().blender_mode == "local-client"
+    except Exception:
+        return False
+
+
+def _run_viewport_scene_observe(
+    *,
+    state: AgentState,
+    thread_id: str,
+    send_blender_command,
+) -> Dict[str, Any]:
+    logger = _get_logger()
+    command_sender = send_blender_command
+    if command_sender is None:
+        try:
+            from mcp_server import runtime
+
+            blender = runtime.get_blender_connection(logger)
+            command_sender = blender.send_command
+        except Exception as exc:
+            logger.warning(
+                "scene_observe_node: local viewport command sender unavailable: %s",
+                exc,
+            )
+            return {"last_render_path": None}
+
+    temp_path = ""
+    screenshot_path = ""
+    try:
+        fd, temp_path = tempfile.mkstemp(
+            prefix="scene_observe_viewport_",
+            suffix=".png",
+        )
+        os.close(fd)
+        result = command_sender(
+            "get_viewport_screenshot",
+            {
+                "max_size": 800,
+                "filepath": temp_path,
+                "format": "png",
+            },
+        )
+        if not isinstance(result, dict):
+            logger.warning(
+                "scene_observe_node: local viewport capture returned non-dict result: %r",
+                result,
+            )
+            return {"last_render_path": None}
+        error = result.get("error")
+        if isinstance(error, str) and error.strip():
+            logger.warning("scene_observe_node: local viewport capture failed: %s", error)
+            return {"last_render_path": None}
+
+        reported_path = result.get("filepath")
+        screenshot_path = (
+            reported_path.strip()
+            if isinstance(reported_path, str) and reported_path.strip()
+            else temp_path
+        )
+        if not os.path.exists(screenshot_path):
+            logger.warning(
+                "scene_observe_node: local viewport screenshot file missing: %s",
+                screenshot_path,
+            )
+            return {"last_render_path": None}
+
+        from scene_agent.utils.rendering import process_and_save_render
+
+        render_url = process_and_save_render(
+            screenshot_path,
+            thread_id,
+            "SceneObserveViewport",
+            logger=logger,
+        )
+        vlm_ready_url = _payload_to_data_url({"url": render_url})
+        if not vlm_ready_url:
+            vlm_ready_url = _path_to_data_url(screenshot_path)
+
+        content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": (
+                    "Auto scene observation — viewport screenshot after scene mutation (local-client mode). "
+                    "Review this image to assess global composition, scale, and layout."
+                ),
+            }
+        ]
+        if vlm_ready_url:
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": vlm_ready_url},
+                }
+            )
+
+        tool_round = _coerce_non_negative_int(state.get("tool_round_count"))
+        return {
+            "messages": [
+                HumanMessage(
+                    id=_SCENE_OBSERVE_MESSAGE_ID,
+                    content=content,
+                )
+            ],
+            "last_render_path": render_url,
+            "last_render_source": "scene_observe",
+            "last_scene_observe_round": tool_round,
+        }
+    except Exception as exc:
+        logger.warning("scene_observe_node: get_viewport_screenshot failed: %s", exc)
+        return {"last_render_path": None}
+    finally:
+        for path in {temp_path, screenshot_path}:
+            try:
+                if path and os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
 
 
 def _get_logger():

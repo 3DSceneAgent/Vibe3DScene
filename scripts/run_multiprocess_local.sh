@@ -1,5 +1,5 @@
 #!/bin/bash
-# Start multiprocess API workers on macOS behind a local nginx gateway.
+# Start multiprocess API workers behind a local nginx gateway (macOS/Linux x86_64).
 
 set -euo pipefail
 
@@ -15,9 +15,18 @@ cd "$PROJECT_DIR"
 
 HOST_OS="$(uname -s)"
 HOST_ARCH="$(uname -m)"
-if [ "$HOST_OS" != "Darwin" ]; then
-    echo -e "${RED}This script is for macOS local multiprocess startup only.${NC}"
-    echo "Use docker-compose.multiprocess.yml on Linux."
+case "$HOST_OS" in
+    Darwin|Linux)
+        ;;
+    *)
+        echo -e "${RED}Unsupported host OS: $HOST_OS${NC}"
+        echo "Supported: Darwin and Linux."
+        exit 1
+        ;;
+esac
+if [ "$HOST_OS" = "Linux" ] && [ "$HOST_ARCH" != "x86_64" ] && [ "$HOST_ARCH" != "amd64" ]; then
+    echo -e "${RED}Unsupported Linux architecture: $HOST_ARCH${NC}"
+    echo "This local multiprocess script currently supports Linux x86_64 only."
     exit 1
 fi
 
@@ -175,28 +184,9 @@ resolve_blender_headless_cmd() {
 }
 
 if ! resolve_blender_headless_cmd; then
-    if [ "$HOST_ARCH" = "x86_64" ]; then
-        CACHE_DIR="${BLENDER_DOWNLOAD_CACHE_DIR:-$HOME/.cache/3dsceneagent/blender}"
-        VERSION="${BLENDER_VERSION:-4.2.15}"
-        echo -e "${YELLOW}Blender binary not found; downloading cached macOS x64 package...${NC}"
-        download_output="$(python scripts/download_blender.py \
-            --platform macos-x64 \
-            --version "$VERSION" \
-            --cache-dir "$CACHE_DIR" \
-            --print-path-only 2>&1)" || {
-            echo "$download_output"
-            echo -e "${RED}Failed to download Blender package.${NC}"
-            exit 1
-        }
-        dmg_path="$(echo "$download_output" | tail -n 1)"
-        echo "$download_output"
-        echo -e "${RED}Blender executable still not found.${NC}"
-        echo "Install the downloaded DMG, then rerun this script:"
-        echo "  $dmg_path"
-        exit 1
-    fi
     echo -e "${RED}BLENDER_HEADLESS_CMD is not available: $BLENDER_HEADLESS_CMD${NC}"
-    echo "Set BLENDER_HEADLESS_CMD manually for your machine."
+    echo "Ensure Blender is installed and available in PATH (for example: 'blender')."
+    echo "Or set BLENDER_HEADLESS_CMD to a valid executable path."
     exit 1
 fi
 
@@ -214,11 +204,12 @@ wait_http() {
 }
 
 STARTUP_COMPLETE="0"
+STOP_SCRIPT="$SCRIPT_DIR/stop_multiprocess_local.sh"
 cleanup_on_error() {
     local exit_code=$?
     if [ "$exit_code" -ne 0 ] && [ "$STARTUP_COMPLETE" != "1" ]; then
         echo -e "${YELLOW}Startup failed, cleaning up partial processes...${NC}"
-        "$SCRIPT_DIR/stop_multiprocess_nginx_local.sh" >/dev/null 2>&1 || true
+        "$STOP_SCRIPT" >/dev/null 2>&1 || true
     fi
     exit "$exit_code"
 }
@@ -234,7 +225,7 @@ check_stale_pid() {
     pid="$(cat "$pid_file" 2>/dev/null || true)"
     if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
         echo -e "${RED}$name is already running (pid=$pid). Stop it first:${NC}"
-        echo "  $SCRIPT_DIR/stop_multiprocess_nginx_local.sh"
+        echo "  $STOP_SCRIPT"
         exit 1
     fi
     rm -f "$pid_file"
@@ -282,8 +273,8 @@ case "$REDIS_URL" in
             echo -e "${YELLOW}Using existing local Redis on 127.0.0.1:6379${NC}"
         else
             if ! command -v redis-server >/dev/null 2>&1; then
-                echo -e "${RED}macOS local startup requires local redis-server on 127.0.0.1:6379.${NC}"
-                echo "Install Redis (e.g. 'brew install redis') and rerun."
+                echo -e "${RED}Local startup requires redis-server on 127.0.0.1:6379.${NC}"
+                echo "Install Redis and rerun."
                 exit 1
             fi
             echo -e "${GREEN}Starting local Redis (redis-server)...${NC}"
@@ -302,7 +293,7 @@ case "$REDIS_URL" in
         fi
         ;;
     *)
-        echo -e "${RED}macOS local startup requires REDIS_URL to point to local Redis on 127.0.0.1:6379.${NC}"
+        echo -e "${RED}Local startup requires REDIS_URL to point to local Redis on 127.0.0.1:6379.${NC}"
         echo "Current REDIS_URL: ${REDIS_URL}"
         echo "Set REDIS_URL=redis://127.0.0.1:6379/0 (or localhost equivalent)."
         exit 1
@@ -451,4 +442,4 @@ if [ -n "${HTTP_PROXY:-${http_proxy:-}}" ]; then
 fi
 echo -e "${CYAN}Logs:${NC} ${LOG_DIR}"
 echo ""
-echo -e "${YELLOW}Stop command:${NC} $SCRIPT_DIR/stop_multiprocess_nginx_local.sh"
+echo -e "${YELLOW}Stop command:${NC} $STOP_SCRIPT"

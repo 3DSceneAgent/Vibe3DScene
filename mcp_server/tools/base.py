@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
+import time
 from typing import Any
 
-from mcp.server.fastmcp import Context
+from mcp.server.fastmcp import Context, Image
 
 from mcp_server import runtime
 
@@ -67,6 +70,48 @@ def get_object_info(ctx: Context, object_name: str) -> str:
     except Exception as exc:
         logger.error("Error getting object info from Blender: %s", str(exc))
         return f"Error getting object info: {str(exc)}"
+
+
+def get_viewport_screenshot(ctx: Context, max_size: int = 800) -> Image:
+    """Capture current Blender viewport as an MCP Image (local-client only)."""
+    del ctx
+    mode = runtime.get_blender_mode()
+    if mode != "local-client":
+        raise Exception(
+            "get_viewport_screenshot is only available in BLENDER_MODE=local-client. "
+            f"Current mode: {mode or '<unset>'}."
+        )
+
+    temp_path = os.path.join(
+        tempfile.gettempdir(),
+        f"blender_viewport_{os.getpid()}_{int(time.time() * 1000)}.png",
+    )
+    image_path = temp_path
+    try:
+        blender = runtime.get_blender_connection(logger)
+        result = blender.send_command(
+            "get_viewport_screenshot",
+            {"max_size": max_size, "filepath": temp_path, "format": "png"},
+        )
+        if isinstance(result, dict):
+            error = result.get("error")
+            if isinstance(error, str) and error.strip():
+                raise Exception(error)
+            reported_path = result.get("filepath")
+            if isinstance(reported_path, str) and reported_path.strip():
+                image_path = reported_path
+
+        if not os.path.exists(image_path):
+            raise Exception("Screenshot file was not created by Blender.")
+        with open(image_path, "rb") as handle:
+            return Image(data=handle.read(), format="png")
+    finally:
+        for path in {temp_path, image_path}:
+            try:
+                if path and os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
 
 
 def delete_objects(

@@ -458,6 +458,7 @@ def test_scene_observe_node_routes_commands_via_api_sender(monkeypatch):
         {
             "last_tool_batch_names": ["execute_blender_code"],
             "thread_id": "thread-scene-observe",
+            "enabled_tool_names": ["camera_observe", "render_from_camera"],
             "tool_round_count": 2,
         }
     )

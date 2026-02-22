@@ -32,6 +32,7 @@ from mcp_server.tools.base import (
     execute_blender_code,
     get_object_info,
     get_scene_info,
+    get_viewport_screenshot,
     import_blend_contents,
     import_glb_model,
 )
@@ -66,6 +67,7 @@ __all__ = [
     "get_infinigen_available_assets",
     "get_object_info",
     "get_scene_info",
+    "get_viewport_screenshot",
     "get_sketchfab_model_preview",
     "import_generated_asset",
     "import_blend_contents",

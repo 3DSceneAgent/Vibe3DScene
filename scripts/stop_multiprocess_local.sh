@@ -1,5 +1,5 @@
 #!/bin/bash
-# Stop multiprocess API workers and nginx started by run_multiprocess_nginx_local.sh
+# Stop multiprocess API workers and nginx started by run_multiprocess_macos.sh.
 
 set -euo pipefail
 

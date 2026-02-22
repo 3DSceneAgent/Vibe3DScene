@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     
     # VLM Configuration
     vlm_provider: str = Field(
-        default="openai",
+        default="gemini",
         description="VLM provider: openai, anthropic, or gemini"
     )
     vlm_api_key: str | None = Field(

@@ -18,7 +18,7 @@ RUN set -eux; \
         exit 1; \
       fi; \
       apt-get update; \
-      apt-get install -y --no-install-recommends ca-certificates xz-utils; \
+      apt-get install -y --no-install-recommends ca-certificates xz-utils libx11-dev; \
       rm -rf /var/lib/apt/lists/*; \
       python /tmp/download_blender.py \
         --platform "linux-x86-64" \

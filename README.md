@@ -1,11 +1,15 @@
-# Vibe3DScene: Create Your Own 3D Scene With Words
+# Vibe3DScene: Vibe Creating Your Own 3D Scene With Words Anywhere
 
-[![Website](https://img.shields.io/badge/Website-Coming%20Soon-lightgrey)](https://3dsceneagent.github.io/vibe3dscene/)
+[![Website](https://img.shields.io/badge/Website-red)](https://3dsceneagent.github.io/vibe3dscene/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](./LICENSE)
+[![Demo](https://img.shields.io/badge/Demo-blue)](https://vibe3dscene.vercel.app)
 [![GitHub Stars](https://img.shields.io/github/stars/3DSceneAgent/Vibe3DScene?style=social)](https://github.com/3DSceneAgent/Vibe3DScene/stargazers)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE)
-[![Demo](https://img.shields.io/badge/Demo-YouTube-red)](#1-overview)
 
-Vibe3DScene converts natural-language intent into Blender scenes through a LangGraph orchestration engine. It executes end-to-end MCP tool workflows and supports two battle-tested runtime modes: `local-client` (attach to a local Blender GUI) and `headless` (pure on-the-cloud auto-provision and manage Blender sessions).
+> Note: This project is still under active development can may have bugs/breaking changes.
+
+* From the perspective of algoirthm, at the core of Vibe3DScene is a vision-aware single agent system which follows the  **render-and-verify** strategy to build scenes. (1) It's built with LangGraph, borrowing some best practices of coding agents like tool call/planning/todos/rollback/memory management. (2) It unifies MCP tools like multimodal understanding, camera control, 3D asset retrieval/AIGC-Generation/PCG and scene management. The architecture is scalable and you can easily add your own tools/tool servers.
+* From the perspective of engineering, Vibe3DScene runs Blender in headless backend mode over network communication, so users can build scenes **via chat from web/mobile/Blender-builtin clients, without relying on a local Blender GUI or CC/Cursor IDE**. Beyond that, an owner-proxy + NGINX architecture enable multi-process scaling on a single server. 
+* The design is modular and you can implement your own 3D agentic workflow.
 
 ## Table of Contents
 - [1. Overview](#1-overview)
@@ -59,7 +63,7 @@ tests/           Unit / integration / contract / manual tests
 
 ## 2. Installation and Backend Setup
 
-### Prerequisites
+### 2.1 Prerequisites
 - Python 3.11+
 - Blender 3.6+
 - Node.js 18+ (required for frontend only)
@@ -67,7 +71,7 @@ tests/           Unit / integration / contract / manual tests
 - Docker (optional, for tool servers)
 
 
-### Clone this Repo and Install Dependencies
+### 2.2 Clone this Repo and Install Dependencies
 
 ```bash
 git clone --recurse-submodules https://github.com/3DSceneAgent/Vibe3DScene
@@ -76,23 +80,19 @@ git clone --recurse-submodules https://github.com/3DSceneAgent/Vibe3DScene
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-# required for macos multi-process deployment 
+# required for non-docker multi-process deployment
+# for macos
 brew install redis nginx
+# for linux
+sudo apt install -y nginx redis-server
 ```
 
+### 2.3 Run the backend manually
 
-For Docker multiprocess builds, set:
-- `INSTALL_BLENDER=true`
-- `BLENDER_VERSION=4.2.15`
-
-Note: Docker multiprocess workers are pinned to `linux/amd64`.
-Single-process Docker (`docker-compose.singleprocess.yml`) is also pinned to `linux/amd64`.
-You can also use the [helper script](scripts/download_blender.py) to download Blender release.
-
-### Configure Environment
-
+Configure the environment variables:
 ```bash
 cp .env.example .env
+# fill-in your api keys and configurations
 ```
 
 Minimum required environment variables:
@@ -104,24 +104,27 @@ Minimum required environment variables:
 | `BLENDER_MODE` | `local-client` or `headless`. |
 | `API_PORT` | API bind port (default `8000`). |
 
-Recommended for headless mode:
+**Option1: Single worker** in headless mode or run in local-client mode (need a local blender GUI)
+```bash 
+# headless mode, for building the scene using web frontend
+./scripts/run_headless.sh
 
-| Variable | Description |
-| --- | --- |
-| `REDIS_URL` | Redis control-plane URL for ownership/checkpoint/session coordination. |
-| `BLENDER_HEADLESS_CMD` | Blender executable command (default `blender`). |
-| `BLENDER_HEADLESS_ARGS` | Command template to start headless addon server. |
-| `SESSION_SHARED_STORAGE_ROOT` | Persistent per-thread `.blend` storage root. |
-
-### Run Backend
-
-Option1: Run single API worker directly (current baseline):
-
-```bash
-python main.py --mode api --host 0.0.0.0 --port 8000 --workers 1
+# local-client mode, paired with a local blender GUI 
+./scripts/run_local_client.sh
 ```
 
-Option2: Run multi-worker deployment (Linux-x86-64, Docker + Owner-Proxy Arch, 4 workers):
+**Option2: Multi-workers**
+> Script loads env from `docker/.env.multiprocess` first (or `.env` if not found).
+```bash
+# start the service
+./scripts/run_multiprocess_local.sh
+# stop the service
+./scripts/stop_multiprocess_local.sh
+```
+
+### 2.4 Dockerized deployment (Linux/amd64 Only)
+
+**Option1**: Run multi-worker deployment (Linux-x86-64, Docker + Owner-Proxy Arch, 4 workers):
 
 ```bash
 cp docker/.env.multiprocess.example docker/.env.multiprocess
@@ -130,7 +133,7 @@ docker compose -f docker-compose.multiprocess.yml up --build
 ```
 This profile builds a shared `scene-agent-api:latest` image once and reuses it across worker-1~worker-4.
 
-Option3: Run single-process headless deployment (Dockerized `run_headless.sh`, linux/amd64):
+**Option2**: Run single-process headless deployment (Dockerized `run_headless.sh`, linux/amd64):
 
 ```bash
 cp docker/.env.singleprocess.example docker/.env.singleprocess
@@ -138,20 +141,17 @@ cp docker/.env.singleprocess.example docker/.env.singleprocess
 docker compose -f docker-compose.singleprocess.yml up --build
 ```
 
-Run multi-worker deployment on macOS (nginx + local workers):
-
+### 2.5 Tests 
+#### Basic tests 
 ```bash
-# start the service
-./scripts/run_multiprocess_macos.sh
-# stop the service
-./scripts/stop_multiprocess_macos.sh
+# run the unit tests
+pytest -q tests/unit
+
+# integration tests, required a backend is on
+RUN_INTEGRATION=1 pytest tests
 ```
 
-Notes for macOS local multiprocess:
-- Script loads env from `docker/.env.multiprocess` first (or `.env` if not found).
-
-Smoke test (recommended after startup):
-
+#### Smoke test (recommended after startup)
 ```bash
 # health + owner/proxy + mcp-tools
 python scripts/smoke_multiprocess_macos.py --gateway-url http://127.0.0.1:8000 --worker1-url http://127.0.0.1:18001 --worker2-url http://127.0.0.1:18002 --skip-chat
@@ -160,21 +160,6 @@ python scripts/smoke_multiprocess_macos.py --gateway-url http://127.0.0.1:8000 -
 python scripts/smoke_multiprocess_macos.py --gateway-url http://127.0.0.1:8000 --worker1-url http://127.0.0.1:18001 --worker2-url http://127.0.0.1:18002
 ```
 
-Option4: use helper scripts:
-
-```bash
-# Default BLENDER_MODE=headless
-./scripts/run_headless.sh
-
-# Default BLENDER_MODE=local-client
-./scripts/run_local_client.sh
-```
-
-Run CLI:
-
-```bash
-python main.py --mode cli
-```
 
 ## 3. Supported Tools and Tool Servers
 
@@ -232,29 +217,21 @@ If you change ports in `tool_servers/.env`, sync the root `.env` values used by 
 - `RETRIEVAL_API_HOST` / `RETRIEVAL_API_PORT`
 - `INFINIGEN_HOST` / `INFINIGEN_PORT`
 
-## 4. Usage Modes
+## 4. Use Cases
 
-### (A) Headless Mode + Web
+### 4.1 Headless Mode + Web
 
 1. Configure `.env`:
    - `BLENDER_MODE=headless`
    - provider API key(s)
    - headless command vars (`BLENDER_HEADLESS_CMD`, `BLENDER_HEADLESS_ARGS`)
 2. Start backend:
-
 ```bash
-# single worker
+# for example, single worker
 ./scripts/run_headless.sh
-# single worker (dockerized run_headless.sh, linux/amd64)
-docker compose -f docker-compose.singleprocess.yml up --build
-# multi worker (macos)
-./scripts/run_multiprocess_macos.sh
-# multi workers (linux x86-64)
-docker compose -f docker-compose.multiprocess.yml up --build
 ```
 
 3. Start frontend:
-
 ```bash
 cd web
 npm install
@@ -264,8 +241,8 @@ npm run dev
 4. Open the web app and set backend URL to `http://localhost:8000`.
 5. Send the first chat request with a new `thread_id`; headless Blender/MCP sessions are created on demand.
 
-### (B) Local-Client Mode + Blender
-
+### 4.2 Local-Client Mode + Blender
+> It uses `get_viewport_screenshot` tool instead of rendering-based observation for verification
 1. Install addon from [blender-mcp-vision:main]([3DSceneAgent/blender-mcp-vision](https://github.com/3DSceneAgent/blender-mcp-vision))(**NOTE: NOT addon directory of this repo**) into Blender and enable it.
 2. In Blender sidebar (`BlenderMCPVision`), start the addon socket server on configured port (default `9876`).
 3. Configure `.env`:
@@ -279,7 +256,7 @@ npm run dev
 
 5. Use API/CLI/Web against `http://localhost:8000`.
 
-### (C) Blender + Coding Agent IDE (External Workflow)
+### 4.3 Blender + Coding Agent IDE (External Workflow)
 
 If you want a pure Blender MCP workflow in coding assistants (not tied to this repository runtime), also see:
 - [3DSceneAgent/blender-mcp-vision](https://github.com/3DSceneAgent/blender-mcp-vision), which extends  beyond original [blender-mcp repo](https://github.com/ahujasid/blender-mcp)
