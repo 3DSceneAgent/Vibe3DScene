@@ -153,6 +153,14 @@ class Settings(BaseSettings):
         default=30,
         description="Seconds between idle-session sweep checks"
     )
+    frontend_session_quota_default: int = Field(
+        default=1,
+        description="Default max active headless sessions per frontend client"
+    )
+    frontend_session_quota_overrides: str = Field(
+        default="",
+        description="Per-client headless session quota overrides, format: clientA:2,clientB:1,*:1"
+    )
     session_max_snapshots: int = Field(
         default=20,
         description="Maximum retained snapshots per session for undo"
@@ -295,6 +303,33 @@ class Settings(BaseSettings):
             "gemini": self.gemini_api_key,
         }
         return provider_keys.get(provider_lower) or self.vlm_api_key
+
+    def resolve_frontend_session_quota(self, client_id: str) -> int:
+        default_quota = max(1, int(self.frontend_session_quota_default))
+        raw = self.frontend_session_quota_overrides.strip()
+        if not raw:
+            return default_quota
+        fallback_quota: int | None = None
+        for token in raw.split(","):
+            item = token.strip()
+            if not item:
+                continue
+            if ":" in item:
+                key, raw_value = item.split(":", 1)
+            elif "=" in item:
+                key, raw_value = item.split("=", 1)
+            else:
+                continue
+            key = key.strip()
+            try:
+                quota_value = max(1, int(raw_value.strip()))
+            except ValueError:
+                continue
+            if key == client_id:
+                return quota_value
+            if key == "*":
+                fallback_quota = quota_value
+        return fallback_quota if fallback_quota is not None else default_quota
 
     @property
     def session_blend_root(self) -> str:

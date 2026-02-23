@@ -77,6 +77,30 @@ export type McpToolsInfo = {
   blender_mode: 'headless' | 'local-client' | string
 }
 
+export type HeadlessRuntimeThreadEntry = {
+  thread_id: string
+  frontend_client_id: string
+  status: string
+  last_active_ms: number
+  occupying_resources: boolean
+  blender_port?: number | null
+  mcp_port?: number | null
+}
+
+export type HeadlessSessionCapacityInfo = {
+  blender_mode: string
+  frontend_client_id: string
+  quota: number
+  in_use: number
+  occupying_threads: HeadlessRuntimeThreadEntry[]
+}
+
+export type ReleaseRuntimeInfo = {
+  thread_id: string
+  released: boolean
+  cleaned: string[]
+}
+
 export type VlmProviderOption = {
   provider: string
   display_name: string

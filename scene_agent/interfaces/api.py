@@ -23,7 +23,9 @@ from scene_agent.blender.connection import BlenderConnection
 
 from scene_agent.agent.graph import create_agent_graph
 from scene_agent.blender.session_manager import (
-    allocate_headless_port,
+    SessionResourceError,
+    SessionResourceReason,
+    allocate_headless_port_strict,
     build_headless_command_args,
     get_session_manager,
     start_headless_process,
@@ -78,6 +80,10 @@ _blender_connection = None
 _blender_lock = threading.Lock()
 _thread_vlm_lock = threading.Lock()
 _thread_vlm_configs: Dict[str, Dict[str, Any]] = {}
+_thread_client_lock = threading.Lock()
+_thread_frontend_clients: Dict[str, str] = {}
+_FRONTEND_CLIENT_HEADER = "x-frontend-client-id"
+_DEFAULT_FRONTEND_CLIENT_ID = "default"
 _SUPPORTED_VLM_PROVIDERS = ("openai", "anthropic", "gemini")
 _VLM_PROVIDER_DISPLAY_NAMES = {
     "openai": "OpenAI",
@@ -103,6 +109,54 @@ def _normalize_optional(value: str | None, *, lower: bool = False) -> str | None
     if not normalized:
         return None
     return normalized.lower() if lower else normalized
+
+
+def _normalize_frontend_client_id(raw: str | None) -> str:
+    if raw is None:
+        return _DEFAULT_FRONTEND_CLIENT_ID
+    normalized = raw.strip()
+    if not normalized:
+        return _DEFAULT_FRONTEND_CLIENT_ID
+    # Keep IDs deterministic and log-safe.
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "-", normalized)[:64].strip("-")
+    return cleaned or _DEFAULT_FRONTEND_CLIENT_ID
+
+
+def _resolve_frontend_client_id(request: Request | None) -> str:
+    if request is None:
+        return _DEFAULT_FRONTEND_CLIENT_ID
+    raw = request.headers.get(_FRONTEND_CLIENT_HEADER)
+    return _normalize_frontend_client_id(raw)
+
+
+def _bind_frontend_client_to_thread(thread_id: str, client_id: str) -> None:
+    normalized = _normalize_frontend_client_id(client_id)
+    with _thread_client_lock:
+        _thread_frontend_clients[thread_id] = normalized
+    coordinator = get_session_coordinator()
+    coordinator.update_session_runtime_fields(
+        thread_id,
+        {"frontend_client_id": normalized},
+    )
+
+
+def _clear_frontend_client_binding(thread_id: str) -> None:
+    with _thread_client_lock:
+        _thread_frontend_clients.pop(thread_id, None)
+
+
+def _bind_frontend_client_to_thread_if_unclaimed(thread_id: str, client_id: str) -> None:
+    coordinator = get_session_coordinator()
+    meta = coordinator.get_session_meta(thread_id) or {}
+    resolved = _resolve_thread_frontend_client(thread_id, meta)
+    normalized_request_client = _normalize_frontend_client_id(client_id)
+    if resolved == normalized_request_client:
+        return
+    if (
+        resolved == _DEFAULT_FRONTEND_CLIENT_ID
+        and normalized_request_client != _DEFAULT_FRONTEND_CLIENT_ID
+    ):
+        _bind_frontend_client_to_thread(thread_id, normalized_request_client)
 
 
 def _resolve_api_log_path() -> Path:
@@ -214,14 +268,83 @@ def _headless_timeout_seconds_for_session(settings: Any, session: Any | None = N
     return base_timeout
 
 
+def _worker_capacity() -> int:
+    coordinator = get_session_coordinator()
+    raw_count = coordinator.worker_count()
+    if isinstance(raw_count, int) and raw_count > 0:
+        return raw_count
+    return 1
+
+
+def _active_headless_session_count(host: str) -> int:
+    coordinator = get_session_coordinator()
+    reserved = coordinator.reserved_port_count(host=host, kind="headless")
+    if isinstance(reserved, int) and reserved >= 0:
+        return reserved
+    manager = get_session_manager()
+    return sum(
+        1
+        for session in manager.list_sessions()
+        if session.port is not None and (session.host == host or session.host is None)
+    )
+
+
+def _build_capacity_error(
+    *,
+    reason: SessionResourceReason,
+    message: str,
+    headless_range: int,
+    host: str | None = None,
+    active_sessions: int | None = None,
+) -> SessionResourceError:
+    worker_capacity = _worker_capacity()
+    limits: dict[str, Any] = {
+        "worker_capacity": worker_capacity,
+        "headless_port_capacity": max(1, int(headless_range)),
+    }
+    in_use: dict[str, Any] = {}
+    if active_sessions is None and host:
+        active_sessions = _active_headless_session_count(host)
+    if active_sessions is not None:
+        in_use["active_headless_sessions"] = int(active_sessions)
+    return SessionResourceError(
+        error=message,
+        reason=reason,
+        limits=limits,
+        in_use=in_use,
+    )
+
+
+def _should_reset_redis_runtime_on_start() -> bool:
+    raw = os.getenv("SCENE_AGENT_RESET_REDIS_RUNTIME_ON_START", "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _restart_headless_session_after_timeout(thread_id: str) -> None:
+    settings = get_settings()
+    manager = get_session_manager()
+    session = manager.get(thread_id)
+    headless_host = (session.host if session is not None else None) or settings.blender_host
+    headless_port = session.port if session is not None else None
+    mcp_host = (session.mcp_host if session is not None else None) or os.getenv("BLENDER_MCP_HOST", "localhost")
+    mcp_port = session.mcp_port if session is not None else None
+    coordinator = get_session_coordinator()
     try:
-        manager = get_session_manager()
         manager.restart_session_processes(thread_id, timeout=3.0)
+        coordinator.release_port(host=headless_host, kind="headless", port=headless_port)
+        coordinator.release_port(host=mcp_host, kind="mcp", port=mcp_port)
+        coordinator.update_session_runtime_fields(
+            thread_id,
+            {"status": "closed"},
+        )
         log_event(
             "warning",
             "headless_session_restarted_after_timeout",
-            {"thread_id": thread_id},
+            {
+                "thread_id": thread_id,
+                "released_headless_port": headless_port,
+                "released_mcp_port": mcp_port,
+            },
         )
     except Exception as exc:
         log_event(
@@ -456,135 +579,187 @@ def get_blender_connection_for_thread(thread_id: str) -> BlenderConnection:
     manager.ensure_session_storage(thread_id)
     host = os.getenv("BLENDER_HEADLESS_HOST", settings.blender_host)
     base_port = int(os.getenv("BLENDER_HEADLESS_BASE_PORT", "9876"))
-    port_range = int(os.getenv("BLENDER_HEADLESS_PORT_RANGE", "16"))
+    port_range = max(1, int(os.getenv("BLENDER_HEADLESS_PORT_RANGE", "16")))
+    newly_allocated_port = False
     if session.port is None:
-        reserved_port = coordinator.reserve_port(
+        worker_capacity = _worker_capacity()
+        active_sessions = _active_headless_session_count(host)
+        if active_sessions >= worker_capacity:
+            raise _build_capacity_error(
+                reason="process_capacity_exhausted",
+                message=(
+                    "Cannot create new headless session: process capacity is exhausted. "
+                    f"Active sessions={active_sessions}, worker capacity={worker_capacity}."
+                ),
+                headless_range=port_range,
+                host=host,
+                active_sessions=active_sessions,
+            )
+
+        reservation = coordinator.reserve_port_detailed(
             host=host,
             kind="headless",
             base_port=base_port,
             range_size=port_range,
             seed=thread_id,
         )
-        if reserved_port is None:
-            used_ports = {item.port for item in manager.list_sessions() if item.port}
-            port = allocate_headless_port(
-                thread_id,
-                base_port,
-                port_range,
-                used_ports=used_ports,
+        if reservation.status == "reserved" and reservation.port is not None:
+            port = reservation.port
+        elif reservation.status == "exhausted":
+            raise _build_capacity_error(
+                reason="blender_port_exhausted",
+                message="Cannot create new headless session: no available Blender port in configured range.",
+                headless_range=port_range,
+                host=host,
+                active_sessions=active_sessions,
             )
         else:
-            port = reserved_port
+            used_ports = {
+                int(item.port)
+                for item in manager.list_sessions()
+                if item.port is not None and (item.host == host or item.host is None)
+            }
+            blocked_ports = {
+                int(item.mcp_port)
+                for item in manager.list_sessions()
+                if item.mcp_port is not None and (item.mcp_host == host or item.mcp_host is None)
+            }
+            try:
+                port = allocate_headless_port_strict(
+                    thread_id,
+                    base_port,
+                    port_range,
+                    used_ports=used_ports,
+                    blocked_ports=blocked_ports,
+                )
+            except RuntimeError as exc:
+                raise _build_capacity_error(
+                    reason="blender_port_exhausted",
+                    message="Cannot create new headless session: no available Blender port in configured range.",
+                    headless_range=port_range,
+                    host=host,
+                    active_sessions=active_sessions,
+                ) from exc
         manager.set_endpoint(thread_id, host, port)
+        newly_allocated_port = True
     else:
         port = session.port
 
-    command, args = build_headless_command_args(
-        thread_id,
-        host,
-        port,
-        blend_path=session.blend_path,
-    )
-    headless_env = os.environ.copy()
-    headless_env.update(
-        {
-            "SESSION_ID": thread_id,
-            "SESSION_STORAGE_DIR": session.storage_dir or "",
-            "SESSION_BLEND_PATH": session.blend_path or "",
-            "SESSION_SNAPSHOT_DIR": session.snapshot_dir or "",
-            "SESSION_MAX_SNAPSHOTS": str(session.max_snapshots),
-            "SESSION_IDLE_TIMEOUT_SECONDS": str(session.idle_timeout_seconds),
-            "SESSION_BLEND_ROOT": settings.session_blend_root,
-            "SESSION_PERSISTENCE_ENABLED": "1",
-        }
-    )
-    log_event(
-        "debug",
-        "headless_command_prepared",
-        {"thread_id": thread_id, "command": command, "args": args},
-    )
-
-    with session.lock:
-        log_event("debug", "headless_session_lock_acquired", {"thread_id": thread_id})
-        connection = session.connection
-        if not isinstance(connection, BlenderConnection):
-            log_event("info", "headless_connection_creating", {"thread_id": thread_id})
-            connection = BlenderConnection(host=host, port=port)
-            session.connection = connection
-        if not connection.connect():
-            log_event(
-                "info",
-                "headless_process_starting",
-                {"thread_id": thread_id, "host": host, "port": port},
-            )
-            start_headless_process(session, command, args, env=headless_env)
-            
-            # 等待进程启动并监控
-            deadline = time.time() + settings.blender_headless_startup_timeout
-            last_check = time.time()
-            connected = False
-            
-            while time.time() < deadline:
-                # 定期检查进程状态
-                if time.time() - last_check > 2.0:
-                    if session.process:
-                        if session.process.poll() is not None:
-                            error_msg = f"Blender process exited with code {session.process.returncode}"
-                            if session.log_path and os.path.exists(session.log_path):
-                                with open(session.log_path, 'r') as f:
-                                    log_content = f.read()
-                                error_msg += f"\n\nProcess Log:\n{log_content[-2000:]}"
-                            manager.set_error(thread_id, error_msg)
-                            raise Exception(error_msg)
-                        log_event(
-                            "debug",
-                            "headless_process_waiting_for_connection",
-                            {"thread_id": thread_id, "pid": session.process.pid},
-                        )
-                    last_check = time.time()
-                
-                if connection.connect():
-                    log_event(
-                        "info",
-                        "headless_connection_established",
-                        {"thread_id": thread_id, "host": host, "port": port},
-                    )
-                    connected = True
-                    break
-                time.sleep(0.5)
-            
-            if not connected:
-                error_msg = f"Connection timeout after {settings.blender_headless_startup_timeout}s"
-                if session.log_path and os.path.exists(session.log_path):
-                    with open(session.log_path, 'r') as f:
-                        log_content = f.read()
-                    error_msg += f"\n\nProcess Log:\n{log_content[-2000:]}"
-                manager.set_error(thread_id, error_msg)
-                raise Exception(error_msg)
-        else:
-            log_event("debug", "headless_connection_reused", {"thread_id": thread_id})
-
-        if not connection.sock:
-            error_message = "Could not connect to headless Blender session."
-            manager.set_error(thread_id, error_message)
-            raise Exception(error_message)
-
-        manager.set_ready(thread_id, connection)
-        coordinator.touch_activity(thread_id)
-        coordinator.update_session_runtime_fields(
+    try:
+        command, args = build_headless_command_args(
             thread_id,
-            {
-                "host": host,
-                "blender_port": port,
-                "storage_dir": session.storage_dir,
-                "blend_path": session.blend_path,
-                "snapshot_dir": session.snapshot_dir,
-                "status": "ready",
-            },
+            host,
+            port,
+            blend_path=session.blend_path,
         )
-        log_event("info", "headless_session_ready", {"thread_id": thread_id})
+        headless_env = os.environ.copy()
+        headless_env.update(
+            {
+                "SESSION_ID": thread_id,
+                "SESSION_STORAGE_DIR": session.storage_dir or "",
+                "SESSION_BLEND_PATH": session.blend_path or "",
+                "SESSION_SNAPSHOT_DIR": session.snapshot_dir or "",
+                "SESSION_MAX_SNAPSHOTS": str(session.max_snapshots),
+                "SESSION_IDLE_TIMEOUT_SECONDS": str(session.idle_timeout_seconds),
+                "SESSION_BLEND_ROOT": settings.session_blend_root,
+                "SESSION_PERSISTENCE_ENABLED": "1",
+            }
+        )
+        log_event(
+            "debug",
+            "headless_command_prepared",
+            {"thread_id": thread_id, "command": command, "args": args},
+        )
 
-    return connection
+        with session.lock:
+            log_event("debug", "headless_session_lock_acquired", {"thread_id": thread_id})
+            connection = session.connection
+            if not isinstance(connection, BlenderConnection):
+                log_event("info", "headless_connection_creating", {"thread_id": thread_id})
+                connection = BlenderConnection(host=host, port=port)
+                session.connection = connection
+            if not connection.connect():
+                log_event(
+                    "info",
+                    "headless_process_starting",
+                    {"thread_id": thread_id, "host": host, "port": port},
+                )
+                start_headless_process(session, command, args, env=headless_env)
+
+                deadline = time.time() + settings.blender_headless_startup_timeout
+                last_check = time.time()
+                connected = False
+
+                while time.time() < deadline:
+                    if time.time() - last_check > 2.0:
+                        if session.process:
+                            if session.process.poll() is not None:
+                                error_msg = f"Blender process exited with code {session.process.returncode}"
+                                if session.log_path and os.path.exists(session.log_path):
+                                    with open(session.log_path, "r") as f:
+                                        log_content = f.read()
+                                    error_msg += f"\n\nProcess Log:\n{log_content[-2000:]}"
+                                manager.set_error(thread_id, error_msg)
+                                raise Exception(error_msg)
+                            log_event(
+                                "debug",
+                                "headless_process_waiting_for_connection",
+                                {"thread_id": thread_id, "pid": session.process.pid},
+                            )
+                        last_check = time.time()
+
+                    if connection.connect():
+                        log_event(
+                            "info",
+                            "headless_connection_established",
+                            {"thread_id": thread_id, "host": host, "port": port},
+                        )
+                        connected = True
+                        break
+                    time.sleep(0.5)
+
+                if not connected:
+                    error_msg = f"Connection timeout after {settings.blender_headless_startup_timeout}s"
+                    if session.log_path and os.path.exists(session.log_path):
+                        with open(session.log_path, "r") as f:
+                            log_content = f.read()
+                        error_msg += f"\n\nProcess Log:\n{log_content[-2000:]}"
+                    manager.set_error(thread_id, error_msg)
+                    raise Exception(error_msg)
+            else:
+                log_event("debug", "headless_connection_reused", {"thread_id": thread_id})
+
+            if not connection.sock:
+                error_message = "Could not connect to headless Blender session."
+                manager.set_error(thread_id, error_message)
+                raise Exception(error_message)
+
+            manager.set_ready(thread_id, connection)
+            coordinator.touch_activity(thread_id)
+            coordinator.update_session_runtime_fields(
+                thread_id,
+                {
+                    "host": host,
+                    "blender_port": port,
+                    "storage_dir": session.storage_dir,
+                    "blend_path": session.blend_path,
+                    "snapshot_dir": session.snapshot_dir,
+                    "status": "ready",
+                },
+            )
+            log_event("info", "headless_session_ready", {"thread_id": thread_id})
+
+        return connection
+    except SessionResourceError:
+        if newly_allocated_port:
+            manager.terminate_session_processes(thread_id, timeout=3.0)
+            coordinator.release_port(host=host, kind="headless", port=port)
+        raise
+    except Exception:
+        if newly_allocated_port:
+            manager.terminate_session_processes(thread_id, timeout=3.0)
+            coordinator.release_port(host=host, kind="headless", port=port)
+        raise
 
 
 def send_blender_command_sync(
@@ -868,6 +1043,30 @@ class MCPToolsResponse(BaseModel):
     blender_mode: str
 
 
+class HeadlessRuntimeThreadEntry(BaseModel):
+    thread_id: str
+    frontend_client_id: str
+    status: str
+    last_active_ms: int
+    occupying_resources: bool
+    blender_port: int | None = None
+    mcp_port: int | None = None
+
+
+class HeadlessSessionCapacityResponse(BaseModel):
+    blender_mode: str
+    frontend_client_id: str
+    quota: int
+    in_use: int
+    occupying_threads: list[HeadlessRuntimeThreadEntry]
+
+
+class ReleaseRuntimeResponse(BaseModel):
+    thread_id: str
+    released: bool
+    cleaned: list[str] = Field(default_factory=list)
+
+
 class VLMProviderOption(BaseModel):
     provider: str
     display_name: str
@@ -1120,8 +1319,10 @@ async def _claim_or_proxy_request(
 ) -> tuple[Any, Response | None]:
     coordinator = get_session_coordinator()
     settings = get_settings()
+    request_client_id = _resolve_frontend_client_id(request)
     resolution = coordinator.claim_or_get_owner(thread_id)
     if resolution.is_owner:
+        _bind_frontend_client_to_thread_if_unclaimed(thread_id, request_client_id)
         return resolution, None
 
     if not resolution.owner_url:
@@ -1190,6 +1391,10 @@ async def _idle_session_sweeper() -> None:
         for session in idle_sessions:
             if not coordinator.is_owned_by_current_worker(session.session_id):
                 continue
+            headless_host_snapshot = session.host or settings.blender_host
+            headless_port_snapshot = session.port
+            mcp_host_snapshot = session.mcp_host or os.getenv("BLENDER_MCP_HOST", "localhost")
+            mcp_port_snapshot = session.mcp_port
             stopped, persisted = await asyncio.to_thread(
                 manager.shutdown_if_idle,
                 session.session_id,
@@ -1203,11 +1408,15 @@ async def _idle_session_sweeper() -> None:
                     "last_active_ms": int(time.time() * 1000),
                 },
             )
-            coordinator.release_port(host=session.host or settings.blender_host, kind="headless", port=session.port)
             coordinator.release_port(
-                host=session.mcp_host or os.getenv("BLENDER_MCP_HOST", "localhost"),
+                host=headless_host_snapshot,
+                kind="headless",
+                port=headless_port_snapshot,
+            )
+            coordinator.release_port(
+                host=mcp_host_snapshot,
                 kind="mcp",
-                port=session.mcp_port,
+                port=mcp_port_snapshot,
             )
             # Also clean up cached agent graph & VLM config so MCP client
             # references are released and don't keep reconnecting.
@@ -1237,6 +1446,16 @@ async def startup_event():
         log_event("info", "api_file_logging_enabled", {"log_path": str(log_path)})
         settings = get_settings()
         coordinator = get_session_coordinator()
+        if _should_reset_redis_runtime_on_start():
+            reset_result = coordinator.clear_runtime_state()
+            log_event(
+                "warning",
+                "redis_runtime_state_reset_on_startup",
+                {
+                    "enabled": True,
+                    "result": reset_result or {"deleted_keys": 0},
+                },
+            )
         coordinator.register_worker()
         if settings.blender_mode == "headless":
             if _idle_sweeper_task is None or _idle_sweeper_task.done():
@@ -1319,6 +1538,8 @@ async def root():
             "example_prompts": "GET /example-prompts",
             "vlm_models": "GET /vlm/models",
             "mcp_tools": "GET /threads/{thread_id}/mcp-tools",
+            "session_capacity": "GET /headless/session-capacity",
+            "release_runtime": "POST /threads/{thread_id}/release-runtime",
             "todos": "GET /todos/{thread_id}",
             "threads": "GET /threads",
             "delete_thread": "DELETE /threads/{thread_id}"
@@ -1382,6 +1603,8 @@ async def get_mcp_tools(thread_id: str, request: Request, response: Response):
         return proxied
     try:
         agent = await get_agent(thread_id)
+    except SessionResourceError as exc:
+        raise HTTPException(status_code=503, detail=exc.detail) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=503,
@@ -1464,6 +1687,8 @@ async def chat(request: ChatRequest, request_http: Request, response: Response):
 
     except HTTPException:
         raise
+    except SessionResourceError as e:
+        raise HTTPException(status_code=503, detail=e.detail) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1696,6 +1921,16 @@ async def chat_stream(request: ChatRequest, request_http: Request):
             error_event = {"error": detail, "status_code": e.status_code}
             yield f"data: {json.dumps(error_event)}\n\n"
             done_payload = {"event": "done", "scene_has_change": scene_has_change}
+        except SessionResourceError as e:
+            error_event = {
+                "error": e.error,
+                "reason": e.reason,
+                "limits": e.limits,
+                "in_use": e.in_use,
+                "status_code": 503,
+            }
+            yield f"data: {json.dumps(error_event)}\n\n"
+            done_payload = {"event": "done", "scene_has_change": scene_has_change}
         except Exception as e:
             log_event(
                 "error",
@@ -1774,6 +2009,8 @@ async def get_scene(thread_id: str, request: Request, response: Response):
                     status_code=504,
                     detail={"error": "Headless scene request timed out.", **diagnostics},
                 ) from exc
+            except SessionResourceError as exc:
+                raise HTTPException(status_code=503, detail=exc.detail) from exc
             except Exception as exc:
                 elapsed_value = elapsed_ms(start_time)
                 diagnostics = build_headless_diagnostics(
@@ -1814,6 +2051,8 @@ async def get_scene(thread_id: str, request: Request, response: Response):
     except Exception as e:
         if isinstance(e, HTTPException):
             raise
+        if isinstance(e, SessionResourceError):
+            raise HTTPException(status_code=503, detail=e.detail) from e
         settings = get_settings()
         if settings.blender_mode == "local-client":
             raise HTTPException(
@@ -1867,6 +2106,8 @@ async def get_scene_renders(
                     status_code=504,
                     detail={"error": "Headless render request timed out.", **diagnostics},
                 ) from exc
+            except SessionResourceError as exc:
+                raise HTTPException(status_code=503, detail=exc.detail) from exc
             except Exception as exc:
                 elapsed_value = elapsed_ms(start_time)
                 diagnostics = build_headless_diagnostics(
@@ -2116,6 +2357,8 @@ async def get_scene_renders(
         traceback.print_exc()
         if isinstance(e, HTTPException):
             raise
+        if isinstance(e, SessionResourceError):
+            raise HTTPException(status_code=503, detail=e.detail) from e
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -2169,6 +2412,8 @@ async def get_scene_gltf(thread_id: str, request: Request):
                     status_code=504,
                     detail={"error": "Headless GLTF export timed out.", **diagnostics},
                 ) from exc
+            except SessionResourceError as exc:
+                raise HTTPException(status_code=503, detail=exc.detail) from exc
             except Exception as exc:
                 elapsed_value = elapsed_ms(start_time)
                 diagnostics = build_headless_diagnostics(
@@ -2266,6 +2511,10 @@ async def get_scene_gltf(thread_id: str, request: Request):
     except Exception as e:
         import traceback
         traceback.print_exc()
+        if isinstance(e, HTTPException):
+            raise
+        if isinstance(e, SessionResourceError):
+            raise HTTPException(status_code=503, detail=e.detail) from e
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -2316,6 +2565,8 @@ async def get_scene_blend(thread_id: str, request: Request):
                     status_code=504,
                     detail={"error": "Headless BLEND export timed out.", **diagnostics},
                 ) from exc
+            except SessionResourceError as exc:
+                raise HTTPException(status_code=503, detail=exc.detail) from exc
             except Exception as exc:
                 elapsed_value = elapsed_ms(start_time)
                 diagnostics = build_headless_diagnostics(
@@ -2376,6 +2627,10 @@ async def get_scene_blend(thread_id: str, request: Request):
     except Exception as e:
         import traceback
         traceback.print_exc()
+        if isinstance(e, HTTPException):
+            raise
+        if isinstance(e, SessionResourceError):
+            raise HTTPException(status_code=503, detail=e.detail) from e
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -2567,7 +2822,209 @@ async def get_todos(thread_id: str, request: Request, response: Response):
         return payload
         
     except Exception as e:
+        if isinstance(e, SessionResourceError):
+            raise HTTPException(status_code=503, detail=e.detail) from e
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _safe_int_optional(raw: object) -> int | None:
+    try:
+        if raw is None or raw == "":
+            return None
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_thread_frontend_client(thread_id: str, meta: dict[str, str] | None = None) -> str:
+    if meta is not None:
+        from_meta = _normalize_frontend_client_id(meta.get("frontend_client_id"))
+        if from_meta != _DEFAULT_FRONTEND_CLIENT_ID:
+            return from_meta
+    with _thread_client_lock:
+        from_memory = _thread_frontend_clients.get(thread_id)
+    return _normalize_frontend_client_id(from_memory)
+
+
+def _collect_headless_runtime_entries(*, frontend_client_id: str) -> list[dict[str, Any]]:
+    settings = get_settings()
+    if settings.blender_mode != "headless":
+        return []
+
+    coordinator = get_session_coordinator()
+    manager = get_session_manager()
+    entries_by_thread: dict[str, dict[str, Any]] = {}
+
+    thread_ids = coordinator.list_threads(limit=2000)
+    for thread_id in thread_ids:
+        meta = coordinator.get_session_meta(thread_id) or {}
+        if not meta:
+            continue
+        blender_port = _safe_int_optional(meta.get("blender_port"))
+        mcp_port = _safe_int_optional(meta.get("mcp_port"))
+        occupying = blender_port is not None or mcp_port is not None
+        client_id = _resolve_thread_frontend_client(thread_id, meta)
+        if (
+            occupying
+            and client_id == _DEFAULT_FRONTEND_CLIENT_ID
+            and frontend_client_id != _DEFAULT_FRONTEND_CLIENT_ID
+        ):
+            # Migrate legacy runtime entries (without client ownership) on first
+            # access so a frontend can see and release its stale occupied slots.
+            _bind_frontend_client_to_thread(thread_id, frontend_client_id)
+            client_id = frontend_client_id
+        if client_id != frontend_client_id:
+            continue
+        last_active_ms = (
+            _safe_int_optional(meta.get("last_active_ms"))
+            or _safe_int_optional(meta.get("updated_at_ms"))
+            or 0
+        )
+        entries_by_thread[thread_id] = {
+            "thread_id": thread_id,
+            "frontend_client_id": client_id,
+            "status": str(meta.get("status") or ("active" if occupying else "closed")),
+            "last_active_ms": int(last_active_ms),
+            "occupying_resources": bool(occupying),
+            "blender_port": blender_port,
+            "mcp_port": mcp_port,
+        }
+
+    for session in manager.list_sessions():
+        if session.mode != "headless":
+            continue
+        thread_id = session.session_id
+        client_id = _resolve_thread_frontend_client(thread_id)
+        existing = entries_by_thread.get(thread_id)
+        blender_port = session.port if session.port is not None else (existing or {}).get("blender_port")
+        mcp_port = session.mcp_port if session.mcp_port is not None else (existing or {}).get("mcp_port")
+        occupying = blender_port is not None or mcp_port is not None
+        if (
+            occupying
+            and client_id == _DEFAULT_FRONTEND_CLIENT_ID
+            and frontend_client_id != _DEFAULT_FRONTEND_CLIENT_ID
+        ):
+            _bind_frontend_client_to_thread(thread_id, frontend_client_id)
+            client_id = frontend_client_id
+        if client_id != frontend_client_id:
+            continue
+        last_active_ms = int(getattr(session, "last_active_at", 0.0) * 1000) or (existing or {}).get("last_active_ms") or 0
+        status = str(getattr(session, "status", None) or (existing or {}).get("status") or ("active" if occupying else "closed"))
+        entries_by_thread[thread_id] = {
+            "thread_id": thread_id,
+            "frontend_client_id": client_id,
+            "status": status,
+            "last_active_ms": int(last_active_ms),
+            "occupying_resources": bool(occupying),
+            "blender_port": blender_port,
+            "mcp_port": mcp_port,
+        }
+
+    entries = list(entries_by_thread.values())
+    entries.sort(key=lambda item: (int(item.get("last_active_ms") or 0), str(item.get("thread_id") or "")))
+    return entries
+
+
+def _ensure_frontend_client_can_manage_thread(thread_id: str, request_client_id: str) -> None:
+    coordinator = get_session_coordinator()
+    meta = coordinator.get_session_meta(thread_id) or {}
+    resolved_client_id = _resolve_thread_frontend_client(thread_id, meta)
+    if resolved_client_id == request_client_id:
+        return
+    if (
+        resolved_client_id == _DEFAULT_FRONTEND_CLIENT_ID
+        and request_client_id != _DEFAULT_FRONTEND_CLIENT_ID
+    ):
+        _bind_frontend_client_to_thread(thread_id, request_client_id)
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            f"Thread '{thread_id}' is associated with a different frontend client "
+            "and cannot be released by this browser."
+        ),
+    )
+
+
+def _release_thread_runtime(thread_id: str) -> dict[str, Any]:
+    """Release headless runtime resources while keeping thread identity/history intact."""
+    settings = get_settings()
+    coordinator = get_session_coordinator()
+    manager = get_session_manager()
+    session = manager.get(thread_id)
+    result: dict[str, Any] = {"thread_id": thread_id, "released": False, "cleaned": []}
+
+    if session is not None and session.mode == "headless":
+        headless_host_snapshot = session.host or settings.blender_host
+        headless_port_snapshot = session.port
+        mcp_host_snapshot = session.mcp_host or os.getenv("BLENDER_MCP_HOST", "localhost")
+        mcp_port_snapshot = session.mcp_port
+
+        try:
+            manager.persist_session_blend(thread_id)
+            result["cleaned"].append("blend_persisted")
+        except Exception:
+            pass
+
+        manager.terminate_session_processes(thread_id, timeout=5.0)
+        result["cleaned"].append("processes_terminated")
+
+        coordinator.release_port(
+            host=headless_host_snapshot,
+            kind="headless",
+            port=headless_port_snapshot,
+        )
+        if headless_port_snapshot is not None:
+            result["cleaned"].append(f"headless_port:{headless_port_snapshot}")
+
+        coordinator.release_port(
+            host=mcp_host_snapshot,
+            kind="mcp",
+            port=mcp_port_snapshot,
+        )
+        if mcp_port_snapshot is not None:
+            result["cleaned"].append(f"mcp_port:{mcp_port_snapshot}")
+
+        manager.remove(thread_id)
+        result["cleaned"].append("session_removed")
+        result["released"] = True
+    else:
+        session_meta = coordinator.get_session_meta(thread_id) or {}
+        meta_headless_host = str(session_meta.get("host") or settings.blender_host)
+        meta_headless_port = _safe_int_optional(session_meta.get("blender_port"))
+        meta_mcp_host = str(session_meta.get("mcp_host") or os.getenv("BLENDER_MCP_HOST", "localhost"))
+        meta_mcp_port = _safe_int_optional(session_meta.get("mcp_port"))
+        if meta_headless_port is not None:
+            coordinator.release_port(
+                host=meta_headless_host,
+                kind="headless",
+                port=meta_headless_port,
+            )
+            result["cleaned"].append(f"headless_port:{meta_headless_port}")
+            result["released"] = True
+        if meta_mcp_port is not None:
+            coordinator.release_port(
+                host=meta_mcp_host,
+                kind="mcp",
+                port=meta_mcp_port,
+            )
+            result["cleaned"].append(f"mcp_port:{meta_mcp_port}")
+            result["released"] = True
+
+    if thread_id in _agent_graphs_by_thread:
+        del _agent_graphs_by_thread[thread_id]
+        result["cleaned"].append("agent_graph")
+    coordinator.update_session_runtime_fields(
+        thread_id,
+        {
+            "status": "closed",
+            "host": "",
+            "mcp_host": "",
+            "blender_port": "",
+            "mcp_port": "",
+        },
+    )
+    return result
 
 
 @app.get("/threads")
@@ -2583,6 +3040,22 @@ async def list_threads():
     return {"threads": threads}
 
 
+@app.get("/headless/session-capacity", response_model=HeadlessSessionCapacityResponse)
+async def get_headless_session_capacity(request: Request):
+    settings = get_settings()
+    client_id = _resolve_frontend_client_id(request)
+    quota = settings.resolve_frontend_session_quota(client_id)
+    entries = _collect_headless_runtime_entries(frontend_client_id=client_id)
+    occupying_threads = [entry for entry in entries if entry.get("occupying_resources")]
+    return HeadlessSessionCapacityResponse(
+        blender_mode=settings.blender_mode,
+        frontend_client_id=client_id,
+        quota=quota,
+        in_use=len(occupying_threads),
+        occupying_threads=[HeadlessRuntimeThreadEntry(**entry) for entry in occupying_threads],
+    )
+
+
 def _teardown_thread_session(thread_id: str) -> dict[str, Any]:
     """Fully tear down a headless session: kill processes, release ports, clean caches."""
     settings = get_settings()
@@ -2591,7 +3064,20 @@ def _teardown_thread_session(thread_id: str) -> dict[str, Any]:
     session = manager.get(thread_id)
     result: dict[str, Any] = {"thread_id": thread_id, "cleaned": []}
 
+    def _safe_int(raw: object) -> int | None:
+        try:
+            if raw is None or raw == "":
+                return None
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
     if session is not None and session.mode == "headless":
+        headless_host_snapshot = session.host or settings.blender_host
+        headless_port_snapshot = session.port
+        mcp_host_snapshot = session.mcp_host or os.getenv("BLENDER_MCP_HOST", "localhost")
+        mcp_port_snapshot = session.mcp_port
+
         # Persist blend before teardown (best-effort).
         try:
             manager.persist_session_blend(thread_id)
@@ -2605,25 +3091,45 @@ def _teardown_thread_session(thread_id: str) -> dict[str, Any]:
 
         # Release headless port.
         coordinator.release_port(
-            host=session.host or settings.blender_host,
+            host=headless_host_snapshot,
             kind="headless",
-            port=session.port,
+            port=headless_port_snapshot,
         )
-        if session.port:
-            result["cleaned"].append(f"headless_port:{session.port}")
+        if headless_port_snapshot:
+            result["cleaned"].append(f"headless_port:{headless_port_snapshot}")
 
         # Release MCP port.
         coordinator.release_port(
-            host=session.mcp_host or os.getenv("BLENDER_MCP_HOST", "localhost"),
+            host=mcp_host_snapshot,
             kind="mcp",
-            port=session.mcp_port,
+            port=mcp_port_snapshot,
         )
-        if session.mcp_port:
-            result["cleaned"].append(f"mcp_port:{session.mcp_port}")
+        if mcp_port_snapshot:
+            result["cleaned"].append(f"mcp_port:{mcp_port_snapshot}")
 
         # Remove from in-memory session manager.
         manager.remove(thread_id)
         result["cleaned"].append("session_removed")
+    elif session is None:
+        session_meta = coordinator.get_session_meta(thread_id) or {}
+        meta_headless_host = str(session_meta.get("host") or settings.blender_host)
+        meta_headless_port = _safe_int(session_meta.get("blender_port"))
+        meta_mcp_host = str(session_meta.get("mcp_host") or os.getenv("BLENDER_MCP_HOST", "localhost"))
+        meta_mcp_port = _safe_int(session_meta.get("mcp_port"))
+        if meta_headless_port is not None:
+            coordinator.release_port(
+                host=meta_headless_host,
+                kind="headless",
+                port=meta_headless_port,
+            )
+            result["cleaned"].append(f"headless_port:{meta_headless_port}")
+        if meta_mcp_port is not None:
+            coordinator.release_port(
+                host=meta_mcp_host,
+                kind="mcp",
+                port=meta_mcp_port,
+            )
+            result["cleaned"].append(f"mcp_port:{meta_mcp_port}")
 
     # Clean up cached agent graph (frees MCP client references).
     if thread_id in _agent_graphs_by_thread:
@@ -2640,6 +3146,8 @@ def _teardown_thread_session(thread_id: str) -> dict[str, Any]:
     coordinator.update_session_runtime_fields(thread_id, {"status": "closed"})
     coordinator.delete_session_metadata(thread_id)
     result["cleaned"].append("redis_metadata")
+    _clear_frontend_client_binding(thread_id)
+    result["cleaned"].append("frontend_client_binding")
 
     return result
 
@@ -2670,6 +3178,25 @@ async def delete_thread(thread_id: str, request: Request):
             "thread_delete_failed",
             {"thread_id": thread_id, "error": str(exc)},
         )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/threads/{thread_id}/release-runtime", response_model=ReleaseRuntimeResponse)
+async def release_thread_runtime(thread_id: str, request: Request, response: Response):
+    resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
+    if proxied is not None:
+        return proxied
+    try:
+        request_client_id = _resolve_frontend_client_id(request)
+        _ensure_frontend_client_can_manage_thread(thread_id, request_client_id)
+        result = await asyncio.to_thread(_release_thread_runtime, thread_id)
+        _set_owner_headers(response, resolution)
+        return ReleaseRuntimeResponse(
+            thread_id=thread_id,
+            released=bool(result.get("released", False)),
+            cleaned=[str(item) for item in result.get("cleaned", [])],
+        )
+    except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

@@ -98,6 +98,9 @@ fi
 if [ -z "${BLENDER_MODE:-}" ]; then
     export BLENDER_MODE="headless"
 fi
+if [ -z "${SCENE_AGENT_RESET_REDIS_RUNTIME_ON_START:-}" ]; then
+    export SCENE_AGENT_RESET_REDIS_RUNTIME_ON_START="0"
+fi
 if [ -z "${BLENDER_HEADLESS_CMD:-}" ]; then
     if [ -x "/Applications/Blender.app/Contents/MacOS/Blender" ]; then
         export BLENDER_HEADLESS_CMD="/Applications/Blender.app/Contents/MacOS/Blender"

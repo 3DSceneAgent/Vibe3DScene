@@ -1,15 +1,26 @@
 # Vibe3DScene: Vibe Creating Your Own 3D Scene With Words Anywhere
 
-[![Website](https://img.shields.io/badge/Website-red)](https://3dsceneagent.github.io/vibe3dscene/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](./LICENSE)
-[![Demo](https://img.shields.io/badge/Demo-blue)](https://vibe3dscene.vercel.app)
-[![GitHub Stars](https://img.shields.io/github/stars/3DSceneAgent/Vibe3DScene?style=social)](https://github.com/3DSceneAgent/Vibe3DScene/stargazers)
+<p align="center">
+  <a href="https://3dsceneagent.github.io/vibe3dscene/">
+    <img alt="Website" src="https://img.shields.io/badge/Website-3DSceneAgent-0A66C2?style=for-the-badge&logo=google-chrome&logoColor=white" />
+  </a>
+  <a href="./LICENSE">
+    <img alt="License" src="https://img.shields.io/badge/License-Apache%202.0-2EA043?style=for-the-badge&logo=apache&logoColor=white" />
+  </a>
+  <a href="https://hub.docker.com/r/fishwowater/scene-agent-api">
+    <img alt="Docker Hub" src="https://img.shields.io/badge/Docker%20Hub-scene--agent--api-2496ED?style=for-the-badge&logo=docker&logoColor=white" />
+  </a>
+  <a href="https://youtu.be/b2nP_OLbf8Y">
+    <img alt="YouTube Demo" src="https://img.shields.io/badge/YouTube-Demo-FF0000?style=for-the-badge&logo=youtube&logoColor=white" />
+  </a>
+  <a href="https://vibe3dscene.vercel.app">
+    <img alt="Web Demo" src="https://img.shields.io/badge/Web-Demo-1F6FEB?style=for-the-badge&logo=vercel&logoColor=white" />
+  </a>
+</p>
 
 > Note: This project is still under active development can may have bugs/breaking changes.
 
-* From the perspective of algoirthm, at the core of Vibe3DScene is a vision-aware single agent system which follows the  **render-and-verify** strategy to build scenes. (1) It's built with LangGraph, borrowing some best practices of coding agents like tool call/planning/todos/rollback/memory management. (2) It unifies MCP tools like multimodal understanding, camera control, 3D asset retrieval/AIGC-Generation/PCG and scene management. The architecture is scalable and you can easily add your own tools/tool servers.
-* From the perspective of engineering, Vibe3DScene runs Blender in headless backend mode over network communication, so users can build scenes **via chat from web/mobile/Blender-builtin clients, without relying on a local Blender GUI or CC/Cursor IDE**. Beyond that, an owner-proxy + NGINX architecture enable multi-process scaling on a single server. 
-* The design is modular and you can implement your own 3D agentic workflow.
+![Demo](./assets/demo.gif)
 
 ## Table of Contents
 - [1. Overview](#1-overview)
@@ -18,22 +29,16 @@
 - [4. Usage Modes](#4-usage-modes)
 - [5. Frontend](#5-frontend)
 - [6. Core Environment Variables](#6-core-environment-variables)
-- [7. Acknowledgements](#7-acknowledgements)
+- [7. TODO](#7-todo)
+- [8. Acknowledgements](#8-acknowledgements)
 - [License](#license)
 - [Contributing](#contributing)
 
 ## 1. Overview
-
-### Website and Demo
-- Website: [https://3dsceneagent.github.io/vibe3dscene/](https://3dsceneagent.github.io/vibe3dscene/)
-- Demo Page: add your public demo link here.
-
-MP4 placeholder (replace `YOUR_DEMO_VIDEO.mp4` with your real file path or URL):
-
-<video controls preload="metadata" width="100%">
-  <source src="YOUR_DEMO_VIDEO.mp4" type="video/mp4" />
-  Your browser does not support the video tag.
-</video>
+### Introduction
+* From the perspective of algoirthm, at the core of Vibe3DScene is a vision-aware single agent system which follows the  **render-and-verify** strategy to build scenes. (1) It's built with LangGraph, borrowing some best practices of coding agents like tool call/planning/todos/rollback/memory management. (2) It unifies MCP tools like multimodal understanding, camera control, 3D asset retrieval/AIGC-Generation/PCG and scene management. The architecture is scalable and you can easily add your own tools/tool servers.
+* From the perspective of engineering, Vibe3DScene runs Blender in headless backend mode over network communication, so users can build scenes **via chat from web/mobile/Blender-builtin clients, without relying on a local Blender GUI or CC/Cursor IDE**. Beyond that, an owner-proxy + NGINX architecture enable multi-process scaling on a single server. 
+* The design is modular and you can implement your own 3D agentic workflow.
 
 ### High-Level Flow
 
@@ -46,8 +51,7 @@ flowchart LR
     B --> OUT[Scene / Render / Assets]
 ```
 
-Detailed workflow and deployment diagrams:
-- [Agentic Workflow and Deployment Topologies](./docs/architecture/agentic-workflow.md)
+Detailed workflow and deployment diagrams: [Agentic Workflow and Deployment Topologies](./docs/architecture/agentic-workflow.md)
 
 ### Repository Structure
 
@@ -129,7 +133,7 @@ Minimum required environment variables:
 ```bash
 cp docker/.env.multiprocess.example docker/.env.multiprocess
 # edit docker/.env.multiprocess and set provider/API key
-docker compose -f docker-compose.multiprocess.yml up --build
+docker compose -f docker-compose.multiprocess.yml up
 ```
 This profile builds a shared `scene-agent-api:latest` image once and reuses it across worker-1~worker-4.
 
@@ -138,7 +142,7 @@ This profile builds a shared `scene-agent-api:latest` image once and reuses it a
 ```bash
 cp docker/.env.singleprocess.example docker/.env.singleprocess
 # edit docker/.env.singleprocess and set provider/API key
-docker compose -f docker-compose.singleprocess.yml up --build
+docker compose -f docker-compose.singleprocess.yml up
 ```
 
 ### 2.5 Tests 
@@ -163,7 +167,7 @@ python scripts/smoke_multiprocess_macos.py --gateway-url http://127.0.0.1:8000 -
 
 ## 3. Supported Tools and Tool Servers
 
-### MCP Tool Categories
+### 3.1 MCP Tool Categories
 
 | Category | Tools |
 | --- | --- |
@@ -186,7 +190,7 @@ Conditional tool gates:
   - More than one of `ENABLE_RODIN`, `ENABLE_TRELLIS2`, `ENABLE_HUNYUAN`.
   - Both `ENABLE_RETRIEVAL=true` and `ENABLE_SKETCHFAB=true`.
 
-### Tool Servers (Sub-deployments, Optional)
+### 3.2 Tool Servers (Sub-deployments, Optional)
 > Some of the tools above require a local deployment, all of them are dockerized.
 
 `tool_servers/` includes Docker Compose deployment for:
@@ -276,7 +280,7 @@ npm run lint
 
 ## 6. Core Environment Variables
 
-### Model and Provider
+### 6.1 Model and Provider
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -286,7 +290,7 @@ npm run lint
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` | empty | Provider-specific API keys. |
 | `VLM_OPENAI_MODELS` / `VLM_ANTHROPIC_MODELS` / `VLM_GEMINI_MODELS` | comma-separated | Exposed provider model catalogs. |
 
-### Backend and Session Runtime
+### 6.2 Backend and Session Runtime
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -300,7 +304,7 @@ npm run lint
 | `SESSION_HEARTBEAT_INTERVAL_SECONDS` | `5` | Lease heartbeat interval. |
 | `SESSION_OWNER_UNREACHABLE_GRACE_SECONDS` | `10` | Grace period before takeover. |
 
-### Headless Blender and MCP Process Control
+### 6.3 Headless Blender and MCP Process Control
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -314,7 +318,7 @@ npm run lint
 | `SESSION_IDLE_TIMEOUT_SECONDS` | `600` | Auto-stop idle session timeout. |
 | `SESSION_MAX_SNAPSHOTS` | `20` | Snapshot retention for undo. |
 
-### Tool Integration Switches
+### 6.4 Tool Integration Switches
 
 | Variable | Description |
 | --- | --- |
@@ -325,7 +329,12 @@ npm run lint
 | `ENABLE_INFINIGEN`, `INFINIGEN_HOST`, `INFINIGEN_PORT` | Enable PCG/Infinigen tools. |
 | `ENABLE_SKETCHFAB`, `SKETCHFAB_API_KEY` | Enable Sketchfab search/download tools. |
 
-## 7. Acknowledgements
+## 7. TODO
+- [ ] Refactor code and clean up.
+- [ ] Fix a few minor bugs in port allocation.
+- [ ] Optimize the performance of agentic workflow.
+
+## 8. Acknowledgements
 - [Blender-MCP](https://github.com/ahujasid/blender-mcp)
 - [VIGA](https://github.com/Fugtemypt123/VIGA) 
 - [LangGraph](https://github.com/langchain-ai/langgraph)

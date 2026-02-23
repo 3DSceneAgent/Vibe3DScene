@@ -1,7 +1,9 @@
 import type {
   BlendFileEntry,
+  HeadlessSessionCapacityInfo,
   McpToolsInfo,
   ReferenceImage,
+  ReleaseRuntimeInfo,
   RenderImage,
   SceneInfo,
   StreamEvent,
@@ -10,6 +12,132 @@ import type {
   VlmProviderOption,
   ThreadVlmSelection
 } from './types'
+
+const FRONTEND_CLIENT_HEADER = 'X-Frontend-Client-Id'
+const FRONTEND_CLIENT_STORAGE_KEY = 'sceneAgentFrontendClientId'
+let frontendClientIdCache: string | null = null
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function generateFrontendClientId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `web-${crypto.randomUUID()}`
+  }
+  const randomPart = Math.random().toString(36).slice(2, 10)
+  return `web-${Date.now().toString(36)}-${randomPart}`
+}
+
+function getFrontendClientId(): string {
+  if (frontendClientIdCache) {
+    return frontendClientIdCache
+  }
+  try {
+    const fromStorage = localStorage.getItem(FRONTEND_CLIENT_STORAGE_KEY)
+    if (typeof fromStorage === 'string' && fromStorage.trim()) {
+      frontendClientIdCache = fromStorage.trim()
+      return frontendClientIdCache
+    }
+  } catch {
+    // Ignore localStorage access failures (private mode / SSR).
+  }
+  const generated = generateFrontendClientId()
+  frontendClientIdCache = generated
+  try {
+    localStorage.setItem(FRONTEND_CLIENT_STORAGE_KEY, generated)
+  } catch {
+    // Ignore persistence failures; in-memory ID still keeps consistency per tab.
+  }
+  return generated
+}
+
+function buildRequestHeaders(headers?: HeadersInit): Headers {
+  const merged = new Headers(headers ?? undefined)
+  merged.set(FRONTEND_CLIENT_HEADER, getFrontendClientId())
+  return merged
+}
+
+async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const requestInit: RequestInit = {
+    ...(init ?? {}),
+    headers: buildRequestHeaders(init?.headers)
+  }
+  return await fetch(input, requestInit)
+}
+
+function extractDetailMessage(detail: unknown): string | undefined {
+  if (typeof detail === 'string' && detail.trim()) {
+    return detail.trim()
+  }
+  if (isRecord(detail)) {
+    const directError = detail.error
+    if (typeof directError === 'string' && directError.trim()) {
+      return directError.trim()
+    }
+    const nestedDetail = detail.detail
+    if (typeof nestedDetail === 'string' && nestedDetail.trim()) {
+      return nestedDetail.trim()
+    }
+  }
+  return undefined
+}
+
+export class ApiRequestError extends Error {
+  status: number
+  detail?: unknown
+  reason?: string
+  limits?: Record<string, unknown>
+  in_use?: Record<string, unknown>
+
+  constructor(args: {
+    message: string
+    status: number
+    detail?: unknown
+    reason?: string
+    limits?: Record<string, unknown>
+    in_use?: Record<string, unknown>
+  }) {
+    super(args.message)
+    this.name = 'ApiRequestError'
+    this.status = args.status
+    this.detail = args.detail
+    this.reason = args.reason
+    this.limits = args.limits
+    this.in_use = args.in_use
+  }
+}
+
+async function buildHttpError(response: Response, fallbackMessage: string): Promise<ApiRequestError> {
+  let detailPayload: unknown
+  try {
+    detailPayload = await response.json()
+  } catch {
+    detailPayload = undefined
+  }
+
+  const responseRoot = isRecord(detailPayload) ? detailPayload : {}
+  const detail = responseRoot.detail
+  const structuredDetail = isRecord(detail) ? detail : undefined
+  const reasonValue = structuredDetail?.reason
+  const reason = typeof reasonValue === 'string' ? reasonValue : undefined
+  const limits = isRecord(structuredDetail?.limits) ? (structuredDetail.limits as Record<string, unknown>) : undefined
+  const inUse = isRecord(structuredDetail?.in_use) ? (structuredDetail.in_use as Record<string, unknown>) : undefined
+  const preferredMessage =
+    extractDetailMessage(detail) ||
+    extractDetailMessage(detailPayload) ||
+    extractDetailMessage(responseRoot.error) ||
+    fallbackMessage
+
+  return new ApiRequestError({
+    message: preferredMessage,
+    status: response.status,
+    detail: detail ?? detailPayload,
+    reason,
+    limits,
+    in_use: inUse
+  })
+}
 
 type StreamChatArgs = {
   baseUrl: string
@@ -90,15 +218,18 @@ export async function streamChat({
   if (vlmModel) {
     payload.vlm_model = vlmModel
   }
-  const response = await fetch(`${baseUrl}/chat/stream`, {
+  const response = await apiFetch(`${baseUrl}/chat/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
     signal
   })
 
-  if (!response.ok || !response.body) {
-    throw new Error(`Stream failed (${response.status})`)
+  if (!response.ok) {
+    throw await buildHttpError(response, `Stream failed (${response.status})`)
+  }
+  if (!response.body) {
+    throw new Error('Stream response body is empty')
   }
 
   const reader = response.body.getReader()
@@ -166,17 +297,17 @@ export async function getScene(
   threadId: string,
   signal?: AbortSignal
 ): Promise<SceneInfo> {
-  const response = await fetch(`${baseUrl}/scene/${threadId}`, { signal })
+  const response = await apiFetch(`${baseUrl}/scene/${threadId}`, { signal })
   if (!response.ok) {
-    throw new Error(`Failed to load scene (${response.status})`)
+    throw await buildHttpError(response, `Failed to load scene (${response.status})`)
   }
   return (await response.json()) as SceneInfo
 }
 
 export async function getTodos(baseUrl: string, threadId: string): Promise<TodoItem[]> {
-  const response = await fetch(`${baseUrl}/todos/${threadId}`)
+  const response = await apiFetch(`${baseUrl}/todos/${threadId}`)
   if (!response.ok) {
-    throw new Error(`Failed to load todos (${response.status})`)
+    throw await buildHttpError(response, `Failed to load todos (${response.status})`)
   }
   const data = (await response.json()) as { todos?: TodoItem[] }
   return data.todos ?? []
@@ -193,9 +324,9 @@ export async function getSceneRenders(
     query.set('include_local_work', 'true')
   }
   const suffix = query.toString() ? `?${query.toString()}` : ''
-  const response = await fetch(`${baseUrl}/scene/${threadId}/renders${suffix}`, { signal })
+  const response = await apiFetch(`${baseUrl}/scene/${threadId}/renders${suffix}`, { signal })
   if (!response.ok) {
-    throw new Error(`Failed to load renders (${response.status})`)
+    throw await buildHttpError(response, `Failed to load renders (${response.status})`)
   }
   const data = (await response.json()) as unknown
   return parseRenderImages(data)
@@ -206,9 +337,9 @@ export async function getSceneGltf(
   threadId: string,
   signal?: AbortSignal
 ): Promise<Blob> {
-  const response = await fetch(`${baseUrl}/scene/${threadId}/gltf`, { signal })
+  const response = await apiFetch(`${baseUrl}/scene/${threadId}/gltf`, { signal })
   if (!response.ok) {
-    throw new Error(`Failed to load glTF (${response.status})`)
+    throw await buildHttpError(response, `Failed to load glTF (${response.status})`)
   }
   return await response.blob()
 }
@@ -218,9 +349,9 @@ export async function getSceneBlend(
   threadId: string,
   signal?: AbortSignal
 ): Promise<Blob> {
-  const response = await fetch(`${baseUrl}/scene/${threadId}/blend`, { signal })
+  const response = await apiFetch(`${baseUrl}/scene/${threadId}/blend`, { signal })
   if (!response.ok) {
-    throw new Error(`Failed to load .blend file (${response.status})`)
+    throw await buildHttpError(response, `Failed to load .blend file (${response.status})`)
   }
   return await response.blob()
 }
@@ -230,9 +361,9 @@ export async function listSceneBlendFiles(
   threadId: string,
   signal?: AbortSignal
 ): Promise<BlendFileEntry[]> {
-  const response = await fetch(`${baseUrl}/scene/${threadId}/blends`, { signal })
+  const response = await apiFetch(`${baseUrl}/scene/${threadId}/blends`, { signal })
   if (!response.ok) {
-    throw new Error(`Failed to load .blend files (${response.status})`)
+    throw await buildHttpError(response, `Failed to load .blend files (${response.status})`)
   }
   const data = (await response.json()) as unknown
   return parseBlendFiles(data)
@@ -245,9 +376,9 @@ export async function getSceneBlendFile(
   signal?: AbortSignal
 ): Promise<Blob> {
   const query = new URLSearchParams({ path: relativePath })
-  const response = await fetch(`${baseUrl}/scene/${threadId}/blends/download?${query.toString()}`, { signal })
+  const response = await apiFetch(`${baseUrl}/scene/${threadId}/blends/download?${query.toString()}`, { signal })
   if (!response.ok) {
-    throw new Error(`Failed to download .blend file (${response.status})`)
+    throw await buildHttpError(response, `Failed to download .blend file (${response.status})`)
   }
   return await response.blob()
 }
@@ -259,21 +390,21 @@ export async function uploadReferenceImages(
 ): Promise<ReferenceImage[]> {
   const formData = new FormData()
   files.forEach((file) => formData.append('images', file))
-  const response = await fetch(`${baseUrl}/threads/${threadId}/reference-images`, {
+  const response = await apiFetch(`${baseUrl}/threads/${threadId}/reference-images`, {
     method: 'POST',
     body: formData
   })
   if (!response.ok) {
-    throw new Error(`Failed to upload reference images (${response.status})`)
+    throw await buildHttpError(response, `Failed to upload reference images (${response.status})`)
   }
   const data = (await response.json()) as { images?: ReferenceImage[] }
   return data.images ?? []
 }
 
 export async function listReferenceImages(baseUrl: string, threadId: string): Promise<ReferenceImage[]> {
-  const response = await fetch(`${baseUrl}/threads/${threadId}/reference-images`)
+  const response = await apiFetch(`${baseUrl}/threads/${threadId}/reference-images`)
   if (!response.ok) {
-    throw new Error(`Failed to load reference images (${response.status})`)
+    throw await buildHttpError(response, `Failed to load reference images (${response.status})`)
   }
   const data = (await response.json()) as { images?: ReferenceImage[] }
   return data.images ?? []
@@ -285,7 +416,7 @@ export async function deleteThread(
   signal?: AbortSignal
 ): Promise<void> {
   try {
-    const response = await fetch(`${baseUrl}/threads/${threadId}`, {
+    const response = await apiFetch(`${baseUrl}/threads/${threadId}`, {
       method: 'DELETE',
       signal
     })
@@ -302,18 +433,18 @@ export async function getHealth(
   baseUrl: string,
   signal?: AbortSignal
 ): Promise<{ status: string; blender_mode?: 'headless' | 'local-client' }> {
-  const response = await fetch(`${baseUrl}/health`, { signal })
+  const response = await apiFetch(`${baseUrl}/health`, { signal })
   if (!response.ok) {
-    throw new Error(`Healthcheck failed (${response.status})`)
+    throw await buildHttpError(response, `Healthcheck failed (${response.status})`)
   }
   return (await response.json()) as { status: string; blender_mode?: 'headless' | 'local-client' }
 }
 
 
 export async function getExamplePrompts(baseUrl: string): Promise<string[]> {
-  const response = await fetch(`${baseUrl}/example-prompts`)
+  const response = await apiFetch(`${baseUrl}/example-prompts`)
   if (!response.ok) {
-    throw new Error(`Failed to load example prompts (${response.status})`)
+    throw await buildHttpError(response, `Failed to load example prompts (${response.status})`)
   }
   const data = (await response.json()) as { prompts?: string[] }
   return Array.isArray(data.prompts) ? data.prompts : []
@@ -324,9 +455,9 @@ export async function getMcpTools(
   threadId: string,
   signal?: AbortSignal
 ): Promise<McpToolsInfo> {
-  const response = await fetch(`${baseUrl}/threads/${threadId}/mcp-tools`, { signal })
+  const response = await apiFetch(`${baseUrl}/threads/${threadId}/mcp-tools`, { signal })
   if (!response.ok) {
-    throw new Error(`Failed to load MCP tools (${response.status})`)
+    throw await buildHttpError(response, `Failed to load MCP tools (${response.status})`)
   }
   const data = (await response.json()) as Partial<McpToolsInfo>
   const tool_hints: Record<string, string> = {}
@@ -356,9 +487,9 @@ export async function getVlmModels(
   signal?: AbortSignal
 ): Promise<VlmModelsInfo> {
   const query = threadId ? `?thread_id=${encodeURIComponent(threadId)}` : ''
-  const response = await fetch(`${baseUrl}/vlm/models${query}`, { signal })
+  const response = await apiFetch(`${baseUrl}/vlm/models${query}`, { signal })
   if (!response.ok) {
-    throw new Error(`Failed to load VLM models (${response.status})`)
+    throw await buildHttpError(response, `Failed to load VLM models (${response.status})`)
   }
   const data = (await response.json()) as Partial<VlmModelsInfo>
   const providers = Array.isArray(data.providers)
@@ -416,4 +547,30 @@ export async function getVlmModels(
     default_model: defaultModel,
     thread_selection: threadSelection
   }
+}
+
+export async function getHeadlessSessionCapacity(
+  baseUrl: string,
+  signal?: AbortSignal
+): Promise<HeadlessSessionCapacityInfo> {
+  const response = await apiFetch(`${baseUrl}/headless/session-capacity`, { signal })
+  if (!response.ok) {
+    throw await buildHttpError(response, `Failed to load headless session capacity (${response.status})`)
+  }
+  return (await response.json()) as HeadlessSessionCapacityInfo
+}
+
+export async function releaseThreadRuntime(
+  baseUrl: string,
+  threadId: string,
+  signal?: AbortSignal
+): Promise<ReleaseRuntimeInfo> {
+  const response = await apiFetch(`${baseUrl}/threads/${threadId}/release-runtime`, {
+    method: 'POST',
+    signal
+  })
+  if (!response.ok) {
+    throw await buildHttpError(response, `Failed to release runtime for thread '${threadId}' (${response.status})`)
+  }
+  return (await response.json()) as ReleaseRuntimeInfo
 }

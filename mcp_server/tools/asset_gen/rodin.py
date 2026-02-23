@@ -50,9 +50,11 @@ def _format_rodin_submit_response(result: dict[str, Any]) -> str:
 
     jobs = result.get("jobs") or {}
     if isinstance(jobs, dict):
-        subscription_id = jobs.get("subscription_id") or jobs.get("subscription_key")
-        if isinstance(subscription_id, str) and subscription_id:
-            output["subscription_id"] = subscription_id
+        subscription_key_value = jobs.get("subscription_key") or jobs.get("subscription_id")
+        if isinstance(subscription_key_value, str) and subscription_key_value:
+            # Keep legacy alias for compatibility with older callers.
+            output["subscription_key"] = subscription_key_value
+            output["subscription_id"] = subscription_key_value
 
     if not output:
         return json.dumps(result, indent=2)
@@ -183,23 +185,27 @@ def generate_hyper3d_model_via_images(
 
 def poll_rodin_job_status(
     ctx: Context,
+    subscription_key: Optional[str] = None,
     subscription_id: Optional[str] = None,
 ) -> str:
-    """Poll Hyper3D Rodin task status using MAIN SITE subscription id."""
+    """Poll Hyper3D Rodin task status using MAIN SITE subscription key."""
     api_key, error_message = _get_rodin_api_key_or_error()
     if error_message:
         return error_message
     assert api_key is not None
 
     try:
-        resolved_subscription_id = (subscription_id or "").strip()
-        if not resolved_subscription_id:
-            return "Error: MAIN_SITE Rodin status polling requires subscription_id."
+        resolved_subscription_key = (subscription_key or subscription_id or "").strip()
+        if not resolved_subscription_key:
+            return (
+                "Error: MAIN_SITE Rodin status polling requires subscription_key "
+                "(or legacy subscription_id)."
+            )
 
         response = requests.post(
             f"{RODIN_MAIN_SITE_API_BASE_URL}/status",
             headers=_rodin_headers(api_key),
-            json={"subscription_id": resolved_subscription_id},
+            json={"subscription_key": resolved_subscription_key},
             timeout=60,
         )
         if response.status_code >= 400:

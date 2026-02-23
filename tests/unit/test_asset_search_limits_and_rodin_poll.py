@@ -19,15 +19,15 @@ def _enable_rodin_main_site(monkeypatch) -> None:
     monkeypatch.setattr(rodin.runtime, "get_rodin_api_key", lambda: "rodin-api-key")
 
 
-def test_poll_rodin_main_site_requires_subscription_id(monkeypatch):
+def test_poll_rodin_main_site_requires_subscription_key_or_legacy_subscription_id(monkeypatch):
     _enable_rodin_main_site(monkeypatch)
 
     result = rodin.poll_rodin_job_status(None)
 
-    assert "requires subscription_id" in result
+    assert "requires subscription_key" in result
 
 
-def test_poll_rodin_main_site_uses_subscription_id(monkeypatch):
+def test_poll_rodin_main_site_uses_subscription_key(monkeypatch):
     _enable_rodin_main_site(monkeypatch)
     captured_payload: dict[str, str] = {}
 
@@ -39,10 +39,44 @@ def test_poll_rodin_main_site_uses_subscription_id(monkeypatch):
 
     monkeypatch.setattr(rodin.requests, "post", fake_post)
 
-    result = rodin.poll_rodin_job_status(None, subscription_id="sub-id-123")
+    result = rodin.poll_rodin_job_status(None, subscription_key="sub-key-123")
 
-    assert captured_payload == {"subscription_id": "sub-id-123"}
+    assert captured_payload == {"subscription_key": "sub-key-123"}
     assert json.loads(result) == {"status_list": ["Done"]}
+
+
+def test_poll_rodin_main_site_accepts_legacy_subscription_id(monkeypatch):
+    _enable_rodin_main_site(monkeypatch)
+    captured_payload: dict[str, str] = {}
+
+    def fake_post(url, headers=None, json=None, timeout=60):
+        _ = (url, headers, timeout)
+        if isinstance(json, dict):
+            captured_payload.update(json)
+        return _FakeResponse(200, {"jobs": [{"status": "Done"}]})
+
+    monkeypatch.setattr(rodin.requests, "post", fake_post)
+
+    result = rodin.poll_rodin_job_status(None, subscription_id="legacy-id-123")
+
+    assert captured_payload == {"subscription_key": "legacy-id-123"}
+    assert json.loads(result) == {"status_list": ["Done"]}
+
+
+def test_format_rodin_submit_response_returns_subscription_key_and_legacy_alias():
+    result = rodin._format_rodin_submit_response(
+        {
+            "submit_time": "2026-02-23T00:00:00Z",
+            "uuid": "task-uuid",
+            "jobs": {"subscription_id": "legacy-subscription-id"},
+        }
+    )
+
+    assert json.loads(result) == {
+        "task_uuid": "task-uuid",
+        "subscription_key": "legacy-subscription-id",
+        "subscription_id": "legacy-subscription-id",
+    }
 
 
 def test_search_sketchfab_models_caps_count_to_five(monkeypatch):

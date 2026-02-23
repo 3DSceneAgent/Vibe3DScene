@@ -47,6 +47,8 @@ export type Thread = {
   sceneHasChange?: boolean
   referenceImages?: ReferenceImage[]
   graphEvents?: GraphNodeStream[]
+  occupyingResources?: boolean
+  lastRuntimeActiveMs?: number
 }
 
 export type ThemeId = 'dark' | 'light'

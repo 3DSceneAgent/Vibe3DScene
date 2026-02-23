@@ -194,7 +194,7 @@ def build_asset_creation_strategy_text(
             [
                 "   - Hyper3D Rodin",
                 "     - Flow: generate_hyper3d_model_via_text(...) or generate_hyper3d_model_via_images(...)"
-                " -> poll_rodin_job_status(subscription_id=...)"
+                " -> poll_rodin_job_status(subscription_key=...)"
                 " -> import_generated_asset(...)",
                 "     - Best for single-item custom generation, especially from reference images",
             ]

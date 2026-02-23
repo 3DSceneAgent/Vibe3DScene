@@ -26,6 +26,12 @@ class OwnerResolution:
         return self.mode == "proxy"
 
 
+@dataclass
+class PortReservationResult:
+    status: Literal["reserved", "exhausted", "registry_unavailable"]
+    port: int | None = None
+
+
 class SessionCoordinator:
     def __init__(self) -> None:
         settings = get_settings()
@@ -230,21 +236,41 @@ class SessionCoordinator:
         range_size: int,
         seed: str,
     ) -> int | None:
+        reservation = self.reserve_port_detailed(
+            host=host,
+            kind=kind,
+            base_port=base_port,
+            range_size=range_size,
+            seed=seed,
+        )
+        if reservation.status == "reserved":
+            return reservation.port
+        return None
+
+    def reserve_port_detailed(
+        self,
+        *,
+        host: str,
+        kind: Literal["headless", "mcp"],
+        base_port: int,
+        range_size: int,
+        seed: str,
+    ) -> PortReservationResult:
         if self._registry is None:
-            return None
+            return PortReservationResult(status="registry_unavailable", port=None)
         try:
-            return self._registry.reserve_port(
+            reserved_port = self._registry.reserve_port(
                 host=host,
                 kind=kind,
                 base_port=base_port,
                 range_size=range_size,
                 seed=seed,
             )
+            return PortReservationResult(status="reserved", port=reserved_port)
         except RedisError:
-            return None
+            return PortReservationResult(status="registry_unavailable", port=None)
         except RuntimeError:
-            # All ports in range exhausted – fall back to in-memory allocation.
-            return None
+            return PortReservationResult(status="exhausted", port=None)
 
     def release_port(
         self,
@@ -316,6 +342,38 @@ class SessionCoordinator:
             return self._registry.health()
         except RedisError:
             return False, None
+
+    def worker_count(self) -> int | None:
+        if self._registry is None:
+            return None
+        try:
+            return self._registry.worker_count()
+        except RedisError:
+            return None
+
+    def reserved_port_count(self, *, host: str, kind: Literal["headless", "mcp"]) -> int | None:
+        if self._registry is None:
+            return None
+        try:
+            return self._registry.reserved_port_count(host=host, kind=kind)
+        except RedisError:
+            return None
+
+    def get_session_meta(self, thread_id: str) -> dict[str, str] | None:
+        if self._registry is None:
+            return None
+        try:
+            return self._registry.get_session_meta(thread_id)
+        except RedisError:
+            return None
+
+    def clear_runtime_state(self) -> dict[str, int] | None:
+        if self._registry is None:
+            return None
+        try:
+            return self._registry.clear_runtime_state()
+        except RedisError:
+            return None
 
 
 _coordinator: SessionCoordinator | None = None

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  ApiRequestError,
   streamChat,
-  getScene,
   getSceneRenders,
   getSceneGltf,
   getSceneBlend,
@@ -13,11 +13,14 @@ import {
   listReferenceImages,
   getExamplePrompts,
   getMcpTools,
-  getVlmModels
+  getVlmModels,
+  getHeadlessSessionCapacity,
+  releaseThreadRuntime
 } from './api/client'
 import type {
   BlendFileEntry,
   GraphNodeStream,
+  HeadlessSessionCapacityInfo,
   ReferenceImage,
   StreamEvent,
   TodoItem,
@@ -100,13 +103,49 @@ function formatStreamFailureMessage(error: unknown): string {
   ].join('\n')
 }
 
+function formatThreadCreateError(error: unknown): string {
+  if (error instanceof ApiRequestError) {
+    if (error.reason === 'process_capacity_exhausted') {
+      const active = Number(error.in_use?.active_headless_sessions)
+      const capacity = Number(error.limits?.worker_capacity)
+      if (Number.isFinite(active) && Number.isFinite(capacity) && capacity > 0) {
+        return `Unable to create a new session because process capacity is exhausted (${active}/${capacity} active).`
+      }
+      return 'Unable to create a new session because process capacity is exhausted.'
+    }
+    if (error.reason === 'blender_port_exhausted') {
+      const used = Number(error.in_use?.active_headless_sessions)
+      const capacity = Number(error.limits?.headless_port_capacity)
+      if (Number.isFinite(used) && Number.isFinite(capacity) && capacity > 0) {
+        return `Unable to create a new session because the Blender port pool is exhausted (${used}/${capacity} in use).`
+      }
+      return 'Unable to create a new session because the Blender port pool is exhausted.'
+    }
+    if (error.reason === 'mcp_port_exhausted') {
+      const used = Number(error.in_use?.reserved_mcp_ports)
+      const capacity = Number(error.limits?.mcp_port_capacity)
+      if (Number.isFinite(used) && Number.isFinite(capacity) && capacity > 0) {
+        return `Unable to create a new session because the MCP port pool is exhausted (${used}/${capacity} in use).`
+      }
+      return 'Unable to create a new session because the MCP port pool is exhausted.'
+    }
+    if (error.message.trim()) {
+      return `Unable to create a new session due to backend resource limits: ${error.message.trim()}`
+    }
+  }
+  if (error instanceof Error && error.message.trim()) {
+    return `Unable to create a new session: ${error.message.trim()}`
+  }
+  return 'Unable to create a new session. Please try again later.'
+}
+
 function App() {
   const REQUEST_TIMEOUT_MS = 35000
   const MCP_REQUEST_TIMEOUT_MS = 10000
   const VLM_REQUEST_TIMEOUT_MS = 10000
   const MAX_EXAMPLE_PROMPTS = 10
   const [threads, setThreads] = useState<Thread[]>(() => loadThreads())
-  const [activeThreadId, setActiveThreadId] = useState<string | null>(() => loadThreads()[0]?.id ?? null)
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null)
   const [settings, setSettings] = useState(() => loadSettings())
   const [environment, setEnvironment] = useState<'studio' | 'warm' | 'cool'>('studio')
   const [isStreaming, setIsStreaming] = useState(false)
@@ -128,12 +167,15 @@ function App() {
   const [loadingByThread, setLoadingByThread] = useState<Record<string, ThreadLoadingState>>({})
   const [sceneActionErrorByThread, setSceneActionErrorByThread] = useState<Record<string, string | null>>({})
   const [streamStatusByThread, setStreamStatusByThread] = useState<Record<string, 'streaming' | 'complete'>>({})
+  const [creatingThread, setCreatingThread] = useState(false)
+  const [releasingThreadId, setReleasingThreadId] = useState<string | null>(null)
+  const [threadCreateError, setThreadCreateError] = useState<string | null>(null)
+  const [threadCreateHint, setThreadCreateHint] = useState<string | null>(null)
+  const [headlessQuotaInfo, setHeadlessQuotaInfo] = useState<{ inUse: number; quota: number } | null>(null)
   const streamAbortRef = useRef<AbortController | null>(null)
   const healthAbortRef = useRef<AbortController | null>(null)
-  const sceneAbortRef = useRef<Record<string, AbortController>>({})
   const rendersAbortRef = useRef<Record<string, AbortController>>({})
   const gltfAbortRef = useRef<Record<string, AbortController>>({})
-  const requestedSceneRef = useRef<Set<string>>(new Set())
   const previousAssistantContentRef = useRef<string | null>(null)
   const knownStreamIdsRef = useRef<Set<string>>(new Set())
   const knownToolIdsRef = useRef<Set<string>>(new Set())
@@ -146,8 +188,8 @@ function App() {
   const messageIdMapRef = useRef<Map<string, string>>(new Map())
   const saveThreadsTimerRef = useRef<number | null>(null)
   const loadingRef = useRef<Record<string, ThreadLoadingState>>({})
-  const initialAutoFetchRef = useRef<Set<string>>(new Set())
   const autoFetchLastRunRef = useRef<Record<string, number>>({})
+  const runtimeOccupancyRef = useRef<Record<string, boolean>>({})
 
   const activeThread = useMemo(
     () => threads.find((thread) => thread.id === activeThreadId) ?? null,
@@ -186,6 +228,98 @@ function App() {
     setStreamStatusByThread((prev) => ({ ...prev, [threadId]: status }))
   }, [])
 
+  const applyHeadlessCapacity = useCallback((capacity: HeadlessSessionCapacityInfo) => {
+    const occupancyByThread = new Map(
+      capacity.occupying_threads.map((entry) => [entry.thread_id, entry] as const)
+    )
+    setThreads((prev) => {
+      const nextThreads = prev.map((thread) => {
+        const occupancy = occupancyByThread.get(thread.id)
+        const occupyingResources = Boolean(occupancy?.occupying_resources)
+        const nextLastRuntimeActiveMs =
+          typeof occupancy?.last_active_ms === 'number' ? occupancy.last_active_ms : thread.lastRuntimeActiveMs
+        if (
+          thread.occupyingResources === occupyingResources &&
+          thread.lastRuntimeActiveMs === nextLastRuntimeActiveMs
+        ) {
+          return thread
+        }
+        return {
+          ...thread,
+          occupyingResources,
+          lastRuntimeActiveMs: nextLastRuntimeActiveMs
+        }
+      })
+      const nextRuntimeOccupancy: Record<string, boolean> = {}
+      for (const thread of nextThreads) {
+        nextRuntimeOccupancy[thread.id] = Boolean(thread.occupyingResources)
+      }
+      runtimeOccupancyRef.current = nextRuntimeOccupancy
+      return nextThreads
+    })
+    setHeadlessQuotaInfo({
+      inUse: Math.max(0, Number(capacity.in_use) || 0),
+      quota: Math.max(1, Number(capacity.quota) || 1)
+    })
+  }, [])
+
+  const refreshHeadlessCapacity = useCallback(
+    async (signal?: AbortSignal): Promise<HeadlessSessionCapacityInfo | null> => {
+      if (!settings.backendUrl || backendStatus !== 'online' || backendMode !== 'headless') {
+        setHeadlessQuotaInfo(null)
+        return null
+      }
+      const capacity = await getHeadlessSessionCapacity(settings.backendUrl, signal)
+      applyHeadlessCapacity(capacity)
+      return capacity
+    },
+    [applyHeadlessCapacity, backendMode, backendStatus, settings.backendUrl]
+  )
+
+  const releaseThreadRuntimeForThread = useCallback(
+    async (
+      threadId: string,
+      options?: {
+        silent?: boolean
+      }
+    ): Promise<boolean> => {
+      if (!settings.backendUrl) {
+        return false
+      }
+      setReleasingThreadId(threadId)
+      if (!options?.silent) {
+        setThreadCreateHint('Releasing runtime resources for this conversation...')
+      }
+      try {
+        await releaseThreadRuntime(settings.backendUrl, threadId)
+        runtimeOccupancyRef.current[threadId] = false
+        updateThread(threadId, (thread) => ({
+          ...thread,
+          occupyingResources: false
+        }))
+        if (!options?.silent) {
+          await refreshHeadlessCapacity()
+        }
+        if (!options?.silent) {
+          setThreadCreateHint('Runtime resources released. You can create a new chat now.')
+        }
+        return true
+      } catch (error) {
+        if (!options?.silent) {
+          setThreadCreateError(
+            error instanceof Error && error.message.trim()
+              ? `Failed to release runtime resources: ${error.message.trim()}`
+              : 'Failed to release runtime resources.'
+          )
+        }
+        return false
+      } finally {
+        setReleasingThreadId((current) => (current === threadId ? null : current))
+      }
+    },
+    [refreshHeadlessCapacity, settings.backendUrl, updateThread]
+  )
+
   // Load data from IndexedDB on mount
   useEffect(() => {
     let mounted = true
@@ -198,7 +332,9 @@ function App() {
         if (mounted) {
           if (loadedThreads.length > 0) {
             setThreads(loadedThreads)
-            setActiveThreadId((current) => current ?? loadedThreads[0]?.id ?? null)
+            setActiveThreadId((current) =>
+              current && loadedThreads.some((thread) => thread.id === current) ? current : null
+            )
           }
           setSettings(loadedSettings)
         }
@@ -213,12 +349,6 @@ function App() {
       mounted = false
     }
   }, [])
-
-  useEffect(() => {
-    if (!activeThreadId && threads.length > 0) {
-      setActiveThreadId(threads[0].id)
-    }
-  }, [threads, activeThreadId])
 
   useEffect(() => {
     if (!isStorageHydrated) {
@@ -251,6 +381,21 @@ function App() {
   useEffect(() => {
     loadingRef.current = loadingByThread
   }, [loadingByThread])
+
+  useEffect(() => {
+    const nextRuntimeOccupancy: Record<string, boolean> = {}
+    for (const thread of threads) {
+      const cached = runtimeOccupancyRef.current[thread.id]
+      if (typeof thread.occupyingResources === 'boolean') {
+        nextRuntimeOccupancy[thread.id] = thread.occupyingResources
+      } else if (typeof cached === 'boolean') {
+        nextRuntimeOccupancy[thread.id] = cached
+      } else {
+        nextRuntimeOccupancy[thread.id] = false
+      }
+    }
+    runtimeOccupancyRef.current = nextRuntimeOccupancy
+  }, [threads])
 
   useEffect(() => {
     let isActive = true
@@ -325,50 +470,46 @@ function App() {
 
   useEffect(() => {
     let cancelled = false
-    const threadId = activeThread?.id
-    if (!threadId || !settings.backendUrl || backendStatus !== 'online') {
+    if (!settings.backendUrl || backendStatus !== 'online' || backendMode !== 'headless') {
+      setHeadlessQuotaInfo(null)
+      setThreadCreateHint(null)
+      setThreads((prev) =>
+        prev.map((thread) =>
+          thread.occupyingResources
+            ? {
+                ...thread,
+                occupyingResources: false
+              }
+            : thread
+        )
+      )
       return () => {
         cancelled = true
       }
     }
 
-    const controller = new AbortController()
-    const timeoutId = window.setTimeout(() => controller.abort(), MCP_REQUEST_TIMEOUT_MS)
-    setMcpToolsLoadingThreadId(threadId)
-    const fetchTools = async () => {
+    const refresh = async () => {
       try {
-        const toolInfo = await getMcpTools(settings.backendUrl, threadId, controller.signal)
+        const capacity = await getHeadlessSessionCapacity(settings.backendUrl)
         if (cancelled) return
-        setMcpToolsByThread((prev) => ({ ...prev, [threadId]: toolInfo.tools }))
-        setMcpToolHintsByThread((prev) => ({ ...prev, [threadId]: toolInfo.tool_hints }))
-        setMcpToolsErrorByThread((prev) => ({ ...prev, [threadId]: null }))
-      } catch (error) {
-        if (cancelled) return
-        setMcpToolsByThread((prev) => ({ ...prev, [threadId]: [] }))
-        setMcpToolHintsByThread((prev) => ({ ...prev, [threadId]: {} }))
-        setMcpToolsErrorByThread((prev) => ({
-          ...prev,
-          [threadId]:
-            error instanceof DOMException && error.name === 'AbortError'
-              ? 'Timed out while loading MCP tools'
-              : error instanceof Error
-                ? error.message
-                : 'Failed to load MCP tools'
-        }))
-      } finally {
-        window.clearTimeout(timeoutId)
+        applyHeadlessCapacity(capacity)
+      } catch {
         if (!cancelled) {
-          setMcpToolsLoadingThreadId((current) => (current === threadId ? null : current))
+          setHeadlessQuotaInfo(null)
         }
       }
     }
-    void fetchTools()
+
+    void refresh()
+    const intervalId = window.setInterval(() => {
+      void refresh()
+    }, 6000)
+
     return () => {
       cancelled = true
-      controller.abort()
-      window.clearTimeout(timeoutId)
+      window.clearInterval(intervalId)
     }
-  }, [activeThread?.id, settings.backendUrl, backendStatus, MCP_REQUEST_TIMEOUT_MS])
+  }, [applyHeadlessCapacity, backendMode, backendStatus, settings.backendUrl])
 
   useEffect(() => {
     let cancelled = false
@@ -439,30 +580,49 @@ function App() {
     }
   }, [activeThread?.id, settings.backendUrl, backendStatus, updateThread, VLM_REQUEST_TIMEOUT_MS])
 
-  const createThread = () => {
-    const initialProvider = vlmDefaultProvider || vlmProviders[0]?.provider
-    const initialProviderOption = vlmProviders.find((item) => item.provider === initialProvider)
-    const initialModel = initialProviderOption?.default_model || vlmDefaultModel
-    const newThread: Thread = {
-      id: `thread-${crypto.randomUUID()}`,
-      title: 'New chat',
-      createdAt: Date.now(),
-      messages: [],
-      mcpToolEnabled: {},
-      vlmProvider: initialProvider,
-      vlmModel: initialModel,
-      vlmLocked: false,
-      todos: [],
-      scene: null,
-      renders: [],
-      gltfUrl: null,
-      sceneHierarchy: [],
-      sceneHasChange: false,
-      referenceImages: [],
-      graphEvents: []
+  const createThread = async () => {
+    if (creatingThread || releasingThreadId !== null) {
+      return
     }
-    setThreads((prev) => [newThread, ...prev])
-    setActiveThreadId(newThread.id)
+    setThreadCreateError(null)
+    setThreadCreateHint(null)
+    setCreatingThread(true)
+
+    try {
+      const nextThreadId = `thread-${crypto.randomUUID()}`
+      const initialProvider = vlmDefaultProvider || vlmProviders[0]?.provider
+      const initialProviderOption = vlmProviders.find((item) => item.provider === initialProvider)
+      const initialModel = initialProviderOption?.default_model || vlmDefaultModel
+      const newThread: Thread = {
+        id: nextThreadId,
+        title: 'New chat',
+        createdAt: Date.now(),
+        messages: [],
+        mcpToolEnabled: {},
+        vlmProvider: initialProvider,
+        vlmModel: initialModel,
+        vlmLocked: false,
+        todos: [],
+        scene: null,
+        renders: [],
+        gltfUrl: null,
+        sceneHierarchy: [],
+        sceneHasChange: false,
+        referenceImages: [],
+        graphEvents: [],
+        occupyingResources: false,
+        lastRuntimeActiveMs: 0
+      }
+      setThreads((prev) => [newThread, ...prev])
+      runtimeOccupancyRef.current[nextThreadId] = false
+      setActiveThreadId(newThread.id)
+      setThreadCreateHint(null)
+    } catch (error) {
+      setThreadCreateHint(null)
+      setThreadCreateError(formatThreadCreateError(error))
+    } finally {
+      setCreatingThread(false)
+    }
   }
 
   const deleteThread = (threadId: string) => {
@@ -485,15 +645,9 @@ function App() {
       }
       return prev.filter((thread) => thread.id !== threadId)
     })
-    requestedSceneRef.current.delete(threadId)
     loadedReferenceImagesRef.current.delete(threadId)
-    initialAutoFetchRef.current.delete(threadId)
     delete autoFetchLastRunRef.current[threadId]
     delete sceneChangeRef.current[threadId]
-    if (sceneAbortRef.current[threadId]) {
-      sceneAbortRef.current[threadId].abort()
-      delete sceneAbortRef.current[threadId]
-    }
     if (rendersAbortRef.current[threadId]) {
       rendersAbortRef.current[threadId].abort()
       delete rendersAbortRef.current[threadId]
@@ -534,9 +688,12 @@ function App() {
     })
     setMcpToolsLoadingThreadId((current) => (current === threadId ? null : current))
     setVlmLoadingThreadId((current) => (current === threadId ? null : current))
+    delete runtimeOccupancyRef.current[threadId]
     if (activeThreadId === threadId) {
-      const remaining = threads.filter((thread) => thread.id !== threadId)
-      setActiveThreadId(remaining[0]?.id ?? null)
+      setActiveThreadId(null)
+    }
+    if (backendStatus === 'online' && backendMode === 'headless' && settings.backendUrl) {
+      void refreshHeadlessCapacity()
     }
   }
 
@@ -640,13 +797,10 @@ function App() {
       return false
     }
     const threadId = activeThread.id
-    const hasMcpToolSnapshot =
+    let hasMcpToolSnapshot =
       Object.prototype.hasOwnProperty.call(mcpToolsByThread, threadId) &&
       !mcpToolsErrorByThread[threadId]
-    const availableMcpTools = mcpToolsByThread[threadId] ?? []
-    const enabledMcpTools = hasMcpToolSnapshot
-      ? availableMcpTools.filter((toolName) => activeThread.mcpToolEnabled?.[toolName] !== false)
-      : undefined
+    let availableMcpTools = mcpToolsByThread[threadId] ?? []
     const selectedProvider =
       activeThread.vlmProvider || vlmDefaultProvider || vlmProviders[0]?.provider || undefined
     const selectedProviderOption = selectedProvider
@@ -658,6 +812,22 @@ function App() {
       vlmDefaultModel ||
       vlmProviders[0]?.default_model ||
       undefined
+
+    const appendPreflightErrorMessage = (message: string) => {
+      updateThread(threadId, (thread) => ({
+        ...thread,
+        messages: [
+          ...thread.messages,
+          {
+            id: `msg-${Date.now()}-runtime-preflight-error`,
+            role: 'assistant',
+            content: `Unable to send message: ${message}`,
+            createdAt: Date.now(),
+            status: 'error'
+          }
+        ]
+      }))
+    }
 
     if (files.length > 0) {
       if (!settings.backendUrl) {
@@ -690,6 +860,117 @@ function App() {
         return false
       }
     }
+
+    try {
+      let resolvedBackendStatus = backendStatus
+      let resolvedBackendMode = backendMode
+      if (resolvedBackendStatus === 'checking' && settings.backendUrl) {
+        try {
+          const health = await getHealth(settings.backendUrl)
+          setBackendStatus('online')
+          setBackendMode(health.blender_mode ?? null)
+          resolvedBackendStatus = 'online'
+          resolvedBackendMode = health.blender_mode ?? null
+        } catch {
+          setBackendStatus('offline')
+          setBackendMode(null)
+          resolvedBackendStatus = 'offline'
+          resolvedBackendMode = null
+        }
+      }
+
+      if (!settings.backendUrl || resolvedBackendStatus !== 'online') {
+        throw new Error('Backend is offline.')
+      }
+
+      if (resolvedBackendMode === 'headless') {
+        const loadCapacitySnapshot = async () => {
+          const snapshot = await getHeadlessSessionCapacity(settings.backendUrl)
+          applyHeadlessCapacity(snapshot)
+          return snapshot
+        }
+        const isCurrentThreadOccupying = (capacity: HeadlessSessionCapacityInfo): boolean =>
+          capacity.occupying_threads.some(
+            (entry) => entry.thread_id === threadId && entry.occupying_resources
+          )
+
+        const capacity = await loadCapacitySnapshot()
+        if (!isCurrentThreadOccupying(capacity) && capacity.in_use >= capacity.quota) {
+          const oldestOccupiedThread = [...capacity.occupying_threads]
+            .filter((entry) => entry.thread_id !== threadId)
+            .sort((a, b) => a.last_active_ms - b.last_active_ms)[0]
+          if (!oldestOccupiedThread) {
+            throw new Error(
+              `Runtime quota is full (${capacity.in_use}/${capacity.quota}) and no occupied thread can be released.`
+            )
+          }
+          const released = await releaseThreadRuntimeForThread(oldestOccupiedThread.thread_id, {
+            silent: true
+          })
+          if (!released) {
+            throw new Error('Failed to release an old occupied runtime slot automatically.')
+          }
+          const refreshed = await loadCapacitySnapshot()
+          if (!isCurrentThreadOccupying(refreshed) && refreshed.in_use >= refreshed.quota) {
+            throw new Error(
+              `Runtime quota is still full after auto-release (${refreshed.in_use}/${refreshed.quota}).`
+            )
+          }
+        }
+
+        const mcpTimeoutController = new AbortController()
+        const mcpTimeoutId = window.setTimeout(() => mcpTimeoutController.abort(), MCP_REQUEST_TIMEOUT_MS)
+        setMcpToolsLoadingThreadId(threadId)
+        try {
+          const toolInfo = await getMcpTools(settings.backendUrl, threadId, mcpTimeoutController.signal)
+          runtimeOccupancyRef.current[threadId] = true
+          availableMcpTools = toolInfo.tools
+          hasMcpToolSnapshot = true
+          setMcpToolsByThread((prev) => ({ ...prev, [threadId]: toolInfo.tools }))
+          setMcpToolHintsByThread((prev) => ({ ...prev, [threadId]: toolInfo.tool_hints }))
+          setMcpToolsErrorByThread((prev) => ({ ...prev, [threadId]: null }))
+        } catch (error) {
+          setMcpToolsByThread((prev) => ({ ...prev, [threadId]: [] }))
+          setMcpToolHintsByThread((prev) => ({ ...prev, [threadId]: {} }))
+          setMcpToolsErrorByThread((prev) => ({
+            ...prev,
+            [threadId]:
+              error instanceof DOMException && error.name === 'AbortError'
+                ? 'Timed out while claiming runtime for this conversation.'
+                : error instanceof Error
+                  ? error.message
+                  : 'Failed to claim runtime for this conversation.'
+          }))
+          throw error
+        } finally {
+          window.clearTimeout(mcpTimeoutId)
+          setMcpToolsLoadingThreadId((current) => (current === threadId ? null : current))
+        }
+        const latestCapacity = await loadCapacitySnapshot()
+        const latestThreadEntry = latestCapacity.occupying_threads.find((entry) => entry.thread_id === threadId)
+        const occupyingAfterClaim = latestThreadEntry
+          ? Boolean(latestThreadEntry.occupying_resources)
+          : true
+        runtimeOccupancyRef.current[threadId] = occupyingAfterClaim
+        updateThread(threadId, (thread) => ({
+          ...thread,
+          occupyingResources: occupyingAfterClaim,
+          lastRuntimeActiveMs:
+            typeof latestThreadEntry?.last_active_ms === 'number'
+              ? latestThreadEntry.last_active_ms
+              : thread.lastRuntimeActiveMs
+        }))
+      }
+    } catch (error) {
+      const message = formatThreadCreateError(error)
+      setMcpToolsErrorByThread((prev) => ({ ...prev, [threadId]: message }))
+      appendPreflightErrorMessage(message)
+      return false
+    }
+
+    const enabledMcpTools = hasMcpToolSnapshot
+      ? availableMcpTools.filter((toolName) => activeThread.mcpToolEnabled?.[toolName] !== false)
+      : undefined
 
     if (streamAbortRef.current) {
       streamAbortRef.current.abort()
@@ -1048,35 +1329,37 @@ function App() {
     return true
   }
 
-  const refreshScene = useCallback(async (threadId?: string) => {
-    const targetId = threadId ?? activeThread?.id
-    if (!targetId) return
-    if (sceneAbortRef.current[targetId]) {
-      sceneAbortRef.current[targetId].abort()
-    }
-    const controller = new AbortController()
-    sceneAbortRef.current[targetId] = controller
-    const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
-    setThreadLoading(targetId, { scene: true })
-    setSceneActionError(targetId, null)
-    try {
-      const scene = await getScene(settings.backendUrl, targetId, controller.signal)
-      updateThread(targetId, (thread) => ({ ...thread, scene }))
-    } catch (error) {
-      console.error('Failed to refresh scene', error)
-      setSceneActionError(targetId, formatSceneActionError(error, 'Fetch scene'))
-    } finally {
-      window.clearTimeout(timeoutId)
-      if (sceneAbortRef.current[targetId] === controller) {
-        delete sceneAbortRef.current[targetId]
+  const isHeadlessRuntimeClaimed = useCallback(
+    (threadId: string): boolean => {
+      if (backendStatus !== 'online' || backendMode !== 'headless') {
+        return true
       }
-      setThreadLoading(targetId, { scene: false })
-    }
-  }, [activeThread?.id, settings.backendUrl, setSceneActionError, setThreadLoading, updateThread])
+      const cached = runtimeOccupancyRef.current[threadId]
+      return typeof cached === 'boolean' ? cached : false
+    },
+    [backendMode, backendStatus]
+  )
+
+  const requireHeadlessRuntimeForAction = useCallback(
+    (threadId: string, actionLabel: string): boolean => {
+      if (isHeadlessRuntimeClaimed(threadId)) {
+        return true
+      }
+      setSceneActionError(
+        threadId,
+        `Runtime is released for this conversation. Send a message to claim resources before ${actionLabel.toLowerCase()}.`
+      )
+      return false
+    },
+    [isHeadlessRuntimeClaimed, setSceneActionError]
+  )
 
   const fetchRenders = useCallback(async (threadId?: string, includeLocalWork: boolean = false) => {
     const targetId = threadId ?? activeThread?.id
     if (!targetId) return
+    if (!requireHeadlessRuntimeForAction(targetId, 'fetching renders')) {
+      return
+    }
     if (rendersAbortRef.current[targetId]) {
       rendersAbortRef.current[targetId].abort()
     }
@@ -1103,11 +1386,14 @@ function App() {
       }
       setThreadLoading(targetId, { renders: false })
     }
-  }, [activeThread?.id, settings.backendUrl, setSceneActionError, setThreadLoading, updateThread])
+  }, [activeThread?.id, requireHeadlessRuntimeForAction, settings.backendUrl, setSceneActionError, setThreadLoading, updateThread])
 
   const fetchGltf = useCallback(async (threadId?: string) => {
     const targetId = threadId ?? activeThread?.id
     if (!targetId) return
+    if (!requireHeadlessRuntimeForAction(targetId, 'fetching scene assets')) {
+      return
+    }
     if (gltfAbortRef.current[targetId]) {
       gltfAbortRef.current[targetId].abort()
     }
@@ -1135,11 +1421,12 @@ function App() {
       }
       setThreadLoading(targetId, { gltf: false })
     }
-  }, [activeThread?.id, settings.backendUrl, setSceneActionError, setThreadLoading, updateThread])
+  }, [activeThread?.id, requireHeadlessRuntimeForAction, settings.backendUrl, setSceneActionError, setThreadLoading, updateThread])
 
   const triggerAutoFetch = useCallback(
     (threadId: string, force: boolean = false) => {
       if (!settingsRef.current.autoRefreshScene || backendStatus !== 'online') return false
+      if (!isHeadlessRuntimeClaimed(threadId)) return false
       const currentLoading = loadingRef.current[threadId] ?? createThreadLoadingState()
       if (currentLoading.renders || currentLoading.gltf) return false
 
@@ -1156,7 +1443,7 @@ function App() {
       })()
       return true
     },
-    [backendStatus, fetchRenders, fetchGltf]
+    [backendStatus, fetchRenders, fetchGltf, isHeadlessRuntimeClaimed]
   )
 
   const refreshReferenceImages = useCallback(
@@ -1177,6 +1464,7 @@ function App() {
 
   const downloadGltf = useCallback(async () => {
     if (!activeThread) return
+    if (!requireHeadlessRuntimeForAction(activeThread.id, 'downloading GLTF')) return
     setThreadLoading(activeThread.id, { download: true })
     setSceneActionError(activeThread.id, null)
     try {
@@ -1188,10 +1476,11 @@ function App() {
     } finally {
       setThreadLoading(activeThread.id, { download: false })
     }
-  }, [activeThread, setSceneActionError, setThreadLoading, settings.backendUrl])
+  }, [activeThread, requireHeadlessRuntimeForAction, setSceneActionError, setThreadLoading, settings.backendUrl])
 
   const downloadBlend = useCallback(async () => {
     if (!activeThread) return
+    if (!requireHeadlessRuntimeForAction(activeThread.id, 'downloading BLEND')) return
     setThreadLoading(activeThread.id, { download: true })
     setSceneActionError(activeThread.id, null)
     try {
@@ -1203,7 +1492,7 @@ function App() {
     } finally {
       setThreadLoading(activeThread.id, { download: false })
     }
-  }, [activeThread, setSceneActionError, setThreadLoading, settings.backendUrl])
+  }, [activeThread, requireHeadlessRuntimeForAction, setSceneActionError, setThreadLoading, settings.backendUrl])
 
   const listBlendFiles = useCallback(async (): Promise<BlendFileEntry[]> => {
     if (!activeThread) return []
@@ -1213,6 +1502,7 @@ function App() {
   const downloadBlendFile = useCallback(
     async (relativePath: string, filename: string) => {
       if (!activeThread) return
+      if (!requireHeadlessRuntimeForAction(activeThread.id, 'downloading BLEND')) return
       setThreadLoading(activeThread.id, { download: true })
       setSceneActionError(activeThread.id, null)
       try {
@@ -1224,49 +1514,8 @@ function App() {
         setThreadLoading(activeThread.id, { download: false })
       }
     },
-    [activeThread, setSceneActionError, setThreadLoading, settings.backendUrl]
+    [activeThread, requireHeadlessRuntimeForAction, setSceneActionError, setThreadLoading, settings.backendUrl]
   )
-
-  useEffect(() => {
-    if (!activeThread) return
-    const threadId = activeThread.id
-    if (!requestedSceneRef.current.has(threadId) && !activeThreadLoading.scene && !activeThread.scene) {
-      requestedSceneRef.current.add(threadId)
-      refreshScene(threadId)
-    }
-  }, [
-    activeThread,
-    activeThread?.id,
-    activeThread?.scene,
-    activeThreadLoading.scene,
-    refreshScene
-  ])
-
-  useEffect(() => {
-    const threadId = activeThread?.id
-    if (!threadId) return
-    if (!settings.autoRefreshScene || backendStatus !== 'online' || !settings.backendUrl) return
-    if (initialAutoFetchRef.current.has(threadId)) return
-    if (activeThread?.gltfUrl || (activeThread?.renders?.length ?? 0) > 0) {
-      initialAutoFetchRef.current.add(threadId)
-      return
-    }
-    const started = triggerAutoFetch(threadId, true)
-    if (started) {
-      initialAutoFetchRef.current.add(threadId)
-    }
-  }, [
-    activeThread?.id,
-    activeThread?.gltfUrl,
-    activeThread?.renders,
-    settings.autoRefreshScene,
-    settings.autoFetchIntervalSeconds,
-    settings.backendUrl,
-    backendStatus,
-    activeThreadLoading.renders,
-    activeThreadLoading.gltf,
-    triggerAutoFetch
-  ])
 
   useEffect(() => {
     if (!activeThread) return
@@ -1289,6 +1538,17 @@ function App() {
       : backendMode === 'local-client'
         ? 'Local'
         : null
+  const canRunSceneActions =
+    Boolean(activeThread) &&
+    (backendMode !== 'headless' || Boolean(activeThread?.occupyingResources))
+  const runtimeClaimHint =
+    backendMode === 'headless' && activeThread && !activeThread.occupyingResources
+      ? 'Runtime and mcp tools will be claimed when you send the next message'
+      : null
+  const quotaHint =
+    backendStatus === 'online' && backendMode === 'headless' && headlessQuotaInfo
+      ? `Runtime slots in use: ${headlessQuotaInfo.inUse}/${headlessQuotaInfo.quota}`
+      : null
   const statusText = modeLabel ? `Server ${statusLabel} • ${modeLabel}` : `Server ${statusLabel}`
   const projectWebsiteUrl = 'https://3dsceneagent.github.io/vibe3dscene/'
   const projectGithubUrl = 'https://github.com/3DSceneAgent/Vibe3DScene'
@@ -1318,7 +1578,18 @@ function App() {
             setActiveThreadId(id)
           }}
           onDelete={deleteThread}
-          onNew={createThread}
+          onNew={() => {
+            void createThread()
+          }}
+          onReleaseRuntime={(threadId) => {
+            void releaseThreadRuntimeForThread(threadId)
+          }}
+          creating={creatingThread}
+          createDisabled={creatingThread || releasingThreadId !== null}
+          releasingThreadId={releasingThreadId}
+          createError={threadCreateError}
+          createHint={threadCreateHint}
+          quotaHint={quotaHint}
           collapsed={isSidebarCollapsed}
         />
         <div className="sidebar-footer">
@@ -1412,6 +1683,7 @@ function App() {
                   vlmLocked={Boolean(activeThread.vlmLocked)}
                   onVlmSelectionChange={handleVlmSelectionChange}
                   graphEvents={activeThread.graphEvents ?? []}
+                  runtimeClaimHint={runtimeClaimHint}
                 />
               </section>
               <section className="workspace-scene">
@@ -1439,7 +1711,7 @@ function App() {
                   onClearActionError={() => setSceneActionError(activeThread.id, null)}
                   onHierarchyChange={handleSceneHierarchyChange}
                   loading={activeThreadLoading}
-                  canRunActions={Boolean(activeThread)}
+                  canRunActions={canRunSceneActions}
                 />
               </section>
             </>
@@ -1450,9 +1722,17 @@ function App() {
                 <div className="workspace-empty-title">Start Vibe Building 3D Scene</div>
                 <div className="workspace-empty-subtitle">
                 </div>
-                <button className="primary-btn workspace-empty-cta" onClick={createThread}>
-                  New Chat
+                <button
+                  className="primary-btn workspace-empty-cta"
+                  onClick={() => {
+                    void createThread()
+                  }}
+                  disabled={creatingThread || releasingThreadId !== null}
+                >
+                  {releasingThreadId ? 'Releasing...' : creatingThread ? 'Creating...' : 'New Chat'}
                 </button>
+                {threadCreateHint && <div className="thread-create-hint action">{threadCreateHint}</div>}
+                {threadCreateError && <div className="thread-create-error">{threadCreateError}</div>}
               </div>
             </section>
           )}

@@ -260,6 +260,40 @@ class RedisSessionRegistry:
     def unregister_worker(self, worker_id: str) -> None:
         self._client.srem(self.workers_key(), worker_id)
 
+    def worker_count(self) -> int:
+        return int(self._client.scard(self.workers_key()))
+
+    def reserved_port_count(self, *, host: str, kind: str) -> int:
+        return int(self._client.scard(self.ports_key(host, kind)))
+
+    def clear_runtime_state(self) -> dict[str, int]:
+        keys_to_delete: set[str] = set()
+
+        for key in (self.workers_key(), self.sessions_last_active_key()):
+            keys_to_delete.add(key)
+
+        patterns = (
+            self._key("worker:*:sessions"),
+            self._key("{session:*}:meta"),
+            self._key("{session:*}:lease"),
+            self._key("{session:*}:fence"),
+            self._key("ports:*"),
+            self._key("thread_vlm:*"),
+        )
+        for pattern in patterns:
+            for key in self._client.scan_iter(match=pattern, count=500):
+                if isinstance(key, str) and key:
+                    keys_to_delete.add(key)
+
+        deleted = 0
+        if keys_to_delete:
+            deleted = int(self._client.delete(*sorted(keys_to_delete)))
+
+        return {
+            "deleted_keys": deleted,
+            "matched_patterns": len(patterns),
+        }
+
     def claim_or_get_owner(
         self,
         *,

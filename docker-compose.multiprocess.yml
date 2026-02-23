@@ -1,22 +1,10 @@
-x-api-build: &api_build
-  context: .
-  dockerfile: docker/Dockerfile.api
-  args:
-    INSTALL_BLENDER: ${INSTALL_BLENDER:-true}
-    BLENDER_VERSION: ${BLENDER_VERSION:-4.2.15}
-    HTTP_PROXY: ${HTTP_PROXY:-}
-    HTTPS_PROXY: ${HTTPS_PROXY:-}
-    NO_PROXY: ${NO_PROXY:-}
-    http_proxy: ${http_proxy:-}
-    https_proxy: ${https_proxy:-}
-    no_proxy: ${no_proxy:-}
-
 x-api-worker-common: &api_worker_common
   platform: linux/amd64
-  image: scene-agent-api:latest
+  image: fishwowater/scene-agent-api:latest
+  entrypoint: ["python", "main.py"]
   env_file:
     - docker/.env.multiprocess
-  command: ["python", "main.py", "--mode", "api", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+  command: ["--mode", "api", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
   restart: unless-stopped
   depends_on:
     - redis
@@ -36,6 +24,19 @@ x-api-env-common: &api_env_common
   http_proxy: ${http_proxy:-}
   https_proxy: ${https_proxy:-}
   no_proxy: ${no_proxy:-}
+
+x-api-build: &api_build
+  context: .
+  dockerfile: docker/Dockerfile.api
+  args:
+    INSTALL_BLENDER: ${INSTALL_BLENDER:-true}
+    BLENDER_VERSION: ${BLENDER_VERSION:-4.2.15}
+    HTTP_PROXY: ${HTTP_PROXY:-}
+    HTTPS_PROXY: ${HTTPS_PROXY:-}
+    NO_PROXY: ${NO_PROXY:-}
+    http_proxy: ${http_proxy:-}
+    https_proxy: ${https_proxy:-}
+    no_proxy: ${no_proxy:-}
 
 services:
   redis:

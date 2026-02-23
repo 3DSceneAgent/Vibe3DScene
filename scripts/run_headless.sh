@@ -32,5 +32,14 @@ if [ -n "${BLENDER_MODE:-}" ] && [ "$BLENDER_MODE" != "headless" ]; then
 fi
 export BLENDER_MODE="headless"
 
+# Single-process headless restarts should not inherit stale Redis runtime keys
+# (ports/workers/session leases) from previous crashed runs.
+if [ -z "${SCENE_AGENT_RESET_REDIS_RUNTIME_ON_START:-}" ]; then
+    export SCENE_AGENT_RESET_REDIS_RUNTIME_ON_START="1"
+fi
+if [ -z "${SESSION_SWEEP_INTERVAL_SECONDS:-}" ]; then
+    export SESSION_SWEEP_INTERVAL_SECONDS="5"
+fi
+
 echo "Starting headless API (workers=1)..."
 exec python main.py --mode api --host 0.0.0.0 --workers 1

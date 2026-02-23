@@ -27,6 +27,7 @@ type ChatTabProps = {
   vlmLocked?: boolean
   onVlmSelectionChange?: (provider: string, model: string) => void
   graphEvents?: GraphNodeStream[]
+  runtimeClaimHint?: string | null
 }
 
 type VlmSelectionOption = {
@@ -61,7 +62,8 @@ export function ChatTab({
   vlmError = null,
   vlmLocked = false,
   onVlmSelectionChange,
-  graphEvents = []
+  graphEvents = [],
+  runtimeClaimHint = null
 }: ChatTabProps) {
   if (!thread) {
     return <div className="empty-state">Create a conversation to begin.</div>
@@ -105,6 +107,7 @@ export function ChatTab({
       {thread.referenceImages && thread.referenceImages.length > 0 && (
         <ReferenceImageStrip images={thread.referenceImages as ReferenceImage[]} />
       )}
+      {runtimeClaimHint && <div className="chat-runtime-hint">{runtimeClaimHint}</div>}
       <ChatComposer
         disabled={isStreaming}
         onSend={onSend}

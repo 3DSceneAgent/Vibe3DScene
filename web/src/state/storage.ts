@@ -53,8 +53,11 @@ function sanitizeMessageContent(content: string): string {
 
 function sanitizeThreads(threads: Thread[]): Thread[] {
   return threads.map((thread) => {
+    const persistedThread: Thread = { ...thread }
+    delete persistedThread.occupyingResources
+    delete persistedThread.lastRuntimeActiveMs
     // Limit messages per thread to avoid storage overflow
-    const messages = thread.messages.slice(-MAX_MESSAGES_PER_THREAD).map((message) => {
+    const messages = persistedThread.messages.slice(-MAX_MESSAGES_PER_THREAD).map((message) => {
       const nextMessage = { ...message }
       delete nextMessage.raw
       delete nextMessage.toolPayload
@@ -66,7 +69,7 @@ function sanitizeThreads(threads: Thread[]): Thread[] {
     })
     
     return {
-      ...thread,
+      ...persistedThread,
       messages,
       renders: [],
       gltfUrl: null,
@@ -74,7 +77,7 @@ function sanitizeThreads(threads: Thread[]): Thread[] {
       sceneHasChange: false,
       graphEvents: [],
       referenceImages:
-        thread.referenceImages?.map((image) => {
+        persistedThread.referenceImages?.map((image) => {
           const sanitizedImage = { ...image }
           delete sanitizedImage.previewUrl
           return sanitizedImage

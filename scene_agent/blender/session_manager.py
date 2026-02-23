@@ -13,6 +13,36 @@ from typing import Dict, Optional, Literal, Any, List
 
 SessionMode = Literal["local-client", "headless"]
 SessionStatus = Literal["starting", "ready", "error", "closed"]
+SessionResourceReason = Literal[
+    "process_capacity_exhausted",
+    "blender_port_exhausted",
+    "mcp_port_exhausted",
+]
+
+
+class SessionResourceError(Exception):
+    def __init__(
+        self,
+        *,
+        error: str,
+        reason: SessionResourceReason,
+        limits: dict[str, Any] | None = None,
+        in_use: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(error)
+        self.error = error
+        self.reason = reason
+        self.limits = limits or {}
+        self.in_use = in_use or {}
+
+    @property
+    def detail(self) -> dict[str, Any]:
+        return {
+            "error": self.error,
+            "reason": self.reason,
+            "limits": self.limits,
+            "in_use": self.in_use,
+        }
 
 
 @dataclass
@@ -429,16 +459,38 @@ def allocate_headless_port(
     range_size: int,
     used_ports: set[int] | None = None,
 ) -> int:
-    if range_size <= 1:
+    normalized_range = max(1, int(range_size))
+    if normalized_range <= 1:
         return base_port
     if not used_ports:
-        return base_port + (abs(hash(session_id)) % range_size)
-    start = abs(hash(session_id)) % range_size
-    for offset in range(range_size):
-        candidate = base_port + ((start + offset) % range_size)
+        return base_port + (abs(hash(session_id)) % normalized_range)
+    start = abs(hash(session_id)) % normalized_range
+    for offset in range(normalized_range):
+        candidate = base_port + ((start + offset) % normalized_range)
         if candidate not in used_ports:
             return candidate
     return base_port + start
+
+
+def allocate_headless_port_strict(
+    session_id: str,
+    base_port: int,
+    range_size: int,
+    used_ports: set[int] | None = None,
+    blocked_ports: set[int] | None = None,
+) -> int:
+    normalized_range = max(1, int(range_size))
+    occupied_ports = set(used_ports or set()) | set(blocked_ports or set())
+    if normalized_range <= 1:
+        if base_port in occupied_ports:
+            raise RuntimeError("No available headless port in configured range.")
+        return base_port
+    start = abs(hash(session_id)) % normalized_range
+    for offset in range(normalized_range):
+        candidate = base_port + ((start + offset) % normalized_range)
+        if candidate not in occupied_ports:
+            return candidate
+    raise RuntimeError("No available headless port in configured range.")
 
 
 def allocate_mcp_port(
@@ -453,6 +505,25 @@ def allocate_mcp_port(
         range_size,
         used_ports=used_ports,
     )
+
+
+def allocate_mcp_port_strict(
+    session_id: str,
+    base_port: int,
+    range_size: int,
+    used_ports: set[int] | None = None,
+    blocked_ports: set[int] | None = None,
+) -> int:
+    try:
+        return allocate_headless_port_strict(
+            session_id,
+            base_port,
+            range_size,
+            used_ports=used_ports,
+            blocked_ports=blocked_ports,
+        )
+    except RuntimeError as exc:
+        raise RuntimeError("No available mcp port in configured range.") from exc
 
 
 def build_headless_command_args(
