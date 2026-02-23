@@ -149,6 +149,7 @@ function App() {
   const [settings, setSettings] = useState(() => loadSettings())
   const [environment, setEnvironment] = useState<'studio' | 'warm' | 'cool'>('studio')
   const [isStreaming, setIsStreaming] = useState(false)
+  const [isSending, setIsSending] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
   const [isStorageHydrated, setIsStorageHydrated] = useState(false)
@@ -160,7 +161,7 @@ function App() {
   const [mcpToolsErrorByThread, setMcpToolsErrorByThread] = useState<Record<string, string | null>>({})
   const [mcpToolsLoadingThreadId, setMcpToolsLoadingThreadId] = useState<string | null>(null)
   const [vlmProviders, setVlmProviders] = useState<VlmProviderOption[]>([])
-  const [vlmDefaultProvider, setVlmDefaultProvider] = useState<string>('openai')
+  const [vlmDefaultProvider, setVlmDefaultProvider] = useState<string>('gemini')
   const [vlmDefaultModel, setVlmDefaultModel] = useState<string>('')
   const [vlmErrorByThread, setVlmErrorByThread] = useState<Record<string, string | null>>({})
   const [vlmLoadingThreadId, setVlmLoadingThreadId] = useState<string | null>(null)
@@ -554,16 +555,22 @@ function App() {
         updateThread(threadId, (thread) => {
           const fallbackProvider =
             modelInfo.default_provider || modelInfo.providers[0]?.provider || thread.vlmProvider || 'gemini'
-          const preferredProvider = thread.vlmProvider || modelInfo.thread_selection?.provider || fallbackProvider
+          const isFreshThread = thread.messages.length === 0
+          const preferredProvider = isFreshThread
+            ? modelInfo.thread_selection?.provider ||
+              modelInfo.default_provider ||
+              thread.vlmProvider ||
+              fallbackProvider
+            : thread.vlmProvider || modelInfo.thread_selection?.provider || fallbackProvider
           const selectedProvider =
             modelInfo.providers.find((item) => item.provider === preferredProvider)?.provider || fallbackProvider
           const providerOption = modelInfo.providers.find((item) => item.provider === selectedProvider)
           const providerModels = providerOption?.models ?? []
           let nextModel =
-            thread.vlmModel ||
-            modelInfo.thread_selection?.model ||
-            providerOption?.default_model ||
-            modelInfo.default_model
+            (isFreshThread
+              ? modelInfo.thread_selection?.model || providerOption?.default_model || modelInfo.default_model
+              : thread.vlmModel || modelInfo.thread_selection?.model || providerOption?.default_model || modelInfo.default_model) ||
+            thread.vlmModel
           if (!nextModel || (providerModels.length > 0 && !providerModels.includes(nextModel))) {
             nextModel = providerOption?.default_model ?? providerModels[0] ?? nextModel
           }
@@ -810,6 +817,7 @@ function App() {
     
     messageIdMapRef.current.clear()
     setIsStreaming(false)
+    setIsSending(false)
   }, [setThreadStreamStatus, updateThread])
 
   const handleSend = async (text: string, files: File[] = []) => {
@@ -832,25 +840,79 @@ function App() {
       vlmDefaultModel ||
       vlmProviders[0]?.default_model ||
       undefined
-
-    const appendPreflightErrorMessage = (message: string) => {
-      updateThread(threadId, (thread) => ({
-        ...thread,
-        messages: [
-          ...thread.messages,
-          {
-            id: `msg-${Date.now()}-runtime-preflight-error`,
-            role: 'assistant',
-            content: `Unable to send message: ${message}`,
-            createdAt: Date.now(),
-            status: 'error'
-          }
-        ]
-      }))
+    const now = Date.now()
+    const userMessage: Message = {
+      id: `msg-${now}-user`,
+      role: 'user',
+      content: text,
+      createdAt: now
     }
+    const assistantId = `msg-${now}-assistant`
+    const assistantMessage: Message = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      createdAt: now,
+      streamId: null,
+      status: 'streaming'
+    }
+    const markSendFailed = (message: string) => {
+      updateThread(threadId, (thread) => {
+        const hasPlaceholder = thread.messages.some((item) => item.id === assistantId)
+        if (!hasPlaceholder) {
+          return {
+            ...thread,
+            messages: [
+              ...thread.messages,
+              {
+                id: `msg-${Date.now()}-runtime-preflight-error`,
+                role: 'assistant',
+                content: `Unable to send message: ${message}`,
+                createdAt: Date.now(),
+                status: 'error'
+              }
+            ]
+          }
+        }
+        return {
+          ...thread,
+          messages: thread.messages.map((item) =>
+            item.id === assistantId
+              ? {
+                  ...item,
+                  content: `Unable to send message: ${message}`,
+                  status: 'error'
+                }
+              : item
+          )
+        }
+      })
+      setThreadStreamStatus(threadId, 'complete')
+      setIsSending(false)
+      setIsStreaming(false)
+    }
+
+    setIsSending(true)
+    setThreadStreamStatus(threadId, 'streaming')
+    updateThread(threadId, (thread) => {
+      const title =
+        thread.title === 'New chat' || thread.messages.length === 0
+          ? text.slice(0, 32)
+          : thread.title
+      return {
+        ...thread,
+        title,
+        vlmProvider: selectedProvider || thread.vlmProvider,
+        vlmModel: selectedModel || thread.vlmModel,
+        vlmLocked: thread.vlmLocked ?? false,
+        graphEvents: [],
+        messages: [...thread.messages, userMessage, assistantMessage]
+      }
+    })
 
     if (files.length > 0) {
       if (!settings.backendUrl) {
+        markSendFailed('Backend is offline.')
         return false
       }
       try {
@@ -864,19 +926,11 @@ function App() {
           referenceImages: mergeReferenceImages(thread.referenceImages ?? [], nextImages)
         }))
       } catch (error) {
-        updateThread(threadId, (thread) => ({
-          ...thread,
-          messages: [
-            ...thread.messages,
-            {
-              id: `msg-${Date.now()}-upload-error`,
-              role: 'assistant',
-              content: `Error: ${(error as Error).message}`,
-              createdAt: Date.now(),
-              status: 'error'
-            }
-          ]
-        }))
+        const detail =
+          error instanceof Error && error.message.trim()
+            ? `Failed to upload reference images: ${error.message.trim()}`
+            : 'Failed to upload reference images.'
+        markSendFailed(detail)
         return false
       }
     }
@@ -984,7 +1038,7 @@ function App() {
     } catch (error) {
       const message = formatThreadCreateError(error)
       setMcpToolsErrorByThread((prev) => ({ ...prev, [threadId]: message }))
-      appendPreflightErrorMessage(message)
+      markSendFailed(message)
       return false
     }
 
@@ -1024,41 +1078,7 @@ function App() {
     )
     receivedDeltaRef.current = false
 
-    const now = Date.now()
-    const userMessage: Message = {
-      id: `msg-${now}-user`,
-      role: 'user',
-      content: text,
-      createdAt: now
-    }
-    const assistantId = `msg-${now}-assistant`
-    const assistantMessage: Message = {
-      id: assistantId,
-      role: 'assistant',
-      content: '',
-      createdAt: now,
-      streamId: null,
-      status: 'streaming'
-    }
-
-    updateThread(threadId, (thread) => {
-      const title =
-        thread.title === 'New chat' || thread.messages.length === 0
-          ? text.slice(0, 32)
-          : thread.title
-      return {
-        ...thread,
-        title,
-        vlmProvider: selectedProvider || thread.vlmProvider,
-        vlmModel: selectedModel || thread.vlmModel,
-        vlmLocked: thread.vlmLocked ?? false,
-        graphEvents: [],
-        messages: [...thread.messages, userMessage, assistantMessage]
-      }
-    })
-
     setIsStreaming(true)
-    setThreadStreamStatus(threadId, 'streaming')
     const runId = streamRunIdRef.current + 1
     streamRunIdRef.current = runId
     const abortController = new AbortController()
@@ -1306,16 +1326,25 @@ function App() {
       }
     }
 
-    const streamPromise = streamChat({
-      baseUrl: settings.backendUrl,
-      message: text,
-      threadId,
-      enabledMcpTools,
-      vlmProvider: selectedProvider,
-      vlmModel: selectedModel,
-      signal: abortController.signal,
-      onEvent: handleStreamEvent
-    })
+    let streamPromise: Promise<void>
+    try {
+      streamPromise = streamChat({
+        baseUrl: settings.backendUrl,
+        message: text,
+        threadId,
+        enabledMcpTools,
+        vlmProvider: selectedProvider,
+        vlmModel: selectedModel,
+        signal: abortController.signal,
+        onEvent: handleStreamEvent
+      })
+    } catch (error) {
+      appendStreamErrorMessage(error)
+      setThreadStreamStatus(threadId, 'complete')
+      setIsStreaming(false)
+      setIsSending(false)
+      return false
+    }
     streamPromise
       .catch((error) => {
         if (streamRunIdRef.current !== runId) {
@@ -1338,6 +1367,7 @@ function App() {
         }))
         setThreadStreamStatus(threadId, 'complete')
         setIsStreaming(false)
+        setIsSending(false)
         if (streamAbortRef.current === abortController) {
           streamAbortRef.current = null
         }
@@ -1680,13 +1710,13 @@ function App() {
               <section className="workspace-chat">
                 <ChatTab
                   thread={activeThread}
-                  isStreaming={isStreaming}
+                  isStreaming={isStreaming || isSending}
                   streamStatus={
                     streamStatusByThread[activeThread.id] ??
                     (isStreaming && currentStreamRef.current?.threadId === activeThread.id ? 'streaming' : 'complete')
                   }
                   onSend={handleSend}
-                  onStop={handleStop}
+                  onStop={isStreaming ? handleStop : undefined}
                   backendUrl={settings.backendUrl}
                   examplePrompts={examplePrompts}
                   mcpTools={mcpToolsByThread[activeThread.id] ?? []}

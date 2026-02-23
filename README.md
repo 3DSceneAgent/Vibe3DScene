@@ -20,7 +20,7 @@
 
 > Note: This project is still under active development can may have bugs/breaking changes.
 
-![Demo](./assets/demo.gif)
+![Teaser](./assets/image_demo.png)
 
 ## Table of Contents
 - [1. Overview](#1-overview)
@@ -35,6 +35,9 @@
 - [Contributing](#contributing)
 
 ## 1. Overview
+### Video Demo
+![Demo](./assets/demo.gif)
+
 ### Introduction
 * From the perspective of algoirthm, at the core of Vibe3DScene is a vision-aware single agent system which follows the  **render-and-verify** strategy to build scenes. (1) It's built with LangGraph, borrowing some best practices of coding agents like tool call/planning/todos/rollback/memory management. (2) It unifies MCP tools like multimodal understanding, camera control, 3D asset retrieval/AIGC-Generation/PCG and scene management. The architecture is scalable and you can easily add your own tools/tool servers.
 * From the perspective of engineering, Vibe3DScene runs Blender in headless backend mode over network communication, so users can build scenes **via chat from web/mobile/Blender-builtin clients, without relying on a local Blender GUI or CC/Cursor IDE**. Beyond that, an owner-proxy + NGINX architecture enable multi-process scaling on a single server. 

@@ -486,6 +486,11 @@ export async function getVlmModels(
   threadId?: string,
   signal?: AbortSignal
 ): Promise<VlmModelsInfo> {
+  const providerPriority: Record<string, number> = {
+    gemini: 0,
+    openai: 1,
+    anthropic: 2
+  }
   const query = threadId ? `?thread_id=${encodeURIComponent(threadId)}` : ''
   const response = await apiFetch(`${baseUrl}/vlm/models${query}`, { signal })
   if (!response.ok) {
@@ -512,6 +517,14 @@ export async function getVlmModels(
           }
         })
         .filter((item): item is VlmProviderOption => item !== null)
+        .sort((a, b) => {
+          const aPriority = providerPriority[a.provider] ?? 99
+          const bPriority = providerPriority[b.provider] ?? 99
+          if (aPriority !== bPriority) {
+            return aPriority - bPriority
+          }
+          return a.display_name.localeCompare(b.display_name)
+        })
     : []
 
   const rawSelection = data.thread_selection
@@ -530,10 +543,12 @@ export async function getVlmModels(
     }
   }
 
+  const backendDefaultProvider =
+    typeof data.default_provider === 'string' ? data.default_provider : ''
   const defaultProvider =
-    typeof data.default_provider === 'string'
-      ? data.default_provider
-      : providers[0]?.provider ?? 'openai'
+    (backendDefaultProvider && providers.some((item) => item.provider === backendDefaultProvider)
+      ? backendDefaultProvider
+      : providers[0]?.provider) ?? 'gemini'
   const defaultModel =
     typeof data.default_model === 'string'
       ? data.default_model

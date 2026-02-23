@@ -9,6 +9,45 @@ RED='\033[0;31m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+KEEP_ALIVE_AFTER_START="${SCENE_AGENT_KEEP_ALIVE_AFTER_START:-0}"
+KEEP_ALIVE_SLEEP_SECONDS="${SCENE_AGENT_KEEP_ALIVE_SLEEP_SECONDS:-300}"
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/run_multiprocess_local.sh [options]
+
+Options:
+  --keep-alive     Keep this script process alive after startup.
+  --no-keep-alive  Exit after startup (default behavior).
+  -h, --help       Show this help message.
+
+Environment overrides:
+  SCENE_AGENT_KEEP_ALIVE_AFTER_START=1
+  SCENE_AGENT_KEEP_ALIVE_SLEEP_SECONDS=300
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --keep-alive)
+            KEEP_ALIVE_AFTER_START="1"
+            ;;
+        --no-keep-alive)
+            KEEP_ALIVE_AFTER_START="0"
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Unknown option: $1${NC}"
+            usage
+            exit 1
+            ;;
+    esac
+    shift
+done
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
@@ -446,3 +485,11 @@ fi
 echo -e "${CYAN}Logs:${NC} ${LOG_DIR}"
 echo ""
 echo -e "${YELLOW}Stop command:${NC} $STOP_SCRIPT"
+
+if [ "$KEEP_ALIVE_AFTER_START" = "1" ]; then
+    echo -e "${YELLOW}Keep-alive mode enabled. Script will stay running to keep the container/session active.${NC}"
+    echo -e "${YELLOW}Press Ctrl+C to exit this script. Backend processes will continue until you run:${NC} $STOP_SCRIPT"
+    while true; do
+        sleep "$KEEP_ALIVE_SLEEP_SECONDS"
+    done
+fi
