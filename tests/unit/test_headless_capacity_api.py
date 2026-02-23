@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -169,6 +170,63 @@ def test_idle_sweeper_releases_snapshot_ports(monkeypatch):
     assert manager.shutdown_calls == [thread_id]
     assert ("idle-headless-host", "headless", 9966) in coordinator.release_calls
     assert ("idle-mcp-host", "mcp", 9967) in coordinator.release_calls
+    assert any(
+        fields.get("status") == "closed"
+        and fields.get("blender_port") == ""
+        and fields.get("mcp_port") == ""
+        for _, fields in coordinator.runtime_updates
+    )
+
+
+def test_idle_sweeper_still_cleans_local_idle_session_when_not_owner(monkeypatch):
+    class _CoordinatorNotOwner(_CoordinatorStub):
+        def is_owned_by_current_worker(self, _thread_id: str) -> bool:
+            return False
+
+    thread_id = "thread-idle-non-owner"
+    session = SimpleNamespace(
+        session_id=thread_id,
+        mode="headless",
+        host="idle-headless-host",
+        port=9970,
+        mcp_host="idle-mcp-host",
+        mcp_port=9971,
+        blend_path="/tmp/scene.blend",
+        idle_timeout_seconds=1,
+    )
+    manager = _ManagerStub(session)
+    coordinator = _CoordinatorNotOwner()
+    settings = SimpleNamespace(
+        blender_host="localhost",
+        session_sweep_interval_seconds=1,
+    )
+
+    sleep_calls = 0
+
+    async def fake_sleep(_seconds: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls >= 2:
+            raise asyncio.CancelledError()
+
+    async def fake_to_thread(func, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(api_module, "get_session_manager", lambda: manager)
+    monkeypatch.setattr(api_module, "get_session_coordinator", lambda: coordinator)
+    monkeypatch.setattr(api_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(api_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(api_module.asyncio, "to_thread", fake_to_thread)
+
+    async def run_once() -> None:
+        with pytest.raises(asyncio.CancelledError):
+            await api_module._idle_session_sweeper()
+
+    asyncio.run(run_once())
+
+    assert manager.shutdown_calls == [thread_id]
+    assert ("idle-headless-host", "headless", 9970) in coordinator.release_calls
+    assert ("idle-mcp-host", "mcp", 9971) in coordinator.release_calls
 
 
 def test_get_mcp_tools_returns_structured_503_for_capacity_errors(monkeypatch):
@@ -297,3 +355,112 @@ def test_collect_headless_runtime_entries_adopts_legacy_default_frontend_owner(m
     assert entries[0]["thread_id"] == "thread-legacy"
     assert entries[0]["frontend_client_id"] == "client-z"
     assert coordinator.meta_by_thread["thread-legacy"]["frontend_client_id"] == "client-z"
+
+
+def test_collect_headless_runtime_entries_prefers_local_cleared_ports(monkeypatch):
+    class _Coordinator:
+        @staticmethod
+        def list_threads(limit: int = 2000) -> list[str]:
+            _ = limit
+            return ["thread-stale"]
+
+        @staticmethod
+        def get_session_meta(thread_id: str) -> dict[str, str] | None:
+            if thread_id != "thread-stale":
+                return None
+            return {
+                "frontend_client_id": "client-a",
+                "status": "closed",
+                "blender_port": "9876",
+                "mcp_port": "9877",
+                "last_active_ms": "1000",
+            }
+
+    session = SimpleNamespace(
+        session_id="thread-stale",
+        mode="headless",
+        status="closed",
+        port=None,
+        mcp_port=None,
+        last_active_at=0.0,
+    )
+
+    class _Manager:
+        @staticmethod
+        def list_sessions():
+            return [session]
+
+    monkeypatch.setattr(api_module, "get_session_coordinator", lambda: _Coordinator())
+    monkeypatch.setattr(api_module, "get_session_manager", lambda: _Manager())
+    monkeypatch.setattr(api_module, "get_settings", lambda: SimpleNamespace(blender_mode="headless"))
+
+    entries = api_module._collect_headless_runtime_entries(frontend_client_id="client-a")
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["thread_id"] == "thread-stale"
+    assert entry["blender_port"] is None
+    assert entry["mcp_port"] is None
+    assert entry["occupying_resources"] is False
+
+
+def test_headless_session_debug_reports_idle_countdown(monkeypatch):
+    class _Coordinator:
+        @staticmethod
+        def list_threads(limit: int = 5000) -> list[str]:
+            _ = limit
+            return ["thread-debug"]
+
+        @staticmethod
+        def get_session_meta(thread_id: str) -> dict[str, str] | None:
+            if thread_id != "thread-debug":
+                return None
+            return {
+                "frontend_client_id": "client-a",
+                "status": "active",
+                "last_active_ms": "1",
+            }
+
+        @staticmethod
+        def get_owner(_thread_id: str):
+            return None
+
+    class _AliveProcess:
+        @staticmethod
+        def poll():
+            return None
+
+    session = SimpleNamespace(
+        session_id="thread-debug",
+        mode="headless",
+        status="ready",
+        port=9876,
+        mcp_port=9877,
+        process=_AliveProcess(),
+        mcp_process=_AliveProcess(),
+        last_active_at=time.time() - 5.0,
+        idle_timeout_seconds=20,
+    )
+
+    class _Manager:
+        @staticmethod
+        def list_sessions():
+            return [session]
+
+    monkeypatch.setattr(api_module, "get_session_coordinator", lambda: _Coordinator())
+    monkeypatch.setattr(api_module, "get_session_manager", lambda: _Manager())
+    monkeypatch.setattr(api_module, "get_settings", lambda: SimpleNamespace(blender_mode="headless"))
+
+    now_ms, entries = api_module._collect_headless_runtime_debug_entries(
+        frontend_client_id="client-a",
+        include_all_clients=False,
+    )
+    assert now_ms > 0
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["thread_id"] == "thread-debug"
+    assert entry["occupying_resources"] is True
+    assert entry["effective_headless_port"] == 9876
+    assert entry["effective_mcp_port"] == 9877
+    assert entry["seconds_until_idle_cleanup"] is not None
+    assert 0.0 <= float(entry["seconds_until_idle_cleanup"]) <= 20.0

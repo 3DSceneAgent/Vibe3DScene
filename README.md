@@ -158,10 +158,10 @@ RUN_INTEGRATION=1 pytest tests
 #### Smoke test (recommended after startup)
 ```bash
 # health + owner/proxy + mcp-tools
-python scripts/smoke_multiprocess_macos.py --gateway-url http://127.0.0.1:8000 --worker1-url http://127.0.0.1:18001 --worker2-url http://127.0.0.1:18002 --skip-chat
+python scripts/smoke_multiprocess_local.py --gateway-url http://127.0.0.1:8000 --worker1-url http://127.0.0.1:18001 --worker2-url http://127.0.0.1:18002 --skip-chat
 
 # include /chat
-python scripts/smoke_multiprocess_macos.py --gateway-url http://127.0.0.1:8000 --worker1-url http://127.0.0.1:18001 --worker2-url http://127.0.0.1:18002
+python scripts/smoke_multiprocess_local.py --gateway-url http://127.0.0.1:8000 --worker1-url http://127.0.0.1:18001 --worker2-url http://127.0.0.1:18002
 ```
 
 

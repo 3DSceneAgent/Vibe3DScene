@@ -84,11 +84,11 @@ _thread_client_lock = threading.Lock()
 _thread_frontend_clients: Dict[str, str] = {}
 _FRONTEND_CLIENT_HEADER = "x-frontend-client-id"
 _DEFAULT_FRONTEND_CLIENT_ID = "default"
-_SUPPORTED_VLM_PROVIDERS = ("openai", "anthropic", "gemini")
+_SUPPORTED_VLM_PROVIDERS = ("gemini", "openai", "anthropic")
 _VLM_PROVIDER_DISPLAY_NAMES = {
+    "gemini": "Gemini",
     "openai": "OpenAI",
     "anthropic": "Anthropic",
-    "gemini": "Gemini",
 }
 _SCENE_LEVEL_RENDER_CAMERA_CONFIGS: tuple[tuple[str, float, float], ...] = (
     ("SceneCamera_NE", 45.0, 30.0),
@@ -335,7 +335,13 @@ def _restart_headless_session_after_timeout(thread_id: str) -> None:
         coordinator.release_port(host=mcp_host, kind="mcp", port=mcp_port)
         coordinator.update_session_runtime_fields(
             thread_id,
-            {"status": "closed"},
+            {
+                "status": "closed",
+                "host": "",
+                "mcp_host": "",
+                "blender_port": "",
+                "mcp_port": "",
+            },
         )
         log_event(
             "warning",
@@ -1061,6 +1067,43 @@ class HeadlessSessionCapacityResponse(BaseModel):
     occupying_threads: list[HeadlessRuntimeThreadEntry]
 
 
+class HeadlessSessionDebugEntry(BaseModel):
+    thread_id: str
+    frontend_client_id: str
+    status: str
+    local_status: str | None = None
+    meta_status: str | None = None
+    owner_worker_id: str | None = None
+    lease_ttl_ms: int | None = None
+    last_active_ms: int
+    local_last_active_ms: int | None = None
+    meta_last_active_ms: int | None = None
+    idle_timeout_seconds: int | None = None
+    idle_elapsed_seconds: float | None = None
+    seconds_until_idle_cleanup: float | None = None
+    local_headless_port: int | None = None
+    local_mcp_port: int | None = None
+    meta_headless_port: int | None = None
+    meta_mcp_port: int | None = None
+    effective_headless_port: int | None = None
+    effective_mcp_port: int | None = None
+    occupying_resources: bool
+    has_blender_process: bool
+    has_mcp_process: bool
+
+
+class HeadlessSessionDebugResponse(BaseModel):
+    blender_mode: str
+    frontend_client_id: str
+    include_all_clients: bool
+    now_ms: int
+    session_idle_timeout_seconds: int
+    session_sweep_interval_seconds: int
+    total_sessions: int
+    occupying_sessions: int
+    sessions: list[HeadlessSessionDebugEntry]
+
+
 class ReleaseRuntimeResponse(BaseModel):
     thread_id: str
     released: bool
@@ -1382,58 +1425,77 @@ async def _claim_or_proxy_request(
 
 async def _idle_session_sweeper() -> None:
     while True:
-        settings = get_settings()
-        interval = max(1, settings.session_sweep_interval_seconds)
-        await asyncio.sleep(interval)
-        coordinator = get_session_coordinator()
-        manager = get_session_manager()
-        idle_sessions = manager.get_idle_sessions()
-        for session in idle_sessions:
-            if not coordinator.is_owned_by_current_worker(session.session_id):
-                continue
-            headless_host_snapshot = session.host or settings.blender_host
-            headless_port_snapshot = session.port
-            mcp_host_snapshot = session.mcp_host or os.getenv("BLENDER_MCP_HOST", "localhost")
-            mcp_port_snapshot = session.mcp_port
-            stopped, persisted = await asyncio.to_thread(
-                manager.shutdown_if_idle,
-                session.session_id,
-            )
-            if not stopped:
-                continue
-            coordinator.update_session_runtime_fields(
-                session.session_id,
-                {
-                    "status": "closed",
-                    "last_active_ms": int(time.time() * 1000),
-                },
-            )
-            coordinator.release_port(
-                host=headless_host_snapshot,
-                kind="headless",
-                port=headless_port_snapshot,
-            )
-            coordinator.release_port(
-                host=mcp_host_snapshot,
-                kind="mcp",
-                port=mcp_port_snapshot,
-            )
-            # Also clean up cached agent graph & VLM config so MCP client
-            # references are released and don't keep reconnecting.
-            if session.session_id in _agent_graphs_by_thread:
-                del _agent_graphs_by_thread[session.session_id]
-            with _thread_vlm_lock:
-                _thread_vlm_configs.pop(session.session_id, None)
+        try:
+            settings = get_settings()
+            interval = max(1, settings.session_sweep_interval_seconds)
+            await asyncio.sleep(interval)
+            manager = get_session_manager()
+            coordinator = get_session_coordinator()
+            idle_sessions = manager.get_idle_sessions()
+            for session in idle_sessions:
+                try:
+                    headless_host_snapshot = session.host or settings.blender_host
+                    headless_port_snapshot = session.port
+                    mcp_host_snapshot = session.mcp_host or os.getenv("BLENDER_MCP_HOST", "localhost")
+                    mcp_port_snapshot = session.mcp_port
+                    stopped, persisted = await asyncio.to_thread(
+                        manager.shutdown_if_idle,
+                        session.session_id,
+                    )
+                    if not stopped:
+                        continue
+                    coordinator.update_session_runtime_fields(
+                        session.session_id,
+                        {
+                            "status": "closed",
+                            "last_active_ms": int(time.time() * 1000),
+                            "host": "",
+                            "mcp_host": "",
+                            "blender_port": "",
+                            "mcp_port": "",
+                        },
+                    )
+                    coordinator.release_port(
+                        host=headless_host_snapshot,
+                        kind="headless",
+                        port=headless_port_snapshot,
+                    )
+                    coordinator.release_port(
+                        host=mcp_host_snapshot,
+                        kind="mcp",
+                        port=mcp_port_snapshot,
+                    )
+                    # Also clean up cached agent graph & VLM config so MCP client
+                    # references are released and don't keep reconnecting.
+                    if session.session_id in _agent_graphs_by_thread:
+                        del _agent_graphs_by_thread[session.session_id]
+                    with _thread_vlm_lock:
+                        _thread_vlm_configs.pop(session.session_id, None)
+                    log_event(
+                        "info",
+                        "headless_session_idle_stopped",
+                        {
+                            "thread_id": session.session_id,
+                            "session_id": session.session_id,
+                            "blend_path": session.blend_path,
+                            "persisted": persisted,
+                            "idle_timeout_seconds": session.idle_timeout_seconds,
+                        },
+                    )
+                except Exception as exc:
+                    log_event(
+                        "warning",
+                        "headless_idle_sweeper_session_failed",
+                        {
+                            "thread_id": getattr(session, "session_id", None),
+                            "error": str(exc),
+                        },
+                    )
+        except Exception as exc:
             log_event(
-                "info",
-                "headless_session_idle_stopped",
-                {
-                    "thread_id": session.session_id,
-                    "session_id": session.session_id,
-                    "blend_path": session.blend_path,
-                    "persisted": persisted,
-                    "idle_timeout_seconds": session.idle_timeout_seconds,
-                },
+                "warning",
+                "headless_idle_sweeper_cycle_failed",
+                {"error": str(exc)},
             )
 
 
@@ -1539,6 +1601,7 @@ async def root():
             "vlm_models": "GET /vlm/models",
             "mcp_tools": "GET /threads/{thread_id}/mcp-tools",
             "session_capacity": "GET /headless/session-capacity",
+            "session_debug": "GET /headless/session-debug",
             "release_runtime": "POST /threads/{thread_id}/release-runtime",
             "todos": "GET /todos/{thread_id}",
             "threads": "GET /threads",
@@ -1560,6 +1623,8 @@ async def healthcheck():
         "worker_id": settings.api_worker_id,
         "redis_ok": redis_ok,
         "redis_latency_ms": redis_latency_ms,
+        "session_idle_timeout_seconds": settings.session_idle_timeout_seconds,
+        "session_sweep_interval_seconds": settings.session_sweep_interval_seconds,
     }
 
 
@@ -2894,10 +2959,12 @@ def _collect_headless_runtime_entries(*, frontend_client_id: str) -> list[dict[s
         if session.mode != "headless":
             continue
         thread_id = session.session_id
-        client_id = _resolve_thread_frontend_client(thread_id)
         existing = entries_by_thread.get(thread_id)
-        blender_port = session.port if session.port is not None else (existing or {}).get("blender_port")
-        mcp_port = session.mcp_port if session.mcp_port is not None else (existing or {}).get("mcp_port")
+        client_id = str((existing or {}).get("frontend_client_id") or _resolve_thread_frontend_client(thread_id))
+        # Trust local runtime state for local sessions. Do not fallback to stale
+        # metadata ports that may have already been released.
+        blender_port = session.port
+        mcp_port = session.mcp_port
         occupying = blender_port is not None or mcp_port is not None
         if (
             occupying
@@ -2923,6 +2990,131 @@ def _collect_headless_runtime_entries(*, frontend_client_id: str) -> list[dict[s
     entries = list(entries_by_thread.values())
     entries.sort(key=lambda item: (int(item.get("last_active_ms") or 0), str(item.get("thread_id") or "")))
     return entries
+
+
+def _collect_headless_runtime_debug_entries(
+    *,
+    frontend_client_id: str,
+    include_all_clients: bool = False,
+) -> tuple[int, list[dict[str, Any]]]:
+    settings = get_settings()
+    if settings.blender_mode != "headless":
+        return int(time.time() * 1000), []
+
+    coordinator = get_session_coordinator()
+    manager = get_session_manager()
+    now_ms = int(time.time() * 1000)
+
+    meta_by_thread: dict[str, dict[str, str]] = {}
+    for thread_id in coordinator.list_threads(limit=5000):
+        meta = coordinator.get_session_meta(thread_id) or {}
+        if meta:
+            meta_by_thread[thread_id] = meta
+
+    local_by_thread: dict[str, Any] = {}
+    for session in manager.list_sessions():
+        if getattr(session, "mode", None) != "headless":
+            continue
+        local_by_thread[str(session.session_id)] = session
+
+    all_thread_ids = set(meta_by_thread.keys()) | set(local_by_thread.keys())
+    entries: list[dict[str, Any]] = []
+
+    def _process_alive(process: Any) -> bool:
+        if process is None:
+            return False
+        try:
+            return process.poll() is None
+        except Exception:
+            return True
+
+    for thread_id in sorted(all_thread_ids):
+        meta = meta_by_thread.get(thread_id, {})
+        local = local_by_thread.get(thread_id)
+        resolved_client_id = _resolve_thread_frontend_client(thread_id, meta if meta else None)
+        if not include_all_clients and resolved_client_id != frontend_client_id:
+            continue
+
+        owner = coordinator.get_owner(thread_id)
+        local_headless_port = _safe_int_optional(getattr(local, "port", None))
+        local_mcp_port = _safe_int_optional(getattr(local, "mcp_port", None))
+        meta_headless_port = _safe_int_optional(meta.get("blender_port")) if meta else None
+        meta_mcp_port = _safe_int_optional(meta.get("mcp_port")) if meta else None
+        effective_headless_port = local_headless_port if local is not None else meta_headless_port
+        effective_mcp_port = local_mcp_port if local is not None else meta_mcp_port
+        occupying = effective_headless_port is not None or effective_mcp_port is not None
+
+        local_last_active_ms = None
+        if local is not None:
+            try:
+                local_last_active_ms = int(float(getattr(local, "last_active_at", 0.0)) * 1000)
+            except Exception:
+                local_last_active_ms = None
+        meta_last_active_ms = (
+            _safe_int_optional(meta.get("last_active_ms"))
+            or _safe_int_optional(meta.get("updated_at_ms"))
+            or None
+        )
+        last_active_ms = local_last_active_ms or meta_last_active_ms or 0
+
+        idle_timeout_seconds = None
+        idle_elapsed_seconds = None
+        seconds_until_idle_cleanup = None
+        if local is not None:
+            try:
+                idle_timeout_seconds = int(getattr(local, "idle_timeout_seconds", 0))
+            except Exception:
+                idle_timeout_seconds = None
+            if local_last_active_ms is not None:
+                idle_elapsed_seconds = max(0.0, (now_ms - local_last_active_ms) / 1000.0)
+            if (
+                idle_timeout_seconds is not None
+                and idle_timeout_seconds > 0
+                and idle_elapsed_seconds is not None
+                and (_process_alive(getattr(local, "process", None)) or _process_alive(getattr(local, "mcp_process", None)))
+            ):
+                seconds_until_idle_cleanup = max(0.0, float(idle_timeout_seconds) - idle_elapsed_seconds)
+            elif (
+                idle_timeout_seconds is not None
+                and idle_timeout_seconds > 0
+                and idle_elapsed_seconds is not None
+                and not occupying
+            ):
+                seconds_until_idle_cleanup = 0.0
+
+        local_status = str(getattr(local, "status", "") or "") if local is not None else None
+        meta_status = str(meta.get("status") or "") if meta else None
+        status = local_status or meta_status or ("active" if occupying else "closed")
+
+        entries.append(
+            {
+                "thread_id": thread_id,
+                "frontend_client_id": resolved_client_id,
+                "status": status,
+                "local_status": local_status,
+                "meta_status": meta_status,
+                "owner_worker_id": owner.owner_worker_id if owner is not None else None,
+                "lease_ttl_ms": int(owner.lease_ttl_ms) if owner is not None else None,
+                "last_active_ms": int(last_active_ms),
+                "local_last_active_ms": local_last_active_ms,
+                "meta_last_active_ms": meta_last_active_ms,
+                "idle_timeout_seconds": idle_timeout_seconds,
+                "idle_elapsed_seconds": idle_elapsed_seconds,
+                "seconds_until_idle_cleanup": seconds_until_idle_cleanup,
+                "local_headless_port": local_headless_port,
+                "local_mcp_port": local_mcp_port,
+                "meta_headless_port": meta_headless_port,
+                "meta_mcp_port": meta_mcp_port,
+                "effective_headless_port": effective_headless_port,
+                "effective_mcp_port": effective_mcp_port,
+                "occupying_resources": occupying,
+                "has_blender_process": _process_alive(getattr(local, "process", None)) if local is not None else False,
+                "has_mcp_process": _process_alive(getattr(local, "mcp_process", None)) if local is not None else False,
+            }
+        )
+
+    entries.sort(key=lambda item: (int(item.get("last_active_ms") or 0), str(item.get("thread_id") or "")))
+    return now_ms, entries
 
 
 def _ensure_frontend_client_can_manage_thread(thread_id: str, request_client_id: str) -> None:
@@ -3053,6 +3245,31 @@ async def get_headless_session_capacity(request: Request):
         quota=quota,
         in_use=len(occupying_threads),
         occupying_threads=[HeadlessRuntimeThreadEntry(**entry) for entry in occupying_threads],
+    )
+
+
+@app.get("/headless/session-debug", response_model=HeadlessSessionDebugResponse)
+async def get_headless_session_debug(
+    request: Request,
+    include_all_clients: bool = False,
+):
+    settings = get_settings()
+    client_id = _resolve_frontend_client_id(request)
+    now_ms, entries = _collect_headless_runtime_debug_entries(
+        frontend_client_id=client_id,
+        include_all_clients=include_all_clients,
+    )
+    occupying_sessions = sum(1 for entry in entries if bool(entry.get("occupying_resources")))
+    return HeadlessSessionDebugResponse(
+        blender_mode=settings.blender_mode,
+        frontend_client_id=client_id,
+        include_all_clients=bool(include_all_clients),
+        now_ms=now_ms,
+        session_idle_timeout_seconds=settings.session_idle_timeout_seconds,
+        session_sweep_interval_seconds=settings.session_sweep_interval_seconds,
+        total_sessions=len(entries),
+        occupying_sessions=occupying_sessions,
+        sessions=[HeadlessSessionDebugEntry(**entry) for entry in entries],
     )
 
 

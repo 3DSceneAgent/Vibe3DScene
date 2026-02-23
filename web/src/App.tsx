@@ -512,6 +512,26 @@ function App() {
   }, [applyHeadlessCapacity, backendMode, backendStatus, settings.backendUrl])
 
   useEffect(() => {
+    if (!settings.backendUrl || backendStatus !== 'online' || backendMode !== 'headless') {
+      return () => undefined
+    }
+    const refreshOnForeground = () => {
+      void refreshHeadlessCapacity()
+    }
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshOnForeground()
+      }
+    }
+    window.addEventListener('focus', refreshOnForeground)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => {
+      window.removeEventListener('focus', refreshOnForeground)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [backendMode, backendStatus, refreshHeadlessCapacity, settings.backendUrl])
+
+  useEffect(() => {
     let cancelled = false
     const threadId = activeThread?.id
     if (!threadId || !settings.backendUrl || backendStatus !== 'online') {

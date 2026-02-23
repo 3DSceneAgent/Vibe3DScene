@@ -16,6 +16,15 @@ type ThreadListProps = {
   collapsed?: boolean
 }
 
+function getThreadLastActivityMs(thread: Thread): number {
+  const createdAt = Number.isFinite(thread.createdAt) ? thread.createdAt : 0
+  const lastMessageAt = thread.messages.reduce((latest, message) => {
+    const timestamp = Number(message.createdAt)
+    return Number.isFinite(timestamp) ? Math.max(latest, timestamp) : latest
+  }, createdAt)
+  return Math.max(createdAt, lastMessageAt)
+}
+
 export function ThreadList({
   threads,
   activeId,
@@ -31,6 +40,14 @@ export function ThreadList({
   quotaHint = null,
   collapsed = false
 }: ThreadListProps) {
+  const sortedThreads = [...threads].sort((a, b) => {
+    const activityDiff = getThreadLastActivityMs(b) - getThreadLastActivityMs(a)
+    if (activityDiff !== 0) {
+      return activityDiff
+    }
+    return (Number.isFinite(b.createdAt) ? b.createdAt : 0) - (Number.isFinite(a.createdAt) ? a.createdAt : 0)
+  })
+
   return (
     <div className={`thread-list ${collapsed ? 'collapsed' : ''}`}>
       <button
@@ -44,8 +61,8 @@ export function ThreadList({
       {!collapsed && createHint && <div className="thread-create-hint action">{createHint}</div>}
       {!collapsed && createError && <div className="thread-create-error">{createError}</div>}
       <div className={`thread-items ${collapsed ? 'collapsed' : ''}`}>
-        {threads.length === 0 && !collapsed && <div className="muted">No conversations yet</div>}
-        {threads.map((thread) => {
+        {sortedThreads.length === 0 && !collapsed && <div className="muted">No conversations yet</div>}
+        {sortedThreads.map((thread) => {
           const label = thread.title || 'Untitled'
           const shortLabel = label.trim().charAt(0).toUpperCase() || '?'
           const occupyingResources = Boolean(thread.occupyingResources)
