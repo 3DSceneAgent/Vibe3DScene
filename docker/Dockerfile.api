@@ -18,7 +18,7 @@ RUN set -eux; \
         exit 1; \
       fi; \
       apt-get update; \
-      apt-get install -y --no-install-recommends ca-certificates xz-utils libx11-dev libxfixes3 libxi-dev libsm6 libegl1 libegl1-mesa-dev libxrender1 libxkbcommon-dev; \
+      apt-get install -y --no-install-recommends nginx redis-server curl ca-certificates xz-utils libx11-dev libxfixes3 libxi-dev libsm6 libegl1 libegl1-mesa-dev libxrender1 libxkbcommon-dev; \
       rm -rf /var/lib/apt/lists/*; \
       python /tmp/download_blender.py \
         --platform "linux-x86-64" \
