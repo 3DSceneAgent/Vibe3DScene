@@ -4,7 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-ARG INSTALL_BLENDER=false
+ARG INSTALL_BLENDER=true
 ARG BLENDER_VERSION=4.2.15
 
 COPY scripts/download_blender.py /tmp/download_blender.py
