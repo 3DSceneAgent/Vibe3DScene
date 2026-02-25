@@ -23,15 +23,18 @@ BlenderCommandSender = Callable[[str, dict[str, Any] | None], dict[str, Any]]
 # ---------------------------------------------------------------------------
 _SCENE_CAMERA_VIEW_CONFIGS: tuple[tuple[str, float, float], ...] = (
     ("SceneCamera_NE", 45.0, 30.0),
-    ("SceneCamera_NW", 135.0, 30.0),
-    ("SceneCamera_SE", -45.0, 30.0),
     ("SceneCamera_SW", -135.0, 30.0),
     ("SceneCamera_TopDown", 0.0, 89.0),
 )
 SCENE_CAMERA_NAMES = tuple(config[0] for config in _SCENE_CAMERA_VIEW_CONFIGS)
-_SCENE_CAMERA_FOCAL_MM = 50.0
+_SCENE_CAMERA_FOCAL_MM = 42.0
 _SCENE_CAMERA_SENSOR_WIDTH = 36.0
-_SCENE_CAMERA_DISTANCE_MARGIN = 1.5
+_SCENE_CAMERA_DISTANCE_MARGIN = 1.3
+_SCENE_CAMERA_MIN_DISTANCE = 1.25
+_SCENE_CAMERA_MAX_DISTANCE = 650.0
+_SCENE_BBOX_OUTLIER_DIM_RATIO = 12.0
+_SCENE_BBOX_OUTLIER_MIN_DIM = 4.0
+_SCENE_BBOX_TRIM_REQUIRED_SHRINK = 0.6
 _SCENE_GRID_CAMERA_NAME = "SceneGlobalGrid"
 
 
@@ -86,13 +89,113 @@ def _extract_bbox_min_max(raw_bbox: Any) -> tuple[list[float], list[float]] | No
 
 
 def _extract_object_bbox_min_max(obj: dict[str, Any]) -> tuple[list[float], list[float]] | None:
-    for key in ("world_bounding_box", "bounding_box", "bbox"):
+    # Prefer explicit world-space bbox keys before generic ones.
+    for key in ("world_bounding_box", "bbox", "bounding_box"):
         if key not in obj:
             continue
         parsed = _extract_bbox_min_max(obj.get(key))
         if parsed is not None:
             return parsed
     return None
+
+
+def _bbox_record_from_bounds(
+    obj: dict[str, Any],
+    bounds: tuple[list[float], list[float]],
+) -> dict[str, Any] | None:
+    bbox_min_raw, bbox_max_raw = bounds
+    if len(bbox_min_raw) != 3 or len(bbox_max_raw) != 3:
+        return None
+
+    bbox_min = [float(min(bbox_min_raw[i], bbox_max_raw[i])) for i in range(3)]
+    bbox_max = [float(max(bbox_min_raw[i], bbox_max_raw[i])) for i in range(3)]
+    if not all(math.isfinite(value) for value in (*bbox_min, *bbox_max)):
+        return None
+
+    dimensions = [max(bbox_max[i] - bbox_min[i], 0.0) for i in range(3)]
+    max_dim = max(dimensions)
+    if max_dim <= 1e-6:
+        return None
+
+    center = [(bbox_min[i] + bbox_max[i]) / 2.0 for i in range(3)]
+    raw_name = obj.get("name")
+    object_name = raw_name.strip() if isinstance(raw_name, str) else ""
+    return {
+        "name": object_name,
+        "min": bbox_min,
+        "max": bbox_max,
+        "center": center,
+        "dimensions": dimensions,
+        "max_dim": max_dim,
+    }
+
+
+def _union_bbox_from_records(records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not records:
+        return None
+    union_min = [min(record["min"][i] for record in records) for i in range(3)]
+    union_max = [max(record["max"][i] for record in records) for i in range(3)]
+    center = [(union_min[i] + union_max[i]) / 2.0 for i in range(3)]
+    dimensions = [union_max[i] - union_min[i] for i in range(3)]
+    return {"center": center, "dimensions": dimensions, "min": union_min, "max": union_max}
+
+
+def _percentile(values: list[float], quantile: float) -> float:
+    if not values:
+        return 0.0
+    sorted_values = sorted(values)
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+
+    q = min(max(float(quantile), 0.0), 1.0)
+    position = (len(sorted_values) - 1) * q
+    low = int(math.floor(position))
+    high = int(math.ceil(position))
+    if low == high:
+        return sorted_values[low]
+    weight = position - low
+    return sorted_values[low] * (1.0 - weight) + sorted_values[high] * weight
+
+
+def _select_focus_bbox_records(
+    records: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    if len(records) < 2:
+        return records, []
+
+    max_dims = [float(record["max_dim"]) for record in records]
+    baseline_dim = max(_percentile(max_dims, 0.25), 1e-6)
+    outlier_threshold = max(
+        baseline_dim * _SCENE_BBOX_OUTLIER_DIM_RATIO,
+        _SCENE_BBOX_OUTLIER_MIN_DIM,
+    )
+
+    inliers = [record for record in records if float(record["max_dim"]) <= outlier_threshold]
+    if not inliers or len(inliers) == len(records):
+        return records, []
+
+    full_union = _union_bbox_from_records(records)
+    inlier_union = _union_bbox_from_records(inliers)
+    if full_union is None or inlier_union is None:
+        return records, []
+
+    full_max_span = max(full_union["dimensions"])
+    inlier_max_span = max(inlier_union["dimensions"])
+    if full_max_span <= 1e-6:
+        return records, []
+
+    # Apply trimming only when it materially improves framing stability.
+    if inlier_max_span > full_max_span * _SCENE_BBOX_TRIM_REQUIRED_SHRINK:
+        return records, []
+
+    excluded_names: list[str] = []
+    inlier_names = {record.get("name") for record in inliers}
+    for record in records:
+        object_name = record.get("name")
+        if isinstance(object_name, str) and object_name and object_name not in inlier_names:
+            excluded_names.append(object_name)
+
+    return inliers, excluded_names
 
 
 def _compute_union_aabb(scene_info: dict[str, Any]) -> dict[str, Any] | None:
@@ -110,41 +213,55 @@ def _compute_union_aabb(scene_info: dict[str, Any]) -> dict[str, Any] | None:
     else:
         return None
 
-    all_min: list[list[float]] = []
-    all_max: list[list[float]] = []
+    bbox_records: list[dict[str, Any]] = []
     for obj in obj_list:
         if not isinstance(obj, dict):
             continue
         parsed = _extract_object_bbox_min_max(obj)
         if parsed is None:
             continue
-        bbox_min, bbox_max = parsed
-        all_min.append(bbox_min)
-        all_max.append(bbox_max)
+        record = _bbox_record_from_bounds(obj, parsed)
+        if record is not None:
+            bbox_records.append(record)
+
+    if bbox_records:
+        focus_records, excluded_names = _select_focus_bbox_records(bbox_records)
+        union_bbox = _union_bbox_from_records(focus_records)
+        if union_bbox is None:
+            union_bbox = _union_bbox_from_records(bbox_records)
+        if union_bbox is not None:
+            object_names = [
+                record["name"]
+                for record in focus_records
+                if isinstance(record.get("name"), str) and record["name"]
+            ]
+            union_bbox["object_names"] = object_names
+            if excluded_names:
+                union_bbox["excluded_object_names"] = excluded_names
+            return union_bbox
 
     # Fallback to scene-level bbox if object-level bboxes are unavailable.
-    if not all_min:
-        scene_bbox = _extract_bbox_min_max(scene_info.get("scene_bbox"))
-        if scene_bbox is not None:
-            bbox_min, bbox_max = scene_bbox
-            all_min.append(bbox_min)
-            all_max.append(bbox_max)
-
-    if not all_min:
+    scene_bbox = _extract_bbox_min_max(scene_info.get("scene_bbox"))
+    if scene_bbox is None:
         return None
 
-    union_min = [min(c[i] for c in all_min) for i in range(3)]
-    union_max = [max(c[i] for c in all_max) for i in range(3)]
-    center = [(union_min[i] + union_max[i]) / 2 for i in range(3)]
-    dimensions = [union_max[i] - union_min[i] for i in range(3)]
-    return {"center": center, "dimensions": dimensions, "min": union_min, "max": union_max}
+    fallback_record = _bbox_record_from_bounds({}, scene_bbox)
+    if fallback_record is None:
+        return None
+    union_bbox = _union_bbox_from_records([fallback_record])
+    if union_bbox is not None:
+        union_bbox["object_names"] = []
+    return union_bbox
 
 
 def _fov_aware_distance(dimensions: list[float]) -> float:
     """Calculate camera distance so the bbox fits comfortably in frame."""
     max_dim = max(max(dimensions), 0.1)
     fov_h = 2 * math.atan(_SCENE_CAMERA_SENSOR_WIDTH / (2 * _SCENE_CAMERA_FOCAL_MM))
-    return (max_dim / math.tan(fov_h / 2)) * _SCENE_CAMERA_DISTANCE_MARGIN
+    raw_distance = (max_dim / math.tan(fov_h / 2)) * _SCENE_CAMERA_DISTANCE_MARGIN
+    if not math.isfinite(raw_distance):
+        return _SCENE_CAMERA_MIN_DISTANCE
+    return min(max(raw_distance, _SCENE_CAMERA_MIN_DISTANCE), _SCENE_CAMERA_MAX_DISTANCE)
 
 
 def _spherical_to_cartesian(
@@ -159,19 +276,146 @@ def _spherical_to_cartesian(
     return [x, y, z]
 
 
+def _vector_cross(a: list[float], b: list[float]) -> list[float]:
+    return [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+
+
+def _vector_normalize(vec: list[float]) -> list[float] | None:
+    length = math.sqrt(sum(component * component for component in vec))
+    if length <= 1e-9:
+        return None
+    return [component / length for component in vec]
+
+
+def _look_at_rotation_euler(position: list[float], target: list[float]) -> list[float]:
+    """
+    Build Blender-compatible XYZ Euler rotation so camera local -Z tracks target.
+
+    Equivalent to Blender's ``to_track_quat("-Z", "Y")`` behavior for a world-up
+    preference, implemented here without Blender runtime dependencies.
+    """
+    forward = _vector_normalize([target[i] - position[i] for i in range(3)])
+    if forward is None:
+        return [0.0, 0.0, 0.0]
+
+    world_up = [0.0, 0.0, 1.0]
+    dot = sum(forward[i] * world_up[i] for i in range(3))
+    if abs(dot) > 0.999:
+        world_up = [0.0, 1.0, 0.0]
+
+    z_axis = [-forward[0], -forward[1], -forward[2]]
+    x_axis = _vector_normalize(_vector_cross(world_up, z_axis))
+    if x_axis is None:
+        world_up = [1.0, 0.0, 0.0]
+        x_axis = _vector_normalize(_vector_cross(world_up, z_axis))
+    if x_axis is None:
+        return [0.0, 0.0, 0.0]
+    y_axis = _vector_cross(z_axis, x_axis)
+
+    m00, _, _ = x_axis[0], y_axis[0], z_axis[0]
+    m10, m11, m12 = x_axis[1], y_axis[1], z_axis[1]
+    m20, m21, m22 = x_axis[2], y_axis[2], z_axis[2]
+
+    m20_clamped = min(max(m20, -1.0), 1.0)
+    if m20_clamped < 1.0:
+        if m20_clamped > -1.0:
+            y = math.asin(-m20_clamped)
+            x = math.atan2(m21, m22)
+            z = math.atan2(m10, m00)
+        else:
+            y = math.pi / 2.0
+            x = -math.atan2(-m12, m11)
+            z = 0.0
+    else:
+        y = -math.pi / 2.0
+        x = math.atan2(-m12, m11)
+        z = 0.0
+    return [x, y, z]
+
+
+def _render_scene_camera_with_observe(
+    *,
+    command_sender: BlenderCommandSender,
+    cam_name: str,
+    azimuth: float,
+    elevation: float,
+    object_names: list[str],
+) -> dict[str, Any] | None:
+    temp_path = os.path.join(
+        tempfile.gettempdir(),
+        f"scene_cam_{cam_name}_{os.getpid()}_{int(time.time() * 1000)}.png",
+    )
+    result = command_sender(
+        "camera_observe",
+        {
+            "object_names": object_names,
+            "mode": "single_view",
+            "focal_length": _SCENE_CAMERA_FOCAL_MM,
+            "azimuth": azimuth,
+            "elevation": elevation,
+            "reuse_cameras": True,
+            "camera_name": cam_name,
+            "camera_kind": "scene_level",
+            "filepath": temp_path,
+        },
+    )
+    if not isinstance(result, dict) or not result.get("success", False):
+        logger.warning("Scene camera %s render failed: %s", cam_name, result)
+        return None
+    return result
+
+
+def _render_scene_camera_with_pose(
+    *,
+    command_sender: BlenderCommandSender,
+    cam_name: str,
+    location: list[float],
+    center: list[float],
+    object_names: list[str],
+) -> dict[str, Any] | None:
+    rotation_euler = _look_at_rotation_euler(location, center)
+    temp_path = os.path.join(
+        tempfile.gettempdir(),
+        f"scene_cam_{cam_name}_{os.getpid()}_{int(time.time() * 1000)}.png",
+    )
+    result = command_sender(
+        "camera_set_pose",
+        {
+            "location": location,
+            "rotation_euler": rotation_euler,
+            "focal_mm": _SCENE_CAMERA_FOCAL_MM,
+            "mode": "rgb",
+            "object_names": object_names,
+            "camera_name": cam_name,
+            "camera_kind": "scene_level",
+            "filepath": temp_path,
+            "render_output": True,
+        },
+    )
+    if not isinstance(result, dict) or not result.get("success", False):
+        logger.warning("Scene camera %s pose render failed: %s", cam_name, result)
+        return None
+    return result
+
+
 def update_scene_cameras(
     *,
     thread_id: str = "unknown",
     send_blender_command: BlenderCommandSender | None = None,
+    use_direct_pose: bool = False,
 ) -> dict[str, Any]:
-    """Render the scene from diagnostic cameras (4 corners + top-down bird view).
+    """Render the scene from diagnostic cameras (2 diagonal + top-down views).
 
     This is an **internal** helper — NOT exposed as an MCP tool.  It is
     called by the ``scene_observe`` graph node after scene-mutating tools.
 
     Returns a dict with keys:
         success, scene_bbox, cameras (list of per-camera dicts with
-        camera_name, location, filepath, image_url), and composite_path.
+        camera_name, location, filepath, image_url), and image_urls.
     """
     command_sender = send_blender_command
     if command_sender is None:
@@ -190,6 +434,18 @@ def update_scene_cameras(
     center = aabb["center"]
     dimensions = aabb["dimensions"]
     distance = _fov_aware_distance(dimensions)
+    object_names = [
+        name
+        for name in aabb.get("object_names", [])
+        if isinstance(name, str) and name.strip()
+    ]
+
+    excluded_names = aabb.get("excluded_object_names")
+    if isinstance(excluded_names, list) and excluded_names:
+        logger.info(
+            "Scene camera bbox outlier trim applied: excluded=%s",
+            excluded_names,
+        )
 
     # 2. Place cameras and render
     cameras: list[dict[str, Any]] = []
@@ -198,29 +454,45 @@ def update_scene_cameras(
     for cam_name, azimuth, elevation in _SCENE_CAMERA_VIEW_CONFIGS:
         location = _spherical_to_cartesian(center, distance, azimuth, elevation)
 
-        temp_path = os.path.join(
-            tempfile.gettempdir(),
-            f"scene_cam_{cam_name}_{os.getpid()}_{int(time.time() * 1000)}.png",
-        )
-        result = command_sender(
-            "camera_observe",
-            {
-                "object_names": [],
-                "mode": "single_view",
-                "focal_length": _SCENE_CAMERA_FOCAL_MM,
-                "azimuth": azimuth,
-                "elevation": elevation,
-                "reuse_cameras": True,
-                "camera_name": cam_name,
-                "camera_kind": "scene_level",
-                "filepath": temp_path,
-            },
-        )
-        if not result or not result.get("success", False):
-            logger.warning("Scene camera %s render failed: %s", cam_name, result)
+        try:
+            if use_direct_pose:
+                result = _render_scene_camera_with_pose(
+                    command_sender=command_sender,
+                    cam_name=cam_name,
+                    location=location,
+                    center=center,
+                    object_names=object_names,
+                )
+                if result is None:
+                    result = _render_scene_camera_with_observe(
+                        command_sender=command_sender,
+                        cam_name=cam_name,
+                        azimuth=azimuth,
+                        elevation=elevation,
+                        object_names=object_names,
+                    )
+            else:
+                result = _render_scene_camera_with_observe(
+                    command_sender=command_sender,
+                    cam_name=cam_name,
+                    azimuth=azimuth,
+                    elevation=elevation,
+                    object_names=object_names,
+                )
+        except Exception as exc:
+            logger.warning("Scene camera %s render raised error: %s", cam_name, exc)
+            result = None
+
+        if result is None:
             continue
 
-        filepath = result.get("filepath", temp_path)
+        filepath = result.get("filepath")
+        if not isinstance(filepath, str) or not filepath:
+            logger.warning("Scene camera %s returned invalid filepath: %s", cam_name, result)
+            continue
+        if not os.path.exists(filepath):
+            logger.warning("Scene camera %s output file missing: %s", cam_name, filepath)
+            continue
         image_url = process_and_save_render(filepath, thread_id, cam_name, logger=logger)
         try:
             os.remove(filepath)
@@ -230,6 +502,7 @@ def update_scene_cameras(
         cam_entry: dict[str, Any] = {
             "camera_name": cam_name,
             "location": location,
+            "rotation_euler": _look_at_rotation_euler(location, center),
             "focal_mm": _SCENE_CAMERA_FOCAL_MM,
             "azimuth": azimuth,
             "elevation": elevation,
@@ -251,14 +524,22 @@ def update_scene_cameras(
 
 
 def observe_scene_global(ctx: Context) -> CallToolResult:
-    """Capture scene-wide 5-view observation using diagnostic cameras.
+    """Capture scene-wide 3-view observation using diagnostic cameras.
 
     Use this when the agent needs a global understanding of composition, or when
     local renders appear unreliable (for example, blank/black outputs).
     """
     thread_id = _extract_thread_id(ctx)
     try:
-        result = update_scene_cameras(thread_id=thread_id)
+        try:
+            result = update_scene_cameras(
+                thread_id=thread_id,
+                use_direct_pose=True,
+            )
+        except TypeError as exc:
+            if "use_direct_pose" not in str(exc):
+                raise
+            result = update_scene_cameras(thread_id=thread_id)
     except Exception as exc:
         logger.error("Error running global scene observation: %s", str(exc))
         raise Exception(f"Global scene observation failed: {str(exc)}")

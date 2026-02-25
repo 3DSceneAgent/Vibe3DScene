@@ -92,12 +92,10 @@ _VLM_PROVIDER_DISPLAY_NAMES = {
 }
 _SCENE_LEVEL_RENDER_CAMERA_CONFIGS: tuple[tuple[str, float, float], ...] = (
     ("SceneCamera_NE", 45.0, 30.0),
-    ("SceneCamera_NW", 135.0, 30.0),
-    ("SceneCamera_SE", -45.0, 30.0),
     ("SceneCamera_SW", -135.0, 30.0),
     ("SceneCamera_TopDown", 0.0, 89.0),
 )
-_SCENE_LEVEL_RENDER_FOCAL_MM = 50.0
+_SCENE_LEVEL_RENDER_FOCAL_MM = 42.0
 _DEFAULT_API_LOG_PATH = Path(__file__).resolve().parents[2] / "logs" / "api_server.log"
 _API_LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
 
@@ -1278,6 +1276,75 @@ def build_headless_diagnostics(
     return payload
 
 
+async def _execute_headless_export_code(
+    *,
+    thread_id: str,
+    export_code: str,
+    timeout_seconds: float,
+    timeout_error_message: str,
+    timeout_event_name: str,
+    failed_event_name: str,
+    ok_event_name: str,
+    restart_on_timeout: bool = False,
+) -> None:
+    manager = get_session_manager()
+    session = manager.ensure(thread_id, "headless")
+    request_id = new_request_id(thread_id)
+    start_time = start_timer()
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                send_blender_command_sync,
+                "execute_code",
+                {"code": export_code},
+                thread_id,
+            ),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError as exc:
+        elapsed_value = elapsed_ms(start_time)
+        diagnostics = build_headless_diagnostics(
+            session=session,
+            request_id=request_id,
+            elapsed_ms_value=elapsed_value,
+            status="timeout",
+            target_ms=int(timeout_seconds * 1000),
+        )
+        log_event("error", timeout_event_name, diagnostics)
+        if restart_on_timeout:
+            _restart_headless_session_after_timeout(thread_id)
+        raise HTTPException(
+            status_code=504,
+            detail={"error": timeout_error_message, **diagnostics},
+        ) from exc
+    except SessionResourceError as exc:
+        raise HTTPException(status_code=503, detail=exc.detail) from exc
+    except Exception as exc:
+        elapsed_value = elapsed_ms(start_time)
+        diagnostics = build_headless_diagnostics(
+            session=session,
+            request_id=request_id,
+            elapsed_ms_value=elapsed_value,
+            status="error",
+            target_ms=int(timeout_seconds * 1000),
+        )
+        log_event("error", failed_event_name, {**diagnostics, "error": str(exc)})
+        raise HTTPException(
+            status_code=500,
+            detail={"error": str(exc), **diagnostics},
+        ) from exc
+    else:
+        elapsed_value = elapsed_ms(start_time)
+        diagnostics = build_headless_diagnostics(
+            session=session,
+            request_id=request_id,
+            elapsed_ms_value=elapsed_value,
+            status="ok",
+            target_ms=int(timeout_seconds * 1000),
+        )
+        log_event("info", ok_event_name, diagnostics)
+
+
 async def _render_scene_level_views(
     *,
     thread_id: str,
@@ -1285,7 +1352,7 @@ async def _render_scene_level_views(
     request_timeout_seconds: float | None,
 ) -> list[dict[str, str]]:
     """
-    Render canonical 5 scene-level viewpoints (NE/NW/SE/SW + top-down bird view).
+    Render canonical 3 scene-level viewpoints (NE/SW + top-down bird view).
 
     This path does not depend on pre-existing camera objects in scene info.
     It uses camera_observe in single_view mode and labels outputs with
@@ -2441,68 +2508,26 @@ async def get_scene_gltf(thread_id: str, request: Request):
             tempfile.gettempdir(),
             f"scene_{thread_id}_{int(time.time() * 1000)}.glb"
         )
+        # include the lights in the exportation
         export_code = (
             "import bpy\n"
             f"bpy.ops.export_scene.gltf(filepath=r\"{temp_path}\", "
-            "export_format='GLB', export_apply=True)\n"
+            "export_format='GLB', export_apply=True, export_lights=True)\n"
         )
         if settings.blender_mode == "headless":
             manager = get_session_manager()
             session = manager.ensure(thread_id, "headless")
             request_timeout_seconds = _headless_timeout_seconds_for_session(settings, session)
-            request_id = new_request_id(thread_id)
-            start_time = start_timer()
-            try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(
-                        send_blender_command_sync,
-                        "execute_code",
-                        {"code": export_code},
-                        thread_id,
-                    ),
-                    timeout=request_timeout_seconds,
-                )
-            except asyncio.TimeoutError as exc:
-                elapsed_value = elapsed_ms(start_time)
-                diagnostics = build_headless_diagnostics(
-                    session=session,
-                    request_id=request_id,
-                    elapsed_ms_value=elapsed_value,
-                    status="timeout",
-                    target_ms=int(request_timeout_seconds * 1000),
-                )
-                log_event("error", "headless_gltf_timeout", diagnostics)
-                _restart_headless_session_after_timeout(thread_id)
-                raise HTTPException(
-                    status_code=504,
-                    detail={"error": "Headless GLTF export timed out.", **diagnostics},
-                ) from exc
-            except SessionResourceError as exc:
-                raise HTTPException(status_code=503, detail=exc.detail) from exc
-            except Exception as exc:
-                elapsed_value = elapsed_ms(start_time)
-                diagnostics = build_headless_diagnostics(
-                    session=session,
-                    request_id=request_id,
-                    elapsed_ms_value=elapsed_value,
-                    status="error",
-                    target_ms=int(request_timeout_seconds * 1000),
-                )
-                log_event("error", "headless_gltf_failed", {**diagnostics, "error": str(exc)})
-                raise HTTPException(
-                    status_code=500,
-                    detail={"error": str(exc), **diagnostics},
-                ) from exc
-            else:
-                elapsed_value = elapsed_ms(start_time)
-                diagnostics = build_headless_diagnostics(
-                    session=session,
-                    request_id=request_id,
-                    elapsed_ms_value=elapsed_value,
-                    status="ok",
-                    target_ms=int(request_timeout_seconds * 1000),
-                )
-                log_event("info", "headless_gltf_ok", diagnostics)
+            await _execute_headless_export_code(
+                thread_id=thread_id,
+                export_code=export_code,
+                timeout_seconds=request_timeout_seconds,
+                timeout_error_message="Headless GLTF export timed out.",
+                timeout_event_name="headless_gltf_timeout",
+                failed_event_name="headless_gltf_failed",
+                ok_event_name="headless_gltf_ok",
+                restart_on_timeout=True,
+            )
         else:
             await asyncio.to_thread(send_blender_command_sync, "execute_code", {"code": export_code}, thread_id)
 
@@ -2602,60 +2627,16 @@ async def get_scene_blend(thread_id: str, request: Request):
             f"bpy.ops.wm.save_as_mainfile(filepath=r\"{temp_path}\", copy=True)\n"
         )
         if settings.blender_mode == "headless":
-            manager = get_session_manager()
-            session = manager.ensure(thread_id, "headless")
-            request_id = new_request_id(thread_id)
-            start_time = start_timer()
-            try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(
-                        send_blender_command_sync,
-                        "execute_code",
-                        {"code": export_code},
-                        thread_id,
-                    ),
-                    timeout=settings.headless_request_timeout_seconds,
-                )
-            except asyncio.TimeoutError as exc:
-                elapsed_value = elapsed_ms(start_time)
-                diagnostics = build_headless_diagnostics(
-                    session=session,
-                    request_id=request_id,
-                    elapsed_ms_value=elapsed_value,
-                    status="timeout",
-                    target_ms=settings.headless_request_timeout_seconds * 1000,
-                )
-                log_event("error", "headless_blend_timeout", diagnostics)
-                raise HTTPException(
-                    status_code=504,
-                    detail={"error": "Headless BLEND export timed out.", **diagnostics},
-                ) from exc
-            except SessionResourceError as exc:
-                raise HTTPException(status_code=503, detail=exc.detail) from exc
-            except Exception as exc:
-                elapsed_value = elapsed_ms(start_time)
-                diagnostics = build_headless_diagnostics(
-                    session=session,
-                    request_id=request_id,
-                    elapsed_ms_value=elapsed_value,
-                    status="error",
-                    target_ms=settings.headless_request_timeout_seconds * 1000,
-                )
-                log_event("error", "headless_blend_failed", {**diagnostics, "error": str(exc)})
-                raise HTTPException(
-                    status_code=500,
-                    detail={"error": str(exc), **diagnostics},
-                ) from exc
-            else:
-                elapsed_value = elapsed_ms(start_time)
-                diagnostics = build_headless_diagnostics(
-                    session=session,
-                    request_id=request_id,
-                    elapsed_ms_value=elapsed_value,
-                    status="ok",
-                    target_ms=settings.headless_request_timeout_seconds * 1000,
-                )
-                log_event("info", "headless_blend_ok", diagnostics)
+            await _execute_headless_export_code(
+                thread_id=thread_id,
+                export_code=export_code,
+                timeout_seconds=float(settings.headless_request_timeout_seconds),
+                timeout_error_message="Headless BLEND export timed out.",
+                timeout_event_name="headless_blend_timeout",
+                failed_event_name="headless_blend_failed",
+                ok_event_name="headless_blend_ok",
+                restart_on_timeout=False,
+            )
         else:
             await asyncio.to_thread(send_blender_command_sync, "execute_code", {"code": export_code}, thread_id)
 
@@ -3138,13 +3119,17 @@ def _ensure_frontend_client_can_manage_thread(thread_id: str, request_client_id:
     )
 
 
-def _release_thread_runtime(thread_id: str) -> dict[str, Any]:
-    """Release headless runtime resources while keeping thread identity/history intact."""
-    settings = get_settings()
-    coordinator = get_session_coordinator()
-    manager = get_session_manager()
+def _release_headless_runtime_resources(
+    *,
+    thread_id: str,
+    settings: Any,
+    coordinator: Any,
+    manager: Any,
+    result: dict[str, Any],
+    release_meta_when_non_headless_session: bool,
+) -> bool:
     session = manager.get(thread_id)
-    result: dict[str, Any] = {"thread_id": thread_id, "released": False, "cleaned": []}
+    released = False
 
     if session is not None and session.mode == "headless":
         headless_host_snapshot = session.host or settings.blender_host
@@ -3179,8 +3164,10 @@ def _release_thread_runtime(thread_id: str) -> dict[str, Any]:
 
         manager.remove(thread_id)
         result["cleaned"].append("session_removed")
-        result["released"] = True
-    else:
+        released = True
+        return released
+
+    if session is None or release_meta_when_non_headless_session:
         session_meta = coordinator.get_session_meta(thread_id) or {}
         meta_headless_host = str(session_meta.get("host") or settings.blender_host)
         meta_headless_port = _safe_int_optional(session_meta.get("blender_port"))
@@ -3193,7 +3180,7 @@ def _release_thread_runtime(thread_id: str) -> dict[str, Any]:
                 port=meta_headless_port,
             )
             result["cleaned"].append(f"headless_port:{meta_headless_port}")
-            result["released"] = True
+            released = True
         if meta_mcp_port is not None:
             coordinator.release_port(
                 host=meta_mcp_host,
@@ -3201,7 +3188,24 @@ def _release_thread_runtime(thread_id: str) -> dict[str, Any]:
                 port=meta_mcp_port,
             )
             result["cleaned"].append(f"mcp_port:{meta_mcp_port}")
-            result["released"] = True
+            released = True
+    return released
+
+
+def _release_thread_runtime(thread_id: str) -> dict[str, Any]:
+    """Release headless runtime resources while keeping thread identity/history intact."""
+    settings = get_settings()
+    coordinator = get_session_coordinator()
+    manager = get_session_manager()
+    result: dict[str, Any] = {"thread_id": thread_id, "released": False, "cleaned": []}
+    result["released"] = _release_headless_runtime_resources(
+        thread_id=thread_id,
+        settings=settings,
+        coordinator=coordinator,
+        manager=manager,
+        result=result,
+        release_meta_when_non_headless_session=True,
+    )
 
     if thread_id in _agent_graphs_by_thread:
         del _agent_graphs_by_thread[thread_id]
@@ -3278,75 +3282,15 @@ def _teardown_thread_session(thread_id: str) -> dict[str, Any]:
     settings = get_settings()
     coordinator = get_session_coordinator()
     manager = get_session_manager()
-    session = manager.get(thread_id)
     result: dict[str, Any] = {"thread_id": thread_id, "cleaned": []}
-
-    def _safe_int(raw: object) -> int | None:
-        try:
-            if raw is None or raw == "":
-                return None
-            return int(raw)
-        except (TypeError, ValueError):
-            return None
-
-    if session is not None and session.mode == "headless":
-        headless_host_snapshot = session.host or settings.blender_host
-        headless_port_snapshot = session.port
-        mcp_host_snapshot = session.mcp_host or os.getenv("BLENDER_MCP_HOST", "localhost")
-        mcp_port_snapshot = session.mcp_port
-
-        # Persist blend before teardown (best-effort).
-        try:
-            manager.persist_session_blend(thread_id)
-            result["cleaned"].append("blend_persisted")
-        except Exception:
-            pass
-
-        # Terminate Blender & MCP processes.
-        manager.terminate_session_processes(thread_id, timeout=5.0)
-        result["cleaned"].append("processes_terminated")
-
-        # Release headless port.
-        coordinator.release_port(
-            host=headless_host_snapshot,
-            kind="headless",
-            port=headless_port_snapshot,
-        )
-        if headless_port_snapshot:
-            result["cleaned"].append(f"headless_port:{headless_port_snapshot}")
-
-        # Release MCP port.
-        coordinator.release_port(
-            host=mcp_host_snapshot,
-            kind="mcp",
-            port=mcp_port_snapshot,
-        )
-        if mcp_port_snapshot:
-            result["cleaned"].append(f"mcp_port:{mcp_port_snapshot}")
-
-        # Remove from in-memory session manager.
-        manager.remove(thread_id)
-        result["cleaned"].append("session_removed")
-    elif session is None:
-        session_meta = coordinator.get_session_meta(thread_id) or {}
-        meta_headless_host = str(session_meta.get("host") or settings.blender_host)
-        meta_headless_port = _safe_int(session_meta.get("blender_port"))
-        meta_mcp_host = str(session_meta.get("mcp_host") or os.getenv("BLENDER_MCP_HOST", "localhost"))
-        meta_mcp_port = _safe_int(session_meta.get("mcp_port"))
-        if meta_headless_port is not None:
-            coordinator.release_port(
-                host=meta_headless_host,
-                kind="headless",
-                port=meta_headless_port,
-            )
-            result["cleaned"].append(f"headless_port:{meta_headless_port}")
-        if meta_mcp_port is not None:
-            coordinator.release_port(
-                host=meta_mcp_host,
-                kind="mcp",
-                port=meta_mcp_port,
-            )
-            result["cleaned"].append(f"mcp_port:{meta_mcp_port}")
+    _release_headless_runtime_resources(
+        thread_id=thread_id,
+        settings=settings,
+        coordinator=coordinator,
+        manager=manager,
+        result=result,
+        release_meta_when_non_headless_session=False,
+    )
 
     # Clean up cached agent graph (frees MCP client references).
     if thread_id in _agent_graphs_by_thread:

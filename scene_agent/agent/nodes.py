@@ -50,14 +50,6 @@ SCENE_MUTATING_TOOLS: frozenset[str] = frozenset({
     "undo_last_snapshot",
 })
 
-OBJECT_LEVEL_TOOLS: frozenset[str] = frozenset({
-    "camera_act",
-    "camera_observe",
-    "camera_set_pose",
-    "render_from_camera",
-    "render_from_objects",
-})
-
 # Fixed message IDs for internal visual context messages.
 # add_messages replaces by ID, so these slots hold at most one message each —
 # no unbounded accumulation across turns.
@@ -661,7 +653,7 @@ def update_memory_node(state: AgentState) -> Dict[str, Any]:
 
 
 def scene_observe_node(state: AgentState) -> Dict[str, Any]:
-    """Auto-render 5 scene-level cameras after scene-mutating tool calls.
+    """Auto-render 3 scene-level cameras after scene-mutating tool calls.
 
     This node fires only when the latest tool batch contains a scene-mutating
     tool (import, generate, execute_blender_code, etc.).  For object-level
@@ -710,10 +702,20 @@ def scene_observe_node(state: AgentState) -> Dict[str, Any]:
     try:
         from mcp_server.tools.multimodal.camera_tools import update_scene_cameras
 
-        result = update_scene_cameras(
-            thread_id=thread_id,
-            send_blender_command=send_blender_command,
-        )
+        try:
+            result = update_scene_cameras(
+                thread_id=thread_id,
+                send_blender_command=send_blender_command,
+                use_direct_pose=True,
+            )
+        except TypeError as exc:
+            if "use_direct_pose" not in str(exc):
+                raise
+            # Backward-compatible fallback for older test doubles.
+            result = update_scene_cameras(
+                thread_id=thread_id,
+                send_blender_command=send_blender_command,
+            )
     except Exception as exc:
         logger = _get_logger()
         logger.warning("scene_observe_node: update_scene_cameras failed: %s", exc)
@@ -736,7 +738,7 @@ def scene_observe_node(state: AgentState) -> Dict[str, Any]:
         {
             "type": "text",
             "text": (
-                "Auto scene observation — 5-view render after scene mutation (4 corners + top-down bird view). "
+                "Auto scene observation — 3-view render after scene mutation (2 diagonal views + top-down bird view). "
                 "Review these views to assess overall composition, scale, and layout."
             ),
         },

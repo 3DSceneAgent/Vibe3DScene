@@ -493,20 +493,6 @@ def allocate_headless_port_strict(
     raise RuntimeError("No available headless port in configured range.")
 
 
-def allocate_mcp_port(
-    session_id: str,
-    base_port: int,
-    range_size: int,
-    used_ports: set[int] | None = None,
-) -> int:
-    return allocate_headless_port(
-        session_id,
-        base_port,
-        range_size,
-        used_ports=used_ports,
-    )
-
-
 def allocate_mcp_port_strict(
     session_id: str,
     base_port: int,

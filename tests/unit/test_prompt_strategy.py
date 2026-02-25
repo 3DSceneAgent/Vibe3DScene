@@ -55,6 +55,7 @@ def test_get_full_system_prompt_preserves_legacy_strategy_guidance():
 
     required_phrases = [
         "0. Scene grounding first (NEVER skip):",
+        "Global-to-local order is mandatory",
         "avoid fully sealed rooms/containers",
         "stage as an open shell first",
         "If scene-level views cannot see primary objects because of enclosure",
@@ -133,6 +134,7 @@ def test_mcp_strategy_skips_runtime_probe_with_explicit_tool_list(monkeypatch):
     )
 
     assert "3D Asset Retrieval Database" in prompt
+    assert "Global-first modeling principle" in prompt
 
 
 def test_strategy_includes_blend_import_guidance_for_infinigen():

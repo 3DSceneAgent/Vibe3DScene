@@ -1,6 +1,6 @@
 [submodule "addon"]
 	path = addon
-	url = git@github.com:3DSceneAgent/blender-mcp-vision.git
+	url = https://github.com/3DSceneAgent/blender-mcp-vision.git
 [submodule "tool_servers/AssetRetrieval3D"]
 	path = tool_servers/AssetRetrieval3D
 	url = https://github.com/3DSceneAgent/AssetRetrieval3D

@@ -179,21 +179,3 @@ def create_todo(description: str, status: str = "pending") -> TodoItem:
         created_at=datetime.now().isoformat(),
         completed_at=completed_at
     )
-
-
-def update_todo_status(todo: TodoItem, status: str) -> TodoItem:
-    """
-    Update the status of a todo item.
-    
-    Args:
-        todo: The todo to update
-        status: New status
-        
-    Returns:
-        Updated TodoItem
-    """
-    updated = dict(todo)
-    updated["status"] = status
-    if status == "completed":
-        updated["completed_at"] = datetime.now().isoformat()
-    return TodoItem(**updated)

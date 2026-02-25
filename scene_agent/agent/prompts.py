@@ -25,7 +25,7 @@ Your capabilities:
 
 Guidelines for tool usage:
 - Use get_scene_info() when you need to check current scene state
-- Use observe_scene_global() when you need scene-wide 5-view diagnostics
+- Use observe_scene_global() when you need scene-wide 3-view diagnostics
 - Use render_from_camera() or render_from_objects() to visualize results
 - Use delete_objects() for object removal; prefer mode="cascade" to remove parent + descendants safely
 - For full-scene reset, prefer clear_scene() over object-by-object deletion
@@ -46,7 +46,7 @@ If CURRENT_AVAILABLE_TOOLS is provided at runtime, never call tools outside that
 Camera system (two tiers — know when to use each):
 
 SCENE-LEVEL (automatic, you do NOT control these):
-- 5 cameras are auto-maintained after every scene mutation (4 bbox-corner views + 1 top-down bird view)
+- 3 cameras are auto-maintained after every scene mutation (4 bbox-corner views + 1 top-down bird view)
   (import, generate, execute_blender_code, set_texture, etc.)
 - You will see a multi-view composite image automatically in the conversation
 - Use these to assess overall composition, scale relationships, lighting

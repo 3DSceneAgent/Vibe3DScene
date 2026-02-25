@@ -1539,8 +1539,9 @@ a.sidebar-icon-btn {
 }
 
 .scene-renders-panel.has-renders {
-  min-height: 170px;
-  max-height: clamp(170px, 30vh, 340px);
+  height: clamp(170px, 24vh, 220px);
+  min-height: clamp(170px, 24vh, 220px);
+  max-height: clamp(170px, 24vh, 220px);
 }
 
 .scene-renders-panel.is-empty {
@@ -1562,7 +1563,7 @@ a.sidebar-icon-btn {
 
 .render-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   align-content: start;
 }
@@ -2108,7 +2109,7 @@ a.sidebar-icon-btn {
   }
 
   .render-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .composer-top-row {

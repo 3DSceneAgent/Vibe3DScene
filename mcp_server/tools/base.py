@@ -153,23 +153,45 @@ def delete_objects(
         return f"Error deleting objects: {str(exc)}"
 
 
-def execute_blender_code(ctx: Context, code: str) -> str:
-    """Execute arbitrary Python code in Blender."""
+def execute_blender_code(
+    ctx: Context,
+    code: str,
+    safe_mode: bool = True,
+    rollback_on_guard_fail: bool = True,
+    validate_scene: bool = True,
+) -> str:
+    """Execute Python code in Blender with transactional safeguards."""
     try:
         blender = runtime.get_blender_connection(logger)
-        result = blender.send_command("execute_code", {"code": code})
+        result = blender.send_command(
+            "execute_code",
+            {
+                "code": code,
+                "safe_mode": safe_mode,
+                "rollback_on_guard_fail": rollback_on_guard_fail,
+                "validate_scene": validate_scene,
+            },
+        )
+        transaction_json = json.dumps(result, indent=2, ensure_ascii=False)
         return (
             "Status: success\n"
+            "Mode: execute_code(transactional)\n"
+            f"Options: safe_mode={safe_mode}, validate_scene={validate_scene}, rollback_on_guard_fail={rollback_on_guard_fail}\n"
             "Script:\n"
             "```python\n"
             f"{code}\n"
             "```\n"
-            f"Result: {result.get('result', '')}"
+            "Transaction:\n"
+            "```json\n"
+            f"{transaction_json}\n"
+            "```"
         )
     except Exception as exc:
         logger.error("Error executing code: %s", str(exc))
         return (
             "Status: error\n"
+            "Mode: execute_code(transactional)\n"
+            f"Options: safe_mode={safe_mode}, validate_scene={validate_scene}, rollback_on_guard_fail={rollback_on_guard_fail}\n"
             "Script:\n"
             "```python\n"
             f"{code}\n"

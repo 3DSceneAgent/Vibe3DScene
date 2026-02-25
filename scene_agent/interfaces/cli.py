@@ -8,10 +8,7 @@ import json
 import ast
 from rich.console import Console
 from rich.panel import Panel
-from rich.markdown import Markdown
 from rich.table import Table
-from rich.live import Live
-from rich.text import Text
 from langchain_core.messages import HumanMessage
 
 from scene_agent.agent.graph import create_agent_graph
@@ -189,7 +186,6 @@ async def run_cli():
             console.print("\n[bold blue]Agent:[/bold blue]")
             
             displayed_content = set()  # Track what we've already displayed
-            response_buffer = []  # Buffer for streaming text
             
             async for event in app.astream(
                 {"messages": [HumanMessage(content=user_input)]},

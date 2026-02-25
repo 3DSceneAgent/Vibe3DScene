@@ -3,8 +3,7 @@ Base VLM provider interface.
 Abstract class for different vision-language model providers.
 """
 from abc import ABC, abstractmethod
-from typing import Any, List
-from langchain_core.messages import BaseMessage
+from typing import Any
 
 
 class BaseVLMProvider(ABC):
