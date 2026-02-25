@@ -2,11 +2,11 @@
 Agent state definitions with LangGraph best practices.
 Uses TypedDict with Annotated reducers for proper state management.
 """
-from typing import TypedDict, Annotated, Sequence, NotRequired
+from typing import Any, Literal, NotRequired, Sequence, TypedDict, Annotated
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
-from operator import add
 from datetime import datetime
+from uuid import uuid4
 
 
 class TodoItem(TypedDict):
@@ -18,25 +18,7 @@ class TodoItem(TypedDict):
     completed_at: str | None
 
 
-class ReferenceImageInfo(TypedDict):
-    id: str
-    thread_id: str
-    filename: str
-    content_type: str
-    size_bytes: int
-    sha256: str
-    stored_path: str
-    uploaded_at: str
-
-
-class DiagnosticInfo(TypedDict):
-    request_id: str
-    thread_id: str
-    session_id: str | None
-    process_id: int | None
-    log_path: str | None
-    elapsed_ms: int
-    status: str
+TaskMode = Literal["conversation_mode", "single_action_mode", "plan_mode"]
 
 
 def merge_todos(existing: list[TodoItem], new: list[TodoItem]) -> list[TodoItem]:
@@ -56,19 +38,32 @@ def merge_todos(existing: list[TodoItem], new: list[TodoItem]) -> list[TodoItem]
     return list(todo_dict.values())
 
 
-def merge_reference_images(
-    existing: list[ReferenceImageInfo],
-    new: list[ReferenceImageInfo]
-) -> list[ReferenceImageInfo]:
-    image_map = {image["id"]: image for image in existing}
-    for image in new:
-        image_map[image["id"]] = image
-    return list(image_map.values())
+def replace_mapping(existing: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    """Replace mapping state with the latest payload."""
+    _ = existing
+    if not isinstance(new, dict):
+        return {}
+    return dict(new)
 
 
-def merge_dicts(existing: dict, new: dict) -> dict:
-    """Merge two dictionaries, with new values overwriting existing ones"""
-    return {**existing, **new}
+def merge_unique_strings(existing: list[str], new: list[str]) -> list[str]:
+    """
+    Merge string lists with stable order and de-duplication.
+    """
+    merged: list[str] = []
+    seen: set[str] = set()
+    for source in (existing, new):
+        if not isinstance(source, list):
+            continue
+        for item in source:
+            if not isinstance(item, str):
+                continue
+            value = item.strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            merged.append(value)
+    return merged
 
 
 class AgentState(TypedDict):
@@ -78,18 +73,21 @@ class AgentState(TypedDict):
     Fields:
         messages: Conversation history with automatic message accumulation
         scene_objects: Dict of objects in the scene {name: {position, size, type, bbox}}
-        persistent_cameras: List of camera names that should be tracked
-        camera_renderings: Dict of {camera_name: [rendering_data]}
+        persistent_cameras: List of camera names seen in scene-level observe
         todos: List of todo items for task tracking
-        reference_images: List of reference image metadata for verification
-        diagnostics: Diagnostic metadata keyed by request id
         thread_id: Conversation/session identifier
         enabled_tool_names: Optional runtime MCP tool allow-list for this request
         last_render_path: Latest render file path from tools
         last_verified_path: Latest render path verified by VLM
-        tool_round_count: Number of tool batches executed in current request loop
+        tool_round_count: Total tool batches executed for this thread graph state
+        request_tool_batches: Tool batches executed in this request run
+        request_agent_turns: Agent turns executed in this request run
+        max_request_tool_batches: Request-level tool batch budget
+        max_request_agent_turns: Request-level agent turn budget
+        request_stop_reason: Budget/control stop reason for this request
         last_tool_batch_names: Tool names observed in latest tool batch
-        agent_decision: Structured decision payload from agent responses
+        task_mode: Routed workflow mode for this request
+        task_intent: Routed intent label for this request
         todo_check_gate: Runtime gate decision for whether to run todo_check
         todo_check: Latest todo_check result payload
         last_todo_check_round: Tool round index when todo_check last ran
@@ -97,41 +95,36 @@ class AgentState(TypedDict):
         stagnation_count: Consecutive todo_check rounds without todo status change
         verify_forced_recovery: Whether verify node forced hard-recovery tool calls
         catastrophic_recovery_attempts: Consecutive catastrophic hard-recovery attempts
-        current_task: Description of current user request
-        iteration_count: Number of agent iterations
-        last_error: Last error message if any
+        workflow: Final workflow metadata from finalize node
     """
     # Messages with built-in reducer for proper message accumulation
     messages: Annotated[Sequence[BaseMessage], add_messages]
-    
-    # Scene objects - merges dicts, allowing incremental updates
-    scene_objects: Annotated[dict, merge_dicts]
-    
-    # Persistent cameras - uses add operator for list accumulation
-    persistent_cameras: Annotated[list[str], add]
-    
-    # Camera renderings - merge strategy for dict updates
-    camera_renderings: Annotated[dict, merge_dicts]
-    
-    # Todo tracking - merge by id for task management
-    todos: Annotated[list[TodoItem], merge_todos]
-
-    # Reference images - merge by id
-    reference_images: Annotated[list[ReferenceImageInfo], merge_reference_images]
-
-    # Diagnostics - merge by key
-    diagnostics: Annotated[dict, merge_dicts]
 
     # Session identifier
     thread_id: str
     enabled_tool_names: NotRequired[list[str] | None]
+    task_mode: NotRequired[TaskMode]
+    task_intent: NotRequired[str]
+    tool_policy: NotRequired[str]
 
     # Verification tracking
-    last_render_path: str | None
-    last_verified_path: str | None
+    last_render_path: NotRequired[str | None]
+    last_verified_path: NotRequired[str | None]
     tool_round_count: NotRequired[int]
+    request_tool_batches: NotRequired[int]
+    request_agent_turns: NotRequired[int]
+    max_request_tool_batches: NotRequired[int]
+    max_request_agent_turns: NotRequired[int]
+    request_stop_reason: NotRequired[str | None]
     last_tool_batch_names: NotRequired[list[str]]
-    agent_decision: dict
+
+    # State collections
+    scene_objects: NotRequired[Annotated[dict[str, Any], replace_mapping]]
+    persistent_cameras: NotRequired[Annotated[list[str], merge_unique_strings]]
+    scene_camera_params: NotRequired[Annotated[dict[str, Any], replace_mapping]]
+    todos: NotRequired[Annotated[list[TodoItem], merge_todos]]
+
+    # Workflow checkpoints
     todo_check_gate: NotRequired[dict]
     todo_check: NotRequired[dict]
     last_todo_check_round: NotRequired[int]
@@ -140,24 +133,14 @@ class AgentState(TypedDict):
     stagnation_count: NotRequired[int]
     verify_forced_recovery: NotRequired[bool]
     catastrophic_recovery_attempts: NotRequired[int]
-    
     # Scene-level camera state — updated by scene_observe_node
-    scene_camera_params: Annotated[dict, merge_dicts]
-    # {"SceneCamera_NE": {"location": [...], "focal_mm": 50.0, "azimuth": 45}, ...}
-
-    last_scene_observe_round: NotRequired[int]
-    # Tool round when scene_observe last rendered
-
     scene_bbox: NotRequired[dict]
     # {"center": [x,y,z], "dimensions": [w,h,d]} — union AABB of all mesh objects
 
     last_render_source: NotRequired[str]
     # "scene_observe" | "agent_camera" — helps verify pick the right prompt
 
-    # Simple fields (last write wins)
-    current_task: str
-    iteration_count: int
-    last_error: str | None
+    workflow: NotRequired[dict[str, Any]]
 
 
 def create_todo(description: str, status: str = "pending") -> TodoItem:
@@ -173,7 +156,7 @@ def create_todo(description: str, status: str = "pending") -> TodoItem:
     """
     completed_at = datetime.now().isoformat() if status == "completed" else None
     return TodoItem(
-        id=f"todo_{datetime.now().timestamp()}",
+        id=f"todo_{uuid4().hex}",
         description=description,
         status=status,
         created_at=datetime.now().isoformat(),

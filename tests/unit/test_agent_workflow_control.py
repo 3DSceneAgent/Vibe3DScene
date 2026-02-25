@@ -15,6 +15,7 @@ from scene_agent.agent.nodes import (
     checkpoint_gate_node,
     finalize_node,
     post_agent_node,
+    route_mode_node,
     scene_observe_node,
     todo_check_node,
 )
@@ -107,6 +108,29 @@ def test_todo_check_blocks_after_stagnation_limit():
     assert result["stagnation_count"] == 2
 
 
+def test_route_mode_node_classifies_conversation_mode_for_simple_qa():
+    result = route_mode_node({"messages": [HumanMessage(content="What is global illumination?")]})
+    assert result["task_mode"] == "conversation_mode"
+    assert result["max_request_tool_batches"] == 0
+
+
+def test_route_mode_node_classifies_single_action_mode_for_single_edit():
+    result = route_mode_node({"messages": [HumanMessage(content="Add a wooden chair to the scene.")]})
+    assert result["task_mode"] == "single_action_mode"
+    assert result["max_request_tool_batches"] == 1
+
+
+def test_route_mode_node_forces_plan_mode_when_unfinished_todos_exist():
+    result = route_mode_node(
+        {
+            "messages": [HumanMessage(content="continue")],
+            "todos": [_todo("todo-1", "Arrange room layout", "in_progress")],
+        }
+    )
+    assert result["task_mode"] == "plan_mode"
+    assert result["task_intent"] == "continue_existing_plan"
+
+
 def test_post_agent_reuses_todo_id_by_description():
     state = {
         "messages": [
@@ -115,7 +139,6 @@ def test_post_agent_reuses_todo_id_by_description():
                     "<todos>\n"
                     "- [completed] Import table\n"
                     "</todos>\n"
-                    '<agent_decision>{"should_call_tools": false}</agent_decision>'
                 )
             )
         ],
@@ -132,7 +155,6 @@ def test_route_after_todo_check_continues_when_finalize_stage_not_terminal():
             "todo_check_gate": {"stage": "finalize"},
             "todo_check": {"status": "continue"},
             "last_render_path": None,
-            "agent_decision": {"should_verify": False},
         }
     )
     assert next_node == "agent"
@@ -144,7 +166,6 @@ def test_route_after_todo_check_routes_blocked_to_recovery_within_grace():
             "todo_check_gate": {"stage": "finalize"},
             "todo_check": {"status": "blocked", "stagnation_count": 2},
             "last_render_path": None,
-            "agent_decision": {"should_verify": False},
         }
     )
     assert next_node == "blocked_recovery"
@@ -156,7 +177,6 @@ def test_route_after_todo_check_finalizes_after_recovery_budget_exhausted():
             "todo_check_gate": {"stage": "finalize"},
             "todo_check": {"status": "blocked", "stagnation_count": 4},
             "last_render_path": None,
-            "agent_decision": {"should_verify": False},
         }
     )
     assert next_node == "finalize"
@@ -168,7 +188,6 @@ def test_route_after_todo_check_finalizes_when_finalize_stage_terminal():
             "todo_check_gate": {"stage": "finalize"},
             "todo_check": {"status": "completed"},
             "last_render_path": None,
-            "agent_decision": {"should_verify": False},
         }
     )
     assert next_node == "finalize"
@@ -280,8 +299,9 @@ def test_route_after_post_agent_retries_once_when_tools_expected_but_missing():
     next_node = _route_after_post_agent(
         {
             "messages": [AIMessage(content="Continuing with tool calls.")],
-            "agent_decision": {"should_call_tools": True},
-            "iteration_count": 1,
+            "task_mode": "plan_mode",
+            "request_agent_turns": 1,
+            "max_request_agent_turns": 8,
         }
     )
     assert next_node == "agent"
@@ -291,8 +311,9 @@ def test_route_after_post_agent_finalizes_after_retry_budget_exhausted():
     next_node = _route_after_post_agent(
         {
             "messages": [AIMessage(content="Continuing with tool calls.")],
-            "agent_decision": {"should_call_tools": True},
-            "iteration_count": 2,
+            "task_mode": "plan_mode",
+            "request_agent_turns": 2,
+            "max_request_agent_turns": 8,
         }
     )
     assert next_node == "checkpoint_finalize"
@@ -301,7 +322,9 @@ def test_route_after_post_agent_finalizes_after_retry_budget_exhausted():
 def test_finalize_node_emits_summary_message():
     result = finalize_node(
         {
-            "agent_decision": {"should_call_tools": False},
+            "task_mode": "plan_mode",
+            "request_agent_turns": 3,
+            "request_tool_batches": 2,
             "todo_check": {
                 "status": "completed",
                 "reason": "all_todos_terminal",
@@ -313,8 +336,8 @@ def test_finalize_node_emits_summary_message():
             "messages": [],
         }
     )
-    assert result["agent_decision"]["workflow_status"] == "finished"
-    assert result["agent_decision"]["finish_reason"] == "todos_completed"
+    assert result["workflow"]["workflow_status"] == "finished"
+    assert result["workflow"]["finish_reason"] == "todos_completed"
     assert "messages" in result
     assert len(result["messages"]) == 1
     assert isinstance(result["messages"][0], AIMessage)
@@ -324,7 +347,7 @@ def test_finalize_node_emits_summary_message():
 def test_finalize_summary_uses_todo_check_counts_for_consistency():
     result = finalize_node(
         {
-            "agent_decision": {"should_call_tools": False},
+            "task_mode": "plan_mode",
             # Historical todo revisions can contain duplicates by description.
             "todos": [
                 _todo("todo-1", "Create cube", "pending"),
@@ -361,7 +384,7 @@ def test_finalize_node_prefers_model_generated_summary_when_available():
     model = _StubFinalizer()
     result = finalize_node(
         {
-            "agent_decision": {"should_call_tools": False},
+            "task_mode": "plan_mode",
             "todo_check": {
                 "status": "blocked",
                 "reason": "todo_progress_stagnant",
@@ -388,7 +411,7 @@ def test_finalize_fallback_does_not_dump_raw_verification_dict_string():
     )
     result = finalize_node(
         {
-            "agent_decision": {"should_call_tools": False},
+            "task_mode": "plan_mode",
             "todo_check": {
                 "status": "blocked",
                 "reason": "todo_progress_stagnant",

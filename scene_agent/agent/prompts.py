@@ -109,18 +109,10 @@ Verification guidance:
   and cannot confirm completion.
 - Do NOT mark a todo as completed until verification confirms "match" for that aspect.
 
-Structured agent decision output (REQUIRED):
-- At the end of every response, include a <agent_decision> JSON block.
-- This block captures your execution reasoning in a structured way:
-  - should_call_tools: true/false
-  - tool_plan: list of tool names you intend to call next (empty if none)
-  - scene_plan: short, concrete plan for scene construction or edits
-  - visual_issues_addressed: list of issues from last verification you addressed this round
-  - next_focus_objects: list of objects to inspect with object-level cameras next
-- Keep the JSON minimal and valid. Do not wrap it in markdown.
-
-Example:
-<agent_decision>{"should_call_tools": true, "tool_plan": ["get_scene_info", "render_from_objects"], "scene_plan": "Check current scene, then render table to verify placement.", "visual_issues_addressed": ["table was floating above ground"], "next_focus_objects": ["coffee_cup"]}</agent_decision>
+Execution behavior:
+- Use concise natural-language responses.
+- Do not emit XML/JSON control wrappers (for example <agent_decision> tags).
+- If no safe/useful tool action is needed, explain clearly and stop.
 """
 
 def get_full_system_prompt(available_tool_names: Iterable[str] | None = None) -> str:

@@ -25,6 +25,7 @@ from scene_agent.agent.nodes import (
     checkpoint_gate_node,
     finalize_node,
     post_agent_node,
+    route_mode_node,
     scene_observe_node,
     todo_check_node,
     update_memory_node,
@@ -77,18 +78,55 @@ def _message_has_tool_calls(message: AIMessage) -> bool:
     return False
 
 
+def _coerce_non_negative_int(value: Any, *, default: int = 0) -> int:
+    if isinstance(value, int) and value >= 0:
+        return value
+    return default
+
+
+def _task_mode(state: AgentState) -> str:
+    raw_mode = state.get("task_mode")
+    if isinstance(raw_mode, str) and raw_mode.strip():
+        return raw_mode.strip()
+    return "plan_mode"
+
+
+def _has_unfinished_todos(state: AgentState) -> bool:
+    todos = state.get("todos")
+    if not isinstance(todos, list):
+        return False
+    for item in todos:
+        if not isinstance(item, dict):
+            continue
+        status = item.get("status")
+        if status in {"pending", "in_progress"}:
+            return True
+    return False
+
+
+def _agent_turn_budget_exhausted(state: AgentState) -> bool:
+    turns = _coerce_non_negative_int(state.get("request_agent_turns"))
+    max_turns = _coerce_non_negative_int(state.get("max_request_agent_turns"), default=-1)
+    return max_turns >= 0 and turns >= max_turns
+
+
 def _route_after_post_agent(state: AgentState) -> Literal["tools", "checkpoint_finalize", "agent"]:
     messages = state.get("messages") or []
     for message in reversed(list(messages)):
         if isinstance(message, AIMessage):
             if _message_has_tool_calls(message):
                 return "tools"
-            decision = state.get("agent_decision")
-            should_call_tools = decision.get("should_call_tools") if isinstance(decision, dict) else None
-            iteration_count = state.get("iteration_count")
-            # If the model explicitly says tools should be called but emitted none,
-            # retry once before finalizing to avoid premature exits.
-            if should_call_tools is True and isinstance(iteration_count, int) and iteration_count < 2:
+
+            mode = _task_mode(state)
+            if mode == "conversation_mode":
+                return "checkpoint_finalize"
+
+            # Retry once for plan mode when no tools were emitted but budget remains.
+            turns = _coerce_non_negative_int(state.get("request_agent_turns"))
+            if mode == "plan_mode" and turns <= 1 and not _agent_turn_budget_exhausted(state):
+                return "agent"
+
+            if _has_unfinished_todos(state) and not _agent_turn_budget_exhausted(state):
                 return "agent"
             return "checkpoint_finalize"
     return "checkpoint_finalize"
@@ -281,9 +319,11 @@ def _should_run_todo_check(state: AgentState) -> bool:
 
 def _route_after_loop_checkpoint(
     state: AgentState,
-) -> Literal["todo_check", "agent"]:
+) -> Literal["todo_check", "agent", "checkpoint_finalize"]:
     if _should_run_todo_check(state):
         return "todo_check"
+    if _agent_turn_budget_exhausted(state):
+        return "checkpoint_finalize"
     return "agent"
 
 
@@ -294,6 +334,8 @@ def _route_after_finalize_checkpoint(state: AgentState) -> Literal["todo_check",
 
 
 def _route_after_todo_check(state: AgentState) -> Literal["finalize", "agent", "blocked_recovery"]:
+    if _agent_turn_budget_exhausted(state):
+        return "finalize"
     gate = state.get("todo_check_gate")
     if isinstance(gate, dict) and gate.get("stage") == "finalize":
         todo_check = state.get("todo_check")
@@ -394,6 +436,7 @@ async def create_agent_graph(
     builder = StateGraph(AgentState)
     
     # Add nodes
+    builder.add_node("route_mode", route_mode_node)
     builder.add_node("agent", call_model)
     builder.add_node("post_agent", post_agent_node)
     builder.add_node(
@@ -433,7 +476,8 @@ async def create_agent_graph(
     )
     
     # Connect nodes
-    builder.add_edge(START, "agent")
+    builder.add_edge(START, "route_mode")
+    builder.add_edge("route_mode", "agent")
 
     # Persist decision/todo after each assistant response, then branch.
     builder.add_edge("agent", "post_agent")

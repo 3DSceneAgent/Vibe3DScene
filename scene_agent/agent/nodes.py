@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any, Dict, Literal
 from urllib.parse import unquote, urlparse
 from langchain_core.messages import ToolMessage, AIMessage, SystemMessage, HumanMessage
-from scene_agent.agent.state import AgentState, TodoItem, create_todo
+from scene_agent.agent.state import AgentState, TaskMode, TodoItem, create_todo
 from scene_agent.config import get_settings
 from scene_agent.memory.scene_memory import SceneMemory
 from scene_agent.memory.reference_image_memory import get_reference_image_memory
@@ -69,6 +69,158 @@ _CATASTROPHIC_RENDER_BLACK_MEAN_THRESHOLD = 4.0
 _CATASTROPHIC_RENDER_WHITE_MEAN_THRESHOLD = 251.0
 _CATASTROPHIC_RECOVERY_MAX_FORCED_ATTEMPTS = 2
 
+MODE_CONVERSATION: TaskMode = "conversation_mode"
+MODE_SINGLE_ACTION: TaskMode = "single_action_mode"
+MODE_PLAN: TaskMode = "plan_mode"
+
+REQUEST_BUDGET_DEFAULTS: dict[TaskMode, dict[str, int]] = {
+    MODE_CONVERSATION: {"max_request_agent_turns": 2, "max_request_tool_batches": 0},
+    MODE_SINGLE_ACTION: {"max_request_agent_turns": 3, "max_request_tool_batches": 1},
+    MODE_PLAN: {"max_request_agent_turns": 8, "max_request_tool_batches": 6},
+}
+
+CONVERSATION_READ_ONLY_TOOLS: frozenset[str] = frozenset(
+    {
+        "get_scene_info",
+        "get_object_info",
+        "observe_scene_global",
+        "camera_observe",
+        "render_from_camera",
+        "render_from_objects",
+        "camera_act",
+        "camera_set_pose",
+    }
+)
+
+_PLAN_INTENT_MARKERS: tuple[str, ...] = (
+    "recreate",
+    "replicate",
+    "match this scene",
+    "rebuild scene",
+    "entire scene",
+    "full scene",
+    "from reference",
+    "according to reference",
+    "layout",
+    "composition",
+    "lighting and materials",
+)
+
+_ACTION_INTENT_MARKERS: tuple[str, ...] = (
+    "add ",
+    "create ",
+    "generate ",
+    "import ",
+    "place ",
+    "move ",
+    "rotate ",
+    "scale ",
+    "delete ",
+    "remove ",
+    "arrange ",
+    "set texture",
+)
+
+_IMAGE_QA_MARKERS: tuple[str, ...] = (
+    "this image",
+    "the image",
+    "in the image",
+    "what is in",
+    "what's in",
+)
+
+
+def _coerce_task_mode(raw_mode: Any) -> TaskMode:
+    if raw_mode in {MODE_CONVERSATION, MODE_SINGLE_ACTION, MODE_PLAN}:
+        return raw_mode
+    return MODE_PLAN
+
+
+def _request_budget(mode: TaskMode) -> dict[str, int]:
+    return dict(REQUEST_BUDGET_DEFAULTS.get(mode, REQUEST_BUDGET_DEFAULTS[MODE_PLAN]))
+
+
+def _unfinished_todo_count(state: AgentState) -> int:
+    todos = _coerce_todos(state.get("todos"))
+    latest = _latest_todos_by_description(todos)
+    effective = list(latest.values()) if latest else todos
+    return sum(1 for todo in effective if todo.get("status") in {"pending", "in_progress"})
+
+
+def _classify_task_mode_from_text(text: str) -> tuple[TaskMode, str]:
+    normalized = " ".join((text or "").strip().lower().split())
+    if not normalized:
+        return MODE_CONVERSATION, "qa"
+
+    if any(marker in normalized for marker in _PLAN_INTENT_MARKERS):
+        return MODE_PLAN, "scene_reconstruction"
+
+    action_hits = sum(1 for marker in _ACTION_INTENT_MARKERS if marker in normalized)
+    if action_hits == 0:
+        if any(marker in normalized for marker in _IMAGE_QA_MARKERS):
+            return MODE_CONVERSATION, "image_qa"
+        return MODE_CONVERSATION, "qa"
+
+    # Multi-action phrasing usually indicates a plan-level workflow.
+    if action_hits >= 2 or " and " in normalized or " then " in normalized:
+        return MODE_PLAN, "multi_step_scene_action"
+
+    return MODE_SINGLE_ACTION, "single_scene_action"
+
+
+def route_mode_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Route each request into one of three modes:
+    - conversation_mode
+    - single_action_mode
+    - plan_mode
+    """
+    latest_user_request = _latest_human_message(state)
+    unfinished_todos = _unfinished_todo_count(state)
+
+    if unfinished_todos > 0:
+        mode: TaskMode = MODE_PLAN
+        intent = "continue_existing_plan"
+    else:
+        mode, intent = _classify_task_mode_from_text(latest_user_request)
+
+    budget = _request_budget(mode)
+    tool_policy = "allow_mutation"
+    if mode == MODE_CONVERSATION:
+        tool_policy = "forbid_mutation"
+    elif mode == MODE_SINGLE_ACTION:
+        tool_policy = "allow_mutation_limited"
+
+    return {
+        "task_mode": mode,
+        "task_intent": intent,
+        "tool_policy": tool_policy,
+        "request_agent_turns": 0,
+        "request_tool_batches": 0,
+        "max_request_agent_turns": budget["max_request_agent_turns"],
+        "max_request_tool_batches": budget["max_request_tool_batches"],
+        "request_stop_reason": None,
+    }
+
+
+def _effective_tool_names_for_state(
+    state: AgentState,
+    tool_names: list[str] | None,
+) -> tuple[list[str] | None, str | None]:
+    if tool_names is None:
+        return None, None
+
+    mode = _coerce_task_mode(state.get("task_mode"))
+    if mode == MODE_CONVERSATION:
+        filtered = [name for name in tool_names if name in CONVERSATION_READ_ONLY_TOOLS]
+        return filtered, "conversation_mode_read_only"
+
+    request_tool_batches = _coerce_non_negative_int(state.get("request_tool_batches"))
+    max_request_tool_batches = _coerce_non_negative_int(state.get("max_request_tool_batches"), default=-1)
+    if max_request_tool_batches >= 0 and request_tool_batches >= max_request_tool_batches:
+        return [], "request_tool_budget_exhausted"
+    return tool_names, None
+
 
 def agent_node(
     state: AgentState,
@@ -88,12 +240,31 @@ def agent_node(
     """
     # Build messages including system prompt
     from scene_agent.agent.prompts import get_full_system_prompt
-    effective_tool_names = _resolve_effective_available_tools(state, available_tool_names)
+    requested_tool_names = _resolve_effective_available_tools(state, available_tool_names)
+    effective_tool_names, tool_policy_reason = _effective_tool_names_for_state(state, requested_tool_names)
 
     messages = [SystemMessage(content=get_full_system_prompt(effective_tool_names))]
     tool_constraints = _build_available_tools_constraint(effective_tool_names)
     if tool_constraints:
         messages.append(SystemMessage(content=tool_constraints))
+    if tool_policy_reason == "conversation_mode_read_only":
+        messages.append(
+            SystemMessage(
+                content=(
+                    "Current mode is conversation_mode. "
+                    "Do not call scene-mutation tools; answer directly unless a read-only check is essential."
+                )
+            )
+        )
+    elif tool_policy_reason == "request_tool_budget_exhausted":
+        messages.append(
+            SystemMessage(
+                content=(
+                    "Tool budget for this request is exhausted. "
+                    "Do not call more tools; provide a concise completion summary."
+                )
+            )
+        )
     messages.extend(state["messages"])
     
     # Invoke the LLM
@@ -113,10 +284,7 @@ def agent_node(
 
 def post_agent_node(state: AgentState) -> Dict[str, Any]:
     """
-    Post-agent node: persist structured control signals after every assistant turn.
-
-    This node runs after each agent response so that decision/todo state is captured
-    even when the response does not include tool calls.
+    Post-agent node: persist todo updates and per-request counters after each assistant turn.
     """
     last_messages = state["messages"][-10:]
     latest_ai_message = _find_last_ai_message(last_messages)
@@ -127,15 +295,14 @@ def post_agent_node(state: AgentState) -> Dict[str, Any]:
         aligned_todos = _align_todo_updates_with_existing(state.get("todos"), todo_updates)
         if aligned_todos:
             result["todos"] = aligned_todos
-        result["agent_decision"] = _extract_agent_decision([latest_ai_message])
-    else:
-        result["agent_decision"] = {}
 
-    current_iteration = state.get("iteration_count")
-    if isinstance(current_iteration, int) and current_iteration >= 0:
-        result["iteration_count"] = current_iteration + 1
-    else:
-        result["iteration_count"] = 1
+    current_turns = _coerce_non_negative_int(state.get("request_agent_turns"))
+    next_turns = current_turns + 1
+    result["request_agent_turns"] = next_turns
+
+    max_turns = _coerce_non_negative_int(state.get("max_request_agent_turns"), default=-1)
+    if max_turns >= 0 and next_turns >= max_turns:
+        result["request_stop_reason"] = "agent_turn_budget_exhausted"
 
     return result
 
@@ -148,66 +315,62 @@ def finalize_node(
     """
     Finalize node: mark workflow-level finish metadata before END.
     """
-    decision = state.get("agent_decision")
-    normalized = dict(decision) if isinstance(decision, dict) else {}
-    normalized["workflow_status"] = "finished"
-
-    todo_check = state.get("todo_check")
-    if isinstance(todo_check, dict):
-        todo_status = todo_check.get("status")
-        if todo_status == "completed":
-            normalized["finish_reason"] = "todos_completed"
-            summary = _compose_finalize_summary(
-                state,
-                normalized,
-                finalizer_model=finalizer_model,
-            )
-            return {"agent_decision": normalized, "messages": [AIMessage(content=summary)]}
-        if todo_status == "blocked":
-            normalized["finish_reason"] = "todo_check_blocked"
-            summary = _compose_finalize_summary(
-                state,
-                normalized,
-                finalizer_model=finalizer_model,
-            )
-            return {"agent_decision": normalized, "messages": [AIMessage(content=summary)]}
-
-    should_call_tools = normalized.get("should_call_tools")
-    if isinstance(should_call_tools, bool):
-        normalized["finish_reason"] = (
-            "tool_calls_exhausted"
-            if not should_call_tools
-            else "model_requested_tools_but_none_emitted"
-        )
-    else:
-        normalized["finish_reason"] = "no_tool_calls"
-
+    workflow = _build_workflow_metadata(state)
     summary = _compose_finalize_summary(
         state,
-        normalized,
+        workflow,
         finalizer_model=finalizer_model,
     )
-    return {"agent_decision": normalized, "messages": [AIMessage(content=summary)]}
+    return {"workflow": workflow, "messages": [AIMessage(content=summary)]}
 
 
 def _compose_finalize_summary(
     state: AgentState,
-    decision: dict[str, Any],
+    workflow: dict[str, Any],
     *,
     finalizer_model: Any | None = None,
 ) -> str:
     generated = _build_finalize_summary_with_model(
         state,
-        decision,
+        workflow,
         finalizer_model=finalizer_model,
     )
     if generated:
         return generated
-    return _build_finalize_summary(state, decision)
+    return _build_finalize_summary(state, workflow)
 
 
-def _build_finalize_summary(state: AgentState, decision: dict[str, Any]) -> str:
-    finish_reason = str(decision.get("finish_reason", "unknown"))
+def _build_workflow_metadata(state: AgentState) -> dict[str, Any]:
+    task_mode = _coerce_task_mode(state.get("task_mode"))
+    finish_reason = "no_tool_calls"
+
+    stop_reason = state.get("request_stop_reason")
+    if isinstance(stop_reason, str) and stop_reason:
+        finish_reason = stop_reason
+
+    todo_check = state.get("todo_check")
+    if isinstance(todo_check, dict):
+        todo_status = todo_check.get("status")
+        if todo_status == "completed":
+            finish_reason = "todos_completed"
+        elif todo_status == "blocked":
+            finish_reason = "todo_check_blocked"
+
+    if finish_reason == "no_tool_calls" and task_mode == MODE_CONVERSATION:
+        finish_reason = "conversation_completed"
+
+    return {
+        "workflow_status": "finished",
+        "finish_reason": finish_reason,
+        "task_mode": task_mode,
+        "task_intent": state.get("task_intent"),
+        "request_agent_turns": _coerce_non_negative_int(state.get("request_agent_turns")),
+        "request_tool_batches": _coerce_non_negative_int(state.get("request_tool_batches")),
+    }
+
+
+def _build_finalize_summary(state: AgentState, workflow: dict[str, Any]) -> str:
+    finish_reason = str(workflow.get("finish_reason", "unknown"))
     todo_counts = _collect_current_todo_counts(state)
     total_todos = todo_counts["total"]
     pending = todo_counts["pending"]
@@ -317,14 +480,14 @@ def _build_finalize_next_action(
 
 def _build_finalize_summary_with_model(
     state: AgentState,
-    decision: dict[str, Any],
+    workflow: dict[str, Any],
     *,
     finalizer_model: Any | None,
 ) -> str | None:
     if finalizer_model is None:
         return None
 
-    summary_payload = _build_finalize_summary_context(state, decision)
+    summary_payload = _build_finalize_summary_context(state, workflow)
     summarize_prompt = (
         "You summarize the final state of a 3D scene-editing workflow.\n"
         "Write concise plain text (no markdown table/code block) using 4 short sections:\n"
@@ -371,7 +534,7 @@ def _build_finalize_summary_with_model(
 
 def _build_finalize_summary_context(
     state: AgentState,
-    decision: dict[str, Any],
+    workflow: dict[str, Any],
 ) -> dict[str, Any]:
     todo_check = state.get("todo_check")
     todo_summary: dict[str, Any] = {}
@@ -389,8 +552,12 @@ def _build_finalize_summary_context(
             todo_summary[key] = todo_check.get(key)
 
     return {
-        "finish_reason": decision.get("finish_reason"),
-        "workflow_status": decision.get("workflow_status"),
+        "finish_reason": workflow.get("finish_reason"),
+        "workflow_status": workflow.get("workflow_status"),
+        "task_mode": workflow.get("task_mode"),
+        "task_intent": workflow.get("task_intent"),
+        "request_agent_turns": workflow.get("request_agent_turns"),
+        "request_tool_batches": workflow.get("request_tool_batches"),
         "latest_user_request": _latest_human_message(state),
         "todo_check": todo_summary,
         "active_todos": _active_todo_context(state),
@@ -622,6 +789,11 @@ def update_memory_node(state: AgentState) -> Dict[str, Any]:
     if latest_tool_batch_names:
         result["last_tool_batch_names"] = latest_tool_batch_names
         result["tool_round_count"] = _coerce_non_negative_int(state.get("tool_round_count")) + 1
+        next_request_batches = _coerce_non_negative_int(state.get("request_tool_batches")) + 1
+        result["request_tool_batches"] = next_request_batches
+        max_request_batches = _coerce_non_negative_int(state.get("max_request_tool_batches"), default=-1)
+        if max_request_batches >= 0 and next_request_batches >= max_request_batches:
+            result["request_stop_reason"] = "tool_batch_budget_exhausted"
 
     for msg in last_messages:
         if isinstance(msg, ToolMessage) and "get_scene_info" in str(msg.name):
@@ -767,8 +939,6 @@ def scene_observe_node(state: AgentState) -> Dict[str, Any]:
                 }
             )
 
-    tool_round = _coerce_non_negative_int(state.get("tool_round_count"))
-
     camera_params: dict = {}
     camera_names: list[str] = []
     for cam_info in cameras:
@@ -795,7 +965,6 @@ def scene_observe_node(state: AgentState) -> Dict[str, Any]:
         "scene_camera_params": camera_params,
         "persistent_cameras": camera_names,
         "scene_bbox": scene_bbox,
-        "last_scene_observe_round": tool_round,
     }
 
 
@@ -900,7 +1069,6 @@ def _run_viewport_scene_observe(
                 }
             )
 
-        tool_round = _coerce_non_negative_int(state.get("tool_round_count"))
         return {
             "messages": [
                 HumanMessage(
@@ -910,7 +1078,6 @@ def _run_viewport_scene_observe(
             ],
             "last_render_path": render_url,
             "last_render_source": "scene_observe",
-            "last_scene_observe_round": tool_round,
         }
     except Exception as exc:
         logger.warning("scene_observe_node: get_viewport_screenshot failed: %s", exc)
@@ -1465,40 +1632,11 @@ def _infer_render_source(message: ToolMessage | None) -> str:
     return "agent_camera"
 
 
-def _extract_agent_decision(messages: list) -> dict[str, Any]:
-    for msg in reversed(messages):
-        if isinstance(msg, AIMessage):
-            content = _message_content_to_text(msg.content)
-            decision = _extract_tagged_json(content, "agent_decision")
-            if isinstance(decision, dict):
-                return decision
-    return {}
-
-
 def _find_last_ai_message(messages: list) -> AIMessage | None:
     for msg in reversed(messages):
         if isinstance(msg, AIMessage):
             return msg
     return None
-
-
-def _extract_tagged_json(text: str, tag: str) -> dict[str, Any] | None:
-    if not text:
-        return None
-    pattern = rf"<{tag}>(.*?)</{tag}>"
-    match = re.search(pattern, text, re.DOTALL)
-    if not match:
-        return None
-    snippet = match.group(1).strip()
-    if not snippet:
-        return None
-    try:
-        parsed = json.loads(snippet)
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
 
 
 def _resolve_render_message_to_data_url(message: ToolMessage) -> str | None:
@@ -2309,16 +2447,6 @@ def _build_verification_guidance_message(
     render_source = verification.get("render_source")
     is_scene_level = isinstance(render_source, str) and render_source == "scene_observe"
     focus_candidates: list[str] = []
-
-    decision = state.get("agent_decision")
-    if isinstance(decision, dict):
-        next_focus = decision.get("next_focus_objects")
-        if isinstance(next_focus, list):
-            for item in next_focus:
-                if isinstance(item, str):
-                    cleaned = item.strip()
-                    if cleaned:
-                        focus_candidates.append(cleaned)
 
     for line in _active_todo_context(state):
         if line not in focus_candidates:
