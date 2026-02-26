@@ -19,12 +19,16 @@ from scene_agent.agent.redis_checkpointer import get_graph_checkpointer
 from scene_agent.agent.nodes import (
     agent_node,
     builder_agent_node,
+    budget_evaluator_node,
+    clarification_node,
+    quality_evaluator_node,
     finalize_node,
     planner_refresh_node,
+    progress_evaluator_node,
     post_agent_node,
     post_builder_node,
     post_verifier_node,
-    route_mode_node,
+    route_mode_llm_node,
     scene_observe_node,
     todo_check_node,
     transition_resolver_node,
@@ -124,63 +128,53 @@ def _agent_turn_budget_exhausted(state: AgentState) -> bool:
     return max_turns >= 0 and turns >= max_turns
 
 
-def _route_after_mode(state: AgentState) -> Literal["agent", "builder_agent"]:
+def _route_after_mode(state: AgentState) -> Literal["clarification", "agent", "builder_agent"]:
+    if bool(state.get("router_need_clarification")):
+        return "clarification"
     if _is_dual_plan_mode(state):
         return "builder_agent"
     return "agent"
 
 
-def _route_after_post_agent(state: AgentState) -> Literal["tools", "checkpoint_finalize", "agent"]:
+def _route_after_post_agent(state: AgentState) -> Literal["tools", "quality_evaluator"]:
     messages = state.get("messages") or []
     for message in reversed(list(messages)):
         if isinstance(message, AIMessage):
             if _message_has_tool_calls(message):
                 return "tools"
-
-            mode = _task_mode(state)
-            if mode == "conversation_mode":
-                return "checkpoint_finalize"
-
-            # Retry once for plan mode when no tools were emitted but budget remains.
-            turns = _coerce_non_negative_int(state.get("request_agent_turns"))
-            if mode == "plan_mode" and turns <= 1 and not _agent_turn_budget_exhausted(state):
-                return "agent"
-
-            if _has_unfinished_todos(state) and not _agent_turn_budget_exhausted(state):
-                return "agent"
-            return "checkpoint_finalize"
-    return "checkpoint_finalize"
+            return "quality_evaluator"
+    return "quality_evaluator"
 
 
 def _route_after_post_builder(
     state: AgentState,
-) -> Literal["tools", "verifier_camera_agent", "checkpoint_finalize"]:
+) -> Literal["tools", "verifier_camera_agent", "quality_evaluator"]:
     messages = state.get("messages") or []
     for message in reversed(list(messages)):
         if isinstance(message, AIMessage):
             if _message_has_tool_calls(message):
                 return "tools"
             if _agent_turn_budget_exhausted(state):
-                return "checkpoint_finalize"
+                return "quality_evaluator"
             return "verifier_camera_agent"
     if _agent_turn_budget_exhausted(state):
-        return "checkpoint_finalize"
+        return "quality_evaluator"
     return "verifier_camera_agent"
 
 
 def _route_after_post_verifier(
     state: AgentState,
-) -> Literal["tools", "verifier_feedback", "checkpoint_finalize"]:
+) -> Literal["tools", "verifier_feedback", "quality_evaluator"]:
     messages = state.get("messages") or []
     for message in reversed(list(messages)):
         if isinstance(message, AIMessage):
             if _message_has_tool_calls(message):
                 return "tools"
             if _agent_turn_budget_exhausted(state):
-                return "checkpoint_finalize"
+                return "quality_evaluator"
             return "verifier_feedback"
     if _agent_turn_budget_exhausted(state):
-        return "checkpoint_finalize"
+        return "quality_evaluator"
     return "verifier_feedback"
 
 
@@ -428,21 +422,26 @@ def _route_after_blocked_recovery_action(
 
 def _route_after_verify(
     state: AgentState,
-) -> Literal["checkpoint_loop", "verifier_camera_agent"]:
-    if _is_dual_plan_mode(state):
-        return "verifier_camera_agent"
-    return "checkpoint_loop"
+) -> Literal["quality_evaluator"]:
+    _ = state
+    return "quality_evaluator"
 
 
 def _route_after_transition_resolver(
     state: AgentState,
-) -> Literal["builder_agent", "planner_refresh", "checkpoint_finalize"]:
+) -> Literal["agent", "builder_agent", "planner_refresh", "checkpoint_finalize"]:
     transition_next = state.get("transition_next")
+    if transition_next == "agent":
+        return "agent"
+    if transition_next == "builder_agent":
+        return "builder_agent"
     if transition_next == "planner_refresh":
         return "planner_refresh"
     if transition_next == "checkpoint_finalize":
         return "checkpoint_finalize"
-    return "builder_agent"
+    if _is_dual_plan_mode(state):
+        return "builder_agent"
+    return "agent"
 
 
 async def create_agent_graph(
@@ -510,9 +509,13 @@ async def create_agent_graph(
 
     def call_verifier_camera_model(state: AgentState) -> dict:
         return verifier_camera_agent_node(state, llm_with_tools, available_tool_names)
+
+    def call_route_mode(state: AgentState) -> dict:
+        return route_mode_llm_node(state, router_model=model)
     
     builder = build_agent_state_graph(
-        route_mode_node=route_mode_node,
+        route_mode_node=call_route_mode,
+        clarification_node=clarification_node,
         agent_node=call_model,
         post_agent_node=post_agent_node,
         builder_agent_node=call_builder_model,
@@ -520,6 +523,9 @@ async def create_agent_graph(
         verifier_camera_agent_node=call_verifier_camera_model,
         post_verifier_node=post_verifier_node,
         verifier_feedback_node=verifier_feedback_node,
+        quality_evaluator_node=quality_evaluator_node,
+        progress_evaluator_node=progress_evaluator_node,
+        budget_evaluator_node=budget_evaluator_node,
         tools_node=ToolNode(
             tools,
             handle_tool_errors=False,
@@ -528,7 +534,6 @@ async def create_agent_graph(
         ),
         update_memory_node=update_memory_node,
         scene_observe_node=scene_observe_node,
-        checkpoint_loop_node=lambda state: checkpoint_gate_node(state, stage="loop"),
         checkpoint_finalize_node=lambda state: checkpoint_gate_node(state, stage="finalize"),
         todo_check_node=todo_check_node,
         verify_node=lambda state: verify_node(
@@ -546,7 +551,6 @@ async def create_agent_graph(
         route_after_post_verifier=_route_after_post_verifier,
         route_after_verify=_route_after_verify,
         route_after_transition_resolver=_route_after_transition_resolver,
-        route_after_loop_checkpoint=_route_after_loop_checkpoint,
         route_after_finalize_checkpoint=_route_after_finalize_checkpoint,
         route_after_todo_check=_route_after_todo_check,
     )

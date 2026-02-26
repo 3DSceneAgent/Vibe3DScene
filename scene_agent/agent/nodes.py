@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Any, Dict, Literal
 from urllib.parse import unquote, urlparse
 from langchain_core.messages import ToolMessage, AIMessage, SystemMessage, HumanMessage
+from pydantic import BaseModel, Field, ValidationError
 from scene_agent.agent.memory_scope import merge_role_private_memory, resolve_memory_profile
 from scene_agent.agent.state import AgentState, TaskMode, TodoItem, create_todo
 from scene_agent.agent.tool_policy import (
@@ -130,6 +131,24 @@ _IMAGE_QA_MARKERS: tuple[str, ...] = (
     "what is in",
     "what's in",
 )
+_ROUTER_MIN_CONFIDENCE = 0.65
+
+
+class RouterDecision(BaseModel):
+    intent: Literal[
+        "qa",
+        "image_qa",
+        "single_scene_action",
+        "scene_reconstruction",
+        "multi_step_scene_action",
+        "continue_existing_plan",
+        "clarification_needed",
+    ]
+    mode: Literal["conversation_mode", "single_action_mode", "plan_mode"]
+    confidence: float = Field(ge=0.0, le=1.0)
+    need_clarification: bool = False
+    clarification_question: str = ""
+    requires_scene_mutation: bool = False
 
 
 def _coerce_task_mode(raw_mode: Any) -> TaskMode:
@@ -202,6 +221,88 @@ def _classify_task_mode_from_text(text: str) -> tuple[TaskMode, str]:
     return MODE_SINGLE_ACTION, "single_scene_action"
 
 
+def _build_router_clarification_question(text: str) -> str:
+    mode_guess, _ = _classify_task_mode_from_text(text)
+    if mode_guess == MODE_PLAN:
+        return (
+            "我需要先确认目标：你是要完整多步重建场景（plan_mode），"
+            "还是只做一个单步修改（single_action_mode）？请明确最终目标和成功标准。"
+        )
+    if mode_guess == MODE_SINGLE_ACTION:
+        return (
+            "请补充这个单步动作的关键约束：目标对象、位置/尺寸、材质或参考图用途，"
+            "以便我准确执行。"
+        )
+    return (
+        "请确认你的意图：是只做问答解释，还是要我对 3D 场景执行修改？"
+        "如果要修改，请描述具体动作。"
+    )
+
+
+def _router_has_images(thread_id: str) -> bool:
+    try:
+        memory = get_reference_image_memory()
+        if hasattr(memory, "list_assets"):
+            return len(memory.list_assets(thread_id)) > 0
+        if hasattr(memory, "list_images"):
+            return len(memory.list_images(thread_id)) > 0
+    except Exception:
+        return False
+    return False
+
+
+def _invoke_router_decision(
+    *,
+    state: AgentState,
+    router_model: Any,
+    latest_user_request: str,
+) -> RouterDecision:
+    thread_id = state.get("thread_id", "default")
+    has_images = _router_has_images(thread_id)
+    unfinished_todos = _unfinished_todo_count(state)
+    topology_hint = state.get("workflow_topology_request") or state.get("workflow_topology") or "auto"
+
+    router_prompt = (
+        "You are a strict workflow router for a 3D scene agent.\n"
+        "Output only structured fields.\n"
+        "Routing modes:\n"
+        "- conversation_mode: QA / explanation / image understanding only.\n"
+        "- single_action_mode: one scene edit expected to finish quickly.\n"
+        "- plan_mode: multi-step scene construction/reconstruction.\n"
+        "If user intent is ambiguous, set need_clarification=true and provide a concise clarification_question.\n"
+        "Return confidence in [0,1]."
+    )
+    router_input = (
+        f"latest_user_request: {latest_user_request}\n"
+        f"thread_id: {thread_id}\n"
+        f"has_uploaded_images: {has_images}\n"
+        f"unfinished_todos_count: {unfinished_todos}\n"
+        f"requested_workflow_topology: {topology_hint}\n"
+    )
+
+    try:
+        llm = router_model.with_config(tags=["nostream"], run_name="route_mode_internal")
+        structured_llm = llm.with_structured_output(RouterDecision)
+        decision_raw = structured_llm.invoke(
+            [
+                SystemMessage(content=router_prompt),
+                HumanMessage(content=router_input),
+            ]
+        )
+        if isinstance(decision_raw, RouterDecision):
+            return decision_raw
+        return RouterDecision.model_validate(decision_raw)
+    except (ValidationError, Exception):
+        return RouterDecision(
+            intent="clarification_needed",
+            mode="conversation_mode",
+            confidence=0.0,
+            need_clarification=True,
+            clarification_question=_build_router_clarification_question(latest_user_request),
+            requires_scene_mutation=False,
+        )
+
+
 def _resolve_verification_assets(state: AgentState) -> list[Any]:
     thread_id = state.get("thread_id", "default")
     mode = _coerce_task_mode(state.get("task_mode"))
@@ -240,21 +341,45 @@ def _resolve_verification_assets(state: AgentState) -> list[Any]:
 get_reference_image_memory = get_image_asset_memory
 
 
-def route_mode_node(state: AgentState) -> Dict[str, Any]:
+def route_mode_node(
+    state: AgentState,
+    *,
+    router_model: Any | None = None,
+) -> Dict[str, Any]:
     """
-    Route each request into one of three modes:
-    - conversation_mode
-    - single_action_mode
-    - plan_mode
+    LLM-based router for task mode / intent classification.
+    Low-confidence decisions require strict clarification before execution.
     """
     latest_user_request = _latest_human_message(state)
     unfinished_todos = _unfinished_todo_count(state)
 
     if unfinished_todos > 0:
-        mode: TaskMode = MODE_PLAN
-        intent = "continue_existing_plan"
+        decision = RouterDecision(
+            intent="continue_existing_plan",
+            mode=MODE_PLAN,
+            confidence=1.0,
+            need_clarification=False,
+            clarification_question="",
+            requires_scene_mutation=True,
+        )
+    elif router_model is None:
+        decision = RouterDecision(
+            intent="clarification_needed",
+            mode=MODE_CONVERSATION,
+            confidence=0.0,
+            need_clarification=True,
+            clarification_question=_build_router_clarification_question(latest_user_request),
+            requires_scene_mutation=False,
+        )
     else:
-        mode, intent = _classify_task_mode_from_text(latest_user_request)
+        decision = _invoke_router_decision(
+            state=state,
+            router_model=router_model,
+            latest_user_request=latest_user_request,
+        )
+
+    mode = _coerce_task_mode(decision.mode)
+    intent = decision.intent
 
     raw_topology_request = state.get("workflow_topology_request")
     if raw_topology_request is None:
@@ -301,6 +426,11 @@ def route_mode_node(state: AgentState) -> Dict[str, Any]:
     if mode == MODE_PLAN and workflow_topology == TOPOLOGY_DUAL:
         active_role = ROLE_BUILDER
 
+    clarification_question = decision.clarification_question.strip()
+    if not clarification_question:
+        clarification_question = _build_router_clarification_question(latest_user_request)
+    need_clarification = bool(decision.need_clarification) or decision.confidence < _ROUTER_MIN_CONFIDENCE
+
     max_plan_replans = _coerce_non_negative_int(
         state.get("max_plan_replans"),
         default=DEFAULT_MAX_PLAN_REPLANS,
@@ -310,6 +440,10 @@ def route_mode_node(state: AgentState) -> Dict[str, Any]:
         "task_mode": mode,
         "task_intent": intent,
         "task_id": normalized_task_id,
+        "router_decision": decision.model_dump(mode="json"),
+        "router_confidence": float(decision.confidence),
+        "router_need_clarification": need_clarification,
+        "router_clarification_question": clarification_question,
         "tool_policy": tool_policy,
         "workflow_topology_request": requested_topology,
         "memory_profile_request": memory_profile_request,
@@ -321,12 +455,35 @@ def route_mode_node(state: AgentState) -> Dict[str, Any]:
         "builder_turn_count": 0,
         "verifier_turn_count": 0,
         "builder_stall_count": 0,
+        "verification_mismatch_streak": 0,
+        "quality_eval": {"status": "unknown", "reason": "not_evaluated"},
+        "progress_eval": {"status": "continue", "reason": "not_evaluated"},
+        "budget_eval": {"budget_ok": True, "stop_reason": None},
         "plan_replan_count": 0,
         "max_plan_replans": max_plan_replans,
         "transition_next": None,
+        "transition_reason": "router_initialized",
         "max_request_agent_turns": budget["max_request_agent_turns"],
         "max_request_tool_batches": budget["max_request_tool_batches"],
         "request_stop_reason": None,
+    }
+
+
+def route_mode_llm_node(state: AgentState, router_model: Any) -> Dict[str, Any]:
+    """Explicit LLM router entrypoint used by graph wiring."""
+    return route_mode_node(state, router_model=router_model)
+
+
+def clarification_node(state: AgentState) -> Dict[str, Any]:
+    question_raw = state.get("router_clarification_question")
+    question = question_raw.strip() if isinstance(question_raw, str) and question_raw.strip() else (
+        "我需要你补充更具体的目标：是问答解释、单步修改，还是多步场景重建？"
+    )
+    return {
+        "messages": [AIMessage(content=question)],
+        "request_stop_reason": "clarification_required",
+        "transition_next": "finalize",
+        "transition_reason": "router_low_confidence_clarification_required",
     }
 
 
@@ -733,40 +890,191 @@ def verifier_feedback_node(state: AgentState) -> Dict[str, Any]:
     return verifier_agent_node(state)
 
 
-def transition_resolver_node(state: AgentState) -> Dict[str, Any]:
-    """
-    Deterministic transition resolver for plan_mode dual-agent loop.
-    """
-    request_stop_reason = state.get("request_stop_reason")
-    if isinstance(request_stop_reason, str) and request_stop_reason:
-        return {"transition_next": "checkpoint_finalize"}
+def quality_evaluator_node(state: AgentState) -> Dict[str, Any]:
+    verification_payload = _latest_verification_payload(state)
+    verification = _coerce_verification_dict(verification_payload)
+    raw_status = verification.get("status")
+    normalized_status = raw_status.strip().lower() if isinstance(raw_status, str) else ""
+
+    status = "skipped"
+    reason = "No fresh verification evidence."
+    if normalized_status in {"match", "pass", "passed"}:
+        status = "match"
+        reason = str(verification.get("reason") or "Verification passed.")
+    elif normalized_status in {"mismatch", "partial", "needs_fix", "fail", "failed"}:
+        status = "mismatch"
+        reason = str(verification.get("reason") or "Verification reported mismatches.")
+    elif normalized_status == "catastrophic":
+        status = "catastrophic"
+        reason = str(verification.get("reason") or "Catastrophic scene signal detected.")
+
+    streak = _coerce_non_negative_int(state.get("verification_mismatch_streak"))
+    if status in {"mismatch", "catastrophic"}:
+        streak += 1
+    else:
+        streak = 0
+
+    return {
+        "quality_eval": {
+            "status": status,
+            "reason": reason,
+            "source_verification_status": normalized_status or "none",
+        },
+        "verification_mismatch_streak": streak,
+    }
+
+
+def progress_evaluator_node(state: AgentState) -> Dict[str, Any]:
+    mode = _coerce_task_mode(state.get("task_mode"))
+    unfinished_todos = _unfinished_todo_count(state)
+    quality = state.get("quality_eval")
+    quality_status = ""
+    quality_reason = ""
+    if isinstance(quality, dict):
+        quality_status = str(quality.get("status", "")).strip().lower()
+        quality_reason = str(quality.get("reason", "")).strip()
+
+    should_replan = False
+    verifier_feedback = state.get("verifier_feedback")
+    if isinstance(verifier_feedback, dict) and bool(verifier_feedback.get("should_replan")):
+        should_replan = True
+    mismatch_streak = _coerce_non_negative_int(state.get("verification_mismatch_streak"))
+    builder_stall_count = _coerce_non_negative_int(state.get("builder_stall_count"))
+    if mode == MODE_PLAN and (mismatch_streak >= 2 or builder_stall_count >= 2):
+        should_replan = True
+
+    if mode == MODE_CONVERSATION:
+        status = "done"
+        reason = "conversation_mode_response_ready"
+    elif quality_status == "match" and unfinished_todos == 0:
+        status = "done"
+        reason = "verification_match_and_no_open_todos"
+    elif quality_status == "catastrophic" and mode == MODE_PLAN and unfinished_todos == 0:
+        status = "blocked"
+        reason = quality_reason or "catastrophic_without_open_todo"
+    elif unfinished_todos > 0:
+        status = "continue"
+        reason = "open_todos_remaining"
+    elif quality_status in {"mismatch", "catastrophic"}:
+        status = "continue"
+        reason = quality_reason or f"quality_{quality_status}"
+    else:
+        status = "done"
+        reason = "no_additional_progress_needed"
+
+    return {
+        "progress_eval": {
+            "status": status,
+            "reason": reason,
+            "unfinished_todos": unfinished_todos,
+            "should_replan": should_replan,
+        }
+    }
+
+
+def budget_evaluator_node(state: AgentState) -> Dict[str, Any]:
+    stop_reason_raw = state.get("request_stop_reason")
+    if isinstance(stop_reason_raw, str) and stop_reason_raw:
+        return {
+            "budget_eval": {
+                "budget_ok": False,
+                "stop_reason": stop_reason_raw,
+            }
+        }
 
     turns = _coerce_non_negative_int(state.get("request_agent_turns"))
     max_turns = _coerce_non_negative_int(state.get("max_request_agent_turns"), default=-1)
     if max_turns >= 0 and turns >= max_turns:
-        return {"transition_next": "checkpoint_finalize"}
+        return {
+            "budget_eval": {
+                "budget_ok": False,
+                "stop_reason": "agent_turn_budget_exhausted",
+            },
+            "request_stop_reason": "agent_turn_budget_exhausted",
+        }
 
-    feedback = state.get("verifier_feedback")
-    if not isinstance(feedback, dict):
-        return {"transition_next": "builder_agent"}
+    tool_batches = _coerce_non_negative_int(state.get("request_tool_batches"))
+    max_tool_batches = _coerce_non_negative_int(state.get("max_request_tool_batches"), default=-1)
+    if max_tool_batches >= 0 and tool_batches >= max_tool_batches:
+        return {
+            "budget_eval": {
+                "budget_ok": False,
+                "stop_reason": "tool_batch_budget_exhausted",
+            },
+            "request_stop_reason": "tool_batch_budget_exhausted",
+        }
 
-    status = str(feedback.get("status", "")).strip().lower()
-    if status == "pass":
-        if _unfinished_todo_count(state) == 0:
-            return {"transition_next": "checkpoint_finalize"}
-        return {"transition_next": "builder_agent"}
+    replans = _coerce_non_negative_int(state.get("plan_replan_count"))
+    max_replans = _coerce_non_negative_int(state.get("max_plan_replans"), default=-1)
+    if max_replans >= 0 and replans > max_replans:
+        return {
+            "budget_eval": {
+                "budget_ok": False,
+                "stop_reason": "plan_replan_budget_exhausted",
+            },
+            "request_stop_reason": "plan_replan_budget_exhausted",
+        }
 
-    if status == "catastrophic":
-        return {"transition_next": "builder_agent"}
+    return {"budget_eval": {"budget_ok": True, "stop_reason": None}}
 
-    if bool(feedback.get("should_replan")) and _replan_budget_remaining(state):
-        return {"transition_next": "planner_refresh"}
 
-    builder_stall_count = _coerce_non_negative_int(state.get("builder_stall_count"))
-    if builder_stall_count >= 2 and _replan_budget_remaining(state):
-        return {"transition_next": "planner_refresh"}
+def transition_resolver_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Deterministic transition resolver shared by single-agent and dual-agent paths.
+    """
+    mode = _coerce_task_mode(state.get("task_mode"))
+    topology = _coerce_workflow_topology(state.get("workflow_topology"))
+    is_dual_plan = mode == MODE_PLAN and topology == TOPOLOGY_DUAL
 
-    return {"transition_next": "builder_agent"}
+    budget_eval = state.get("budget_eval")
+    if isinstance(budget_eval, dict) and not bool(budget_eval.get("budget_ok", True)):
+        reason = str(budget_eval.get("stop_reason") or "budget_exhausted")
+        return {
+            "transition_next": "checkpoint_finalize",
+            "transition_reason": reason,
+        }
+
+    progress_eval = state.get("progress_eval")
+    progress_status = ""
+    should_replan = False
+    if isinstance(progress_eval, dict):
+        progress_status = str(progress_eval.get("status", "")).strip().lower()
+        should_replan = bool(progress_eval.get("should_replan"))
+
+    if progress_status == "done":
+        return {
+            "transition_next": "checkpoint_finalize",
+            "transition_reason": "progress_done",
+        }
+
+    quality_eval = state.get("quality_eval")
+    quality_status = ""
+    if isinstance(quality_eval, dict):
+        quality_status = str(quality_eval.get("status", "")).strip().lower()
+
+    # Priority: budget_exhausted > done > catastrophic > replan > continue
+    if quality_status == "catastrophic":
+        return {
+            "transition_next": "builder_agent" if is_dual_plan else "agent",
+            "transition_reason": "catastrophic_manual_remediation",
+        }
+
+    if is_dual_plan and should_replan and _replan_budget_remaining(state):
+        return {
+            "transition_next": "planner_refresh",
+            "transition_reason": "replan_requested_by_evaluators",
+        }
+
+    if progress_status in {"continue", "blocked"}:
+        return {
+            "transition_next": "builder_agent" if is_dual_plan else "agent",
+            "transition_reason": "continue_execution",
+        }
+
+    return {
+        "transition_next": "checkpoint_finalize",
+        "transition_reason": "default_finalize",
+    }
 
 
 def planner_refresh_node(state: AgentState) -> Dict[str, Any]:

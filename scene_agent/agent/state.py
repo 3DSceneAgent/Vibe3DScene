@@ -92,6 +92,10 @@ class AgentState(TypedDict):
         last_tool_batch_names: Tool names observed in latest tool batch
         task_mode: Routed workflow mode for this request
         task_intent: Routed intent label for this request
+        router_decision: Latest structured routing decision payload from LLM router
+        router_confidence: Router confidence score [0, 1]
+        router_need_clarification: Whether router requires user clarification before execution
+        router_clarification_question: Router-proposed clarification question
         workflow_topology_request: Optional request-level topology hint
         memory_profile_request: Optional request-level memory-profile hint
         workflow_topology: Effective workflow topology for this request
@@ -104,7 +108,12 @@ class AgentState(TypedDict):
         role_private_memory: Compact role-scoped private memory buckets
         plan_replan_count: Number of plan refreshes in this request run
         max_plan_replans: Max allowed plan refresh attempts in this request run
+        verification_mismatch_streak: Consecutive mismatch/catastrophic verification count
+        quality_eval: Latest quality evaluator output
+        progress_eval: Latest progress evaluator output
+        budget_eval: Latest budget evaluator output
         transition_next: Cached deterministic transition decision
+        transition_reason: Human-readable transition reason for observability
         todo_check_gate: Runtime gate decision for whether to run todo_check
         todo_check: Latest todo_check result payload
         last_todo_check_round: Tool round index when todo_check last ran
@@ -123,6 +132,10 @@ class AgentState(TypedDict):
     task_id: NotRequired[str | None]
     task_mode: NotRequired[TaskMode]
     task_intent: NotRequired[str]
+    router_decision: NotRequired[dict[str, Any]]
+    router_confidence: NotRequired[float]
+    router_need_clarification: NotRequired[bool]
+    router_clarification_question: NotRequired[str]
     tool_policy: NotRequired[str]
     workflow_topology_request: NotRequired[str | None]
     memory_profile_request: NotRequired[str | None]
@@ -148,6 +161,11 @@ class AgentState(TypedDict):
     role_private_memory: NotRequired[dict[str, dict[str, Any]]]
     plan_replan_count: NotRequired[int]
     max_plan_replans: NotRequired[int]
+    verification_mismatch_streak: NotRequired[int]
+    quality_eval: NotRequired[dict[str, Any]]
+    progress_eval: NotRequired[dict[str, Any]]
+    budget_eval: NotRequired[dict[str, Any]]
+    transition_reason: NotRequired[str]
 
     # State collections
     scene_objects: NotRequired[Annotated[dict[str, Any], replace_mapping]]
