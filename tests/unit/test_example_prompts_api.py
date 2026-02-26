@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
+from uuid import uuid4
 
 from scene_agent.config import reload_settings
 from scene_agent.interfaces import api as api_module
@@ -35,6 +36,8 @@ def test_get_example_prompts_endpoint_reads_markdown(monkeypatch, tmp_path):
 
 
 def test_get_mcp_tools_endpoint_returns_loaded_tools(monkeypatch):
+    thread_id = f"thread-mcp-tools-{uuid4().hex}"
+
     class DummyAgent:
         _available_tool_names = ["get_scene_info", "camera_observe", "get_scene_info"]
         _available_tool_hints = {
@@ -44,19 +47,20 @@ def test_get_mcp_tools_endpoint_returns_loaded_tools(monkeypatch):
         }
 
     async def fake_get_agent(thread_id: str):
-        assert thread_id == "thread-1"
+        assert thread_id == thread_id_expected
         return DummyAgent()
 
+    thread_id_expected = thread_id
     monkeypatch.setattr(api_module, "get_agent", fake_get_agent)
     monkeypatch.setenv("BLENDER_MODE", "headless")
     reload_settings()
 
     with TestClient(api_module.app) as client:
-        response = client.get("/threads/thread-1/mcp-tools")
+        response = client.get(f"/threads/{thread_id}/mcp-tools")
 
     assert response.status_code == 200
     assert response.json() == {
-        "thread_id": "thread-1",
+        "thread_id": thread_id,
         "loaded": True,
         "tool_count": 2,
         "tools": ["camera_observe", "get_scene_info"],
@@ -84,19 +88,22 @@ def test_extract_available_tool_hints_filters_invalid_entries():
 
 
 def test_get_mcp_tools_endpoint_fills_default_hint_when_missing(monkeypatch):
+    thread_id = f"thread-default-hint-{uuid4().hex}"
+
     class DummyAgent:
         _available_tool_names = ["get_scene_info"]
 
     async def fake_get_agent(thread_id: str):
-        assert thread_id == "thread-default-hint"
+        assert thread_id == thread_id_expected
         return DummyAgent()
 
+    thread_id_expected = thread_id
     monkeypatch.setattr(api_module, "get_agent", fake_get_agent)
     monkeypatch.setenv("BLENDER_MODE", "headless")
     reload_settings()
 
     with TestClient(api_module.app) as client:
-        response = client.get("/threads/thread-default-hint/mcp-tools")
+        response = client.get(f"/threads/{thread_id}/mcp-tools")
 
     assert response.status_code == 200
     assert response.json()["tool_hints"] == {"get_scene_info": "MCP tool: get scene info."}
@@ -115,6 +122,7 @@ def test_resolve_enabled_tool_names_returns_intersection():
 
 
 def test_chat_endpoint_passes_enabled_tool_names(monkeypatch):
+    thread_id = f"thread-chat-enabled-tools-{uuid4().hex}"
     captured_payloads = []
 
     class DummyAgent:
@@ -126,9 +134,10 @@ def test_chat_endpoint_passes_enabled_tool_names(monkeypatch):
             return {"messages": ["ok"], "todos": []}
 
     async def fake_get_agent(thread_id: str):
-        assert thread_id == "thread-2"
+        assert thread_id == thread_id_expected
         return DummyAgent()
 
+    thread_id_expected = thread_id
     monkeypatch.setattr(api_module, "get_agent", fake_get_agent)
     monkeypatch.setattr(
         api_module,
@@ -141,7 +150,7 @@ def test_chat_endpoint_passes_enabled_tool_names(monkeypatch):
             "/chat",
             json={
                 "message": "hello",
-                "thread_id": "thread-2",
+                "thread_id": thread_id,
                 "enabled_mcp_tools": ["camera_observe", "invalid_tool"],
             },
         )
@@ -152,6 +161,8 @@ def test_chat_endpoint_passes_enabled_tool_names(monkeypatch):
 
 
 def test_chat_endpoint_serializes_list_content_to_string(monkeypatch):
+    thread_id = f"thread-list-content-{uuid4().hex}"
+
     class DummyAgent:
         _available_tool_names = []
 
@@ -163,9 +174,10 @@ def test_chat_endpoint_serializes_list_content_to_string(monkeypatch):
             }
 
     async def fake_get_agent(thread_id: str):
-        assert thread_id == "thread-list-content"
+        assert thread_id == thread_id_expected
         return DummyAgent()
 
+    thread_id_expected = thread_id
     monkeypatch.setattr(api_module, "get_agent", fake_get_agent)
     monkeypatch.setattr(
         api_module,
@@ -178,7 +190,7 @@ def test_chat_endpoint_serializes_list_content_to_string(monkeypatch):
             "/chat",
             json={
                 "message": "hello",
-                "thread_id": "thread-list-content",
+                "thread_id": thread_id,
             },
         )
 
@@ -187,6 +199,7 @@ def test_chat_endpoint_serializes_list_content_to_string(monkeypatch):
 
 
 def test_chat_stream_passes_enabled_tool_names(monkeypatch):
+    thread_id = f"thread-chat-stream-{uuid4().hex}"
     captured_payloads = []
 
     class DummyAgent:
@@ -198,9 +211,10 @@ def test_chat_stream_passes_enabled_tool_names(monkeypatch):
             yield ("messages", [{"type": "ai", "content": "ok"}])
 
     async def fake_get_agent(thread_id: str):
-        assert thread_id == "thread-3"
+        assert thread_id == thread_id_expected
         return DummyAgent()
 
+    thread_id_expected = thread_id
     monkeypatch.setattr(api_module, "get_agent", fake_get_agent)
     monkeypatch.setattr(
         api_module,
@@ -214,7 +228,7 @@ def test_chat_stream_passes_enabled_tool_names(monkeypatch):
             "/chat/stream",
             json={
                 "message": "hello",
-                "thread_id": "thread-3",
+                "thread_id": thread_id,
                 "enabled_mcp_tools": ["get_scene_info", "missing_tool"],
             },
         ) as response:
