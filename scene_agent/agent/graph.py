@@ -7,13 +7,13 @@ import json
 import re
 import time
 from typing import Any, Literal
-from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt import ToolNode
 from langgraph.prebuilt.tool_node import ToolCallRequest
 
 
+from scene_agent.agent.graph_factory import build_agent_state_graph
 from scene_agent.agent.state import AgentState
 from scene_agent.agent.redis_checkpointer import get_graph_checkpointer
 from scene_agent.agent.nodes import (
@@ -500,102 +500,45 @@ async def create_agent_graph(
     def call_builder_model(state: AgentState) -> dict:
         return builder_agent_node(state, llm_with_tools, available_tool_names)
     
-    # Build graph
-    builder = StateGraph(AgentState)
-    
-    # Add nodes
-    builder.add_node("route_mode", route_mode_node)
-    builder.add_node("agent", call_model)
-    builder.add_node("post_agent", post_agent_node)
-    builder.add_node("builder_agent", call_builder_model)
-    builder.add_node("post_builder", post_builder_node)
-    builder.add_node("verifier_agent", verifier_agent_node)
-    builder.add_node("transition_resolver", transition_resolver_node)
-    builder.add_node("planner_refresh", planner_refresh_node)
-    builder.add_node(
-        "tools",
-        ToolNode(
+    builder = build_agent_state_graph(
+        route_mode_node=route_mode_node,
+        agent_node=call_model,
+        post_agent_node=post_agent_node,
+        builder_agent_node=call_builder_model,
+        post_builder_node=post_builder_node,
+        tools_node=ToolNode(
             tools,
             handle_tool_errors=False,
             wrap_tool_call=_wrap_tool_call_with_retry,
             awrap_tool_call=_awrap_tool_call_with_retry,
         ),
-    )
-    builder.add_node("update_memory", update_memory_node)
-    builder.add_node("scene_observe", scene_observe_node)
-    builder.add_node(
-        "checkpoint_loop",
-        lambda state: checkpoint_gate_node(state, stage="loop"),
-    )
-    builder.add_node(
-        "checkpoint_finalize",
-        lambda state: checkpoint_gate_node(state, stage="finalize"),
-    )
-    builder.add_node("todo_check", todo_check_node)
-    builder.add_node("blocked_recovery", blocked_recovery_node)
-    builder.add_node("blocked_recovery_action", blocked_recovery_action_node)
-    builder.add_node(
-        "verify",
-        lambda state: verify_node(
+        update_memory_node=update_memory_node,
+        scene_observe_node=scene_observe_node,
+        checkpoint_loop_node=lambda state: checkpoint_gate_node(state, stage="loop"),
+        checkpoint_finalize_node=lambda state: checkpoint_gate_node(state, stage="finalize"),
+        todo_check_node=todo_check_node,
+        blocked_recovery_node=blocked_recovery_node,
+        blocked_recovery_action_node=blocked_recovery_action_node,
+        verify_node=lambda state: verify_node(
             state,
             provider_name=selected_provider,
             api_key=selected_api_key,
             model=selected_model,
         ),
+        verifier_agent_node=verifier_agent_node,
+        transition_resolver_node=transition_resolver_node,
+        planner_refresh_node=planner_refresh_node,
+        finalize_node=lambda state: finalize_node(state, finalizer_model=model),
+        route_after_mode=_route_after_mode,
+        route_after_post_agent=_route_after_post_agent,
+        route_after_post_builder=_route_after_post_builder,
+        route_after_verify=_route_after_verify,
+        route_after_transition_resolver=_route_after_transition_resolver,
+        route_after_loop_checkpoint=_route_after_loop_checkpoint,
+        route_after_finalize_checkpoint=_route_after_finalize_checkpoint,
+        route_after_todo_check=_route_after_todo_check,
+        route_after_blocked_recovery_action=_route_after_blocked_recovery_action,
     )
-    builder.add_node(
-        "finalize",
-        lambda state: finalize_node(state, finalizer_model=model),
-    )
-    
-    # Connect nodes
-    builder.add_edge(START, "route_mode")
-    builder.add_conditional_edges("route_mode", _route_after_mode)
-
-    # Persist decision/todo after each assistant response, then branch.
-    builder.add_edge("agent", "post_agent")
-    builder.add_conditional_edges(
-        "post_agent",
-        _route_after_post_agent,
-    )
-    builder.add_edge("builder_agent", "post_builder")
-    builder.add_conditional_edges(
-        "post_builder",
-        _route_after_post_builder,
-    )
-    
-    # After tools: update_memory -> scene_observe -> verify -> checkpoint_loop
-    builder.add_edge("tools", "update_memory")
-    builder.add_edge("update_memory", "scene_observe")
-    builder.add_edge("scene_observe", "verify")
-    builder.add_conditional_edges(
-        "verify",
-        _route_after_verify,
-    )
-    builder.add_edge("verifier_agent", "transition_resolver")
-    builder.add_conditional_edges(
-        "transition_resolver",
-        _route_after_transition_resolver,
-    )
-    builder.add_edge("planner_refresh", "builder_agent")
-    builder.add_conditional_edges(
-        "checkpoint_loop",
-        _route_after_loop_checkpoint,
-    )
-    builder.add_conditional_edges(
-        "checkpoint_finalize",
-        _route_after_finalize_checkpoint,
-    )
-    builder.add_conditional_edges(
-        "todo_check",
-        _route_after_todo_check,
-    )
-    builder.add_edge("blocked_recovery", "blocked_recovery_action")
-    builder.add_conditional_edges(
-        "blocked_recovery_action",
-        _route_after_blocked_recovery_action,
-    )
-    builder.add_edge("finalize", END)
     
     # Compile with checkpointing
     checkpointer = get_graph_checkpointer()
