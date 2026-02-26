@@ -6,6 +6,7 @@ from scene_agent.agent.graph import (
     _route_after_post_agent,
     _route_after_post_builder,
     _route_after_post_verifier,
+    _route_after_transition_resolver,
     _route_after_verify,
     _route_after_todo_check,
 )
@@ -26,6 +27,25 @@ from scene_agent.agent.nodes import (
     transition_resolver_node,
     verifier_agent_node,
 )
+
+
+class _StubStructuredRouter:
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def invoke(self, _messages):
+        return self._payload
+
+
+class _StubRouterModel:
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def with_config(self, **_kwargs):
+        return self
+
+    def with_structured_output(self, _schema):
+        return _StubStructuredRouter(self._payload)
 
 
 def _todo(
@@ -116,13 +136,38 @@ def test_todo_check_blocks_after_stagnation_limit():
 
 
 def test_route_mode_node_classifies_conversation_mode_for_simple_qa():
-    result = route_mode_node({"messages": [HumanMessage(content="What is global illumination?")]})
+    result = route_mode_node(
+        {"messages": [HumanMessage(content="What is global illumination?")]},
+        router_model=_StubRouterModel(
+            {
+                "intent": "qa",
+                "mode": "conversation_mode",
+                "confidence": 0.95,
+                "need_clarification": False,
+                "clarification_question": "",
+                "requires_scene_mutation": False,
+            }
+        ),
+    )
     assert result["task_mode"] == "conversation_mode"
     assert result["max_request_tool_batches"] == 0
+    assert result["router_need_clarification"] is False
 
 
 def test_route_mode_node_classifies_single_action_mode_for_single_edit():
-    result = route_mode_node({"messages": [HumanMessage(content="Add a wooden chair to the scene.")]})
+    result = route_mode_node(
+        {"messages": [HumanMessage(content="Add a wooden chair to the scene.")]},
+        router_model=_StubRouterModel(
+            {
+                "intent": "single_scene_action",
+                "mode": "single_action_mode",
+                "confidence": 0.9,
+                "need_clarification": False,
+                "clarification_question": "",
+                "requires_scene_mutation": True,
+            }
+        ),
+    )
     assert result["task_mode"] == "single_action_mode"
     assert result["max_request_tool_batches"] == 1
 
@@ -143,7 +188,17 @@ def test_route_mode_node_sets_dual_topology_for_plan_mode_when_requested():
         {
             "messages": [HumanMessage(content="Create a chair and then add a lamp.")],
             "workflow_topology_request": "dual_agent",
-        }
+        },
+        router_model=_StubRouterModel(
+            {
+                "intent": "multi_step_scene_action",
+                "mode": "plan_mode",
+                "confidence": 0.93,
+                "need_clarification": False,
+                "clarification_question": "",
+                "requires_scene_mutation": True,
+            }
+        ),
     )
     assert result["task_mode"] == "plan_mode"
     assert result["workflow_topology"] == "dual_agent"
@@ -155,7 +210,17 @@ def test_route_mode_node_downgrades_dual_request_for_conversation_mode():
         {
             "messages": [HumanMessage(content="What is global illumination?")],
             "workflow_topology_request": "dual_agent",
-        }
+        },
+        router_model=_StubRouterModel(
+            {
+                "intent": "qa",
+                "mode": "conversation_mode",
+                "confidence": 0.91,
+                "need_clarification": False,
+                "clarification_question": "",
+                "requires_scene_mutation": False,
+            }
+        ),
     )
     assert result["task_mode"] == "conversation_mode"
     assert result["workflow_topology"] == "single_agent"
@@ -318,7 +383,7 @@ def test_route_after_blocked_recovery_action_routes_to_tools_on_forced_calls():
 
 def test_route_after_verify_routes_to_checkpoint_when_no_forced_recovery():
     next_node = _route_after_verify({"verify_forced_recovery": False})
-    assert next_node == "checkpoint_loop"
+    assert next_node == "quality_evaluator"
 
 
 def test_route_after_verify_routes_to_verifier_in_dual_plan_mode():
@@ -329,7 +394,7 @@ def test_route_after_verify_routes_to_verifier_in_dual_plan_mode():
             "workflow_topology": "dual_agent",
         }
     )
-    assert next_node == "verifier_camera_agent"
+    assert next_node == "quality_evaluator"
 
 
 def test_route_after_post_builder_routes_to_verifier_when_no_tool_calls():
@@ -385,7 +450,7 @@ def test_route_after_post_verifier_routes_to_checkpoint_on_turn_budget_exhaustio
             "max_request_agent_turns": 8,
         }
     )
-    assert next_node == "checkpoint_finalize"
+    assert next_node == "quality_evaluator"
 
 
 def test_route_after_post_agent_retries_once_when_tools_expected_but_missing():
@@ -397,7 +462,7 @@ def test_route_after_post_agent_retries_once_when_tools_expected_but_missing():
             "max_request_agent_turns": 8,
         }
     )
-    assert next_node == "agent"
+    assert next_node == "quality_evaluator"
 
 
 def test_route_after_post_agent_finalizes_after_retry_budget_exhausted():
@@ -409,7 +474,18 @@ def test_route_after_post_agent_finalizes_after_retry_budget_exhausted():
             "max_request_agent_turns": 8,
         }
     )
-    assert next_node == "checkpoint_finalize"
+    assert next_node == "quality_evaluator"
+
+
+def test_route_after_transition_resolver_routes_to_agent_for_single_topology():
+    next_node = _route_after_transition_resolver(
+        {
+            "task_mode": "single_action_mode",
+            "workflow_topology": "single_agent",
+            "transition_next": "agent",
+        }
+    )
+    assert next_node == "agent"
 
 
 def test_route_after_loop_checkpoint_routes_to_builder_for_dual_plan_mode():
@@ -699,11 +775,11 @@ def test_verifier_agent_node_marks_ready_to_finalize_on_match_without_open_todos
 def test_transition_resolver_node_routes_to_planner_refresh_on_replan_signal():
     result = transition_resolver_node(
         {
-            "verifier_feedback": {
-                "status": "needs_fix",
-                "should_replan": True,
-                "ready_to_finalize": False,
-            },
+            "task_mode": "plan_mode",
+            "workflow_topology": "dual_agent",
+            "budget_eval": {"budget_ok": True, "stop_reason": None},
+            "quality_eval": {"status": "mismatch", "reason": "needs_fix"},
+            "progress_eval": {"status": "continue", "should_replan": True},
             "plan_replan_count": 0,
             "max_plan_replans": 2,
         }
