@@ -19,6 +19,9 @@ class TodoItem(TypedDict):
 
 
 TaskMode = Literal["conversation_mode", "single_action_mode", "plan_mode"]
+WorkflowTopology = Literal["single_agent", "dual_agent"]
+MemoryProfile = Literal["thread_shared_only", "shared_plus_role_private"]
+AgentRole = Literal["general", "builder", "verifier"]
 
 
 def merge_todos(existing: list[TodoItem], new: list[TodoItem]) -> list[TodoItem]:
@@ -89,6 +92,19 @@ class AgentState(TypedDict):
         last_tool_batch_names: Tool names observed in latest tool batch
         task_mode: Routed workflow mode for this request
         task_intent: Routed intent label for this request
+        workflow_topology_request: Optional request-level topology hint
+        memory_profile_request: Optional request-level memory-profile hint
+        workflow_topology: Effective workflow topology for this request
+        memory_profile: Effective memory profile for this request
+        active_role: Active role in current request (`general/builder/verifier`)
+        builder_turn_count: Builder turns executed in this request run
+        verifier_turn_count: Verifier turns executed in this request run
+        builder_stall_count: Consecutive builder turns without tool calls
+        verifier_feedback: Latest structured verifier feedback
+        role_private_memory: Compact role-scoped private memory buckets
+        plan_replan_count: Number of plan refreshes in this request run
+        max_plan_replans: Max allowed plan refresh attempts in this request run
+        transition_next: Cached deterministic transition decision
         todo_check_gate: Runtime gate decision for whether to run todo_check
         todo_check: Latest todo_check result payload
         last_todo_check_round: Tool round index when todo_check last ran
@@ -108,6 +124,12 @@ class AgentState(TypedDict):
     task_mode: NotRequired[TaskMode]
     task_intent: NotRequired[str]
     tool_policy: NotRequired[str]
+    workflow_topology_request: NotRequired[str | None]
+    memory_profile_request: NotRequired[str | None]
+    workflow_topology: NotRequired[WorkflowTopology]
+    memory_profile: NotRequired[MemoryProfile]
+    active_role: NotRequired[AgentRole]
+    transition_next: NotRequired[str]
 
     # Verification tracking
     last_render_path: NotRequired[str | None]
@@ -119,6 +141,13 @@ class AgentState(TypedDict):
     max_request_agent_turns: NotRequired[int]
     request_stop_reason: NotRequired[str | None]
     last_tool_batch_names: NotRequired[list[str]]
+    builder_turn_count: NotRequired[int]
+    verifier_turn_count: NotRequired[int]
+    builder_stall_count: NotRequired[int]
+    verifier_feedback: NotRequired[dict[str, Any]]
+    role_private_memory: NotRequired[dict[str, dict[str, Any]]]
+    plan_replan_count: NotRequired[int]
+    max_plan_replans: NotRequired[int]
 
     # State collections
     scene_objects: NotRequired[Annotated[dict[str, Any], replace_mapping]]
