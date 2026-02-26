@@ -277,7 +277,7 @@ def test_verify_node_skips_when_render_already_verified(monkeypatch):
     assert result == {"verify_forced_recovery": False}
 
 
-def test_verify_node_forces_undo_recovery_on_catastrophic_scene(monkeypatch):
+def test_verify_node_reports_catastrophic_without_forced_recovery(monkeypatch):
     def fail_verify_render_with_references(**_kwargs):
         raise AssertionError("verify_render_with_references should not be called for catastrophic precheck")
 
@@ -297,25 +297,20 @@ def test_verify_node_forces_undo_recovery_on_catastrophic_scene(monkeypatch):
 
     result = verify_node(state)
 
-    assert result["verify_forced_recovery"] is True
-    assert result["catastrophic_recovery_attempts"] == 1
-    assert len(result["messages"]) == 2
+    assert result["verify_forced_recovery"] is False
+    assert result["catastrophic_recovery_attempts"] == 0
+    assert len(result["messages"]) == 1
     assert isinstance(result["messages"][0], ToolMessage)
     payload = result["messages"][0].content
     payload = payload if isinstance(payload, dict) else ast.literal_eval(payload)
     assert isinstance(payload, dict)
     assert payload["status"] == "catastrophic"
-    assert payload["hard_recovery"]["action"] == "undo_last_snapshot"
-    assert payload["hard_recovery"]["forced"] is True
-    assert isinstance(result["messages"][1], AIMessage)
-    assert [call["name"] for call in result["messages"][1].tool_calls] == [
-        "undo_last_snapshot",
-        "get_scene_info",
-        "observe_scene_global",
-    ]
+    assert payload["hard_recovery"]["action"] == "disabled"
+    assert payload["hard_recovery"]["forced"] is False
+    assert payload["hard_recovery"]["tool_calls"] == []
 
 
-def test_verify_node_forces_clear_scene_on_second_catastrophic_attempt(monkeypatch):
+def test_verify_node_catastrophic_ignores_prior_recovery_counters(monkeypatch):
     def fail_verify_render_with_references(**_kwargs):
         raise AssertionError("verify_render_with_references should not be called for catastrophic precheck")
 
@@ -325,89 +320,18 @@ def test_verify_node_forces_clear_scene_on_second_catastrophic_attempt(monkeypat
     )
 
     state = {
-        "thread_id": "thread-catastrophic-clear",
-        "messages": [HumanMessage(content="Build a dungeon scene.")],
-        "last_render_path": "/tmp/catastrophic_clear.png",
-        "last_verified_path": None,
-        "scene_bbox": {"center": [0, 0, 0], "dimensions": [12000.0, 8000.0, 6000.0]},
-        "catastrophic_recovery_attempts": 1,
-        "enabled_tool_names": ["clear_scene", "get_scene_info", "observe_scene_global"],
-    }
-
-    result = verify_node(state)
-
-    assert result["verify_forced_recovery"] is True
-    assert result["catastrophic_recovery_attempts"] == 2
-    assert len(result["messages"]) == 3
-    assert isinstance(result["messages"][0], ToolMessage)
-    payload = result["messages"][0].content
-    payload = payload if isinstance(payload, dict) else ast.literal_eval(payload)
-    assert isinstance(payload, dict)
-    assert payload["hard_recovery"]["action"] == "clear_scene"
-    assert payload["todo_rebuild_recommended"] is True
-    assert isinstance(result["messages"][-1], AIMessage)
-    assert [call["name"] for call in result["messages"][-1].tool_calls] == [
-        "clear_scene",
-        "get_scene_info",
-        "observe_scene_global",
-    ]
-
-
-def test_verify_node_stops_forced_recovery_after_budget_exhausted(monkeypatch):
-    def fail_verify_render_with_references(**_kwargs):
-        raise AssertionError("verify_render_with_references should not be called for catastrophic precheck")
-
-    monkeypatch.setattr(
-        "scene_agent.agent.nodes.verify_render_with_references",
-        fail_verify_render_with_references,
-    )
-
-    state = {
-        "thread_id": "thread-catastrophic-exhausted",
-        "messages": [HumanMessage(content="Build a dungeon scene.")],
-        "last_render_path": "/tmp/catastrophic_exhausted.png",
-        "last_verified_path": None,
-        "scene_bbox": {"center": [0, 0, 0], "dimensions": [12000.0, 8000.0, 6000.0]},
-        "catastrophic_recovery_attempts": 2,
-        "enabled_tool_names": ["clear_scene", "get_scene_info", "observe_scene_global"],
-    }
-
-    result = verify_node(state)
-
-    assert result["verify_forced_recovery"] is False
-    assert result["catastrophic_recovery_attempts"] == 2
-    assert all(not isinstance(message, AIMessage) for message in result["messages"])
-
-
-def test_verify_node_resets_stale_recovery_budget_after_new_scene_mutation(monkeypatch):
-    def fail_verify_render_with_references(**_kwargs):
-        raise AssertionError("verify_render_with_references should not be called for catastrophic precheck")
-
-    monkeypatch.setattr(
-        "scene_agent.agent.nodes.verify_render_with_references",
-        fail_verify_render_with_references,
-    )
-
-    state = {
-        "thread_id": "thread-catastrophic-reset-budget",
+        "thread_id": "thread-catastrophic-ignore-counters",
         "messages": [HumanMessage(content="Continue building the scene.")],
-        "last_render_path": "/tmp/catastrophic_reset_budget.png",
+        "last_render_path": "/tmp/catastrophic_ignore_counters.png",
         "last_verified_path": None,
         "scene_bbox": {"center": [0, 0, 0], "dimensions": [12000.0, 8000.0, 6000.0]},
-        # Previous incident exhausted budget.
         "catastrophic_recovery_attempts": 2,
-        # New regular scene mutation happened (non-recovery), so this should be a fresh incident.
         "last_tool_batch_names": ["execute_blender_code"],
         "enabled_tool_names": ["undo_last_snapshot", "clear_scene", "get_scene_info", "observe_scene_global"],
     }
 
     result = verify_node(state)
 
-    assert result["verify_forced_recovery"] is True
-    assert result["catastrophic_recovery_attempts"] == 1
-    assert isinstance(result["messages"][-1], AIMessage)
-    assert [call["name"] for call in result["messages"][-1].tool_calls] == [
-        "undo_last_snapshot",
-        "get_scene_info",
-        "observe_scene_global",
-    ]
+    assert result["verify_forced_recovery"] is False
+    assert result["catastrophic_recovery_attempts"] == 0
+    assert all(not isinstance(message, AIMessage) for message in result["messages"])

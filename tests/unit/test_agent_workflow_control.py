@@ -4,6 +4,8 @@ from scene_agent.agent.graph import (
     _route_after_blocked_recovery_action,
     _route_after_loop_checkpoint,
     _route_after_post_agent,
+    _route_after_post_builder,
+    _route_after_post_verifier,
     _route_after_verify,
     _route_after_todo_check,
 )
@@ -189,7 +191,7 @@ def test_route_after_todo_check_continues_when_finalize_stage_not_terminal():
     assert next_node == "agent"
 
 
-def test_route_after_todo_check_routes_blocked_to_recovery_within_grace():
+def test_route_after_todo_check_routes_blocked_to_agent_in_single_mode():
     next_node = _route_after_todo_check(
         {
             "todo_check_gate": {"stage": "finalize"},
@@ -197,10 +199,10 @@ def test_route_after_todo_check_routes_blocked_to_recovery_within_grace():
             "last_render_path": None,
         }
     )
-    assert next_node == "blocked_recovery"
+    assert next_node == "agent"
 
 
-def test_route_after_todo_check_finalizes_after_recovery_budget_exhausted():
+def test_route_after_todo_check_keeps_blocked_on_agent_path_even_with_high_stagnation():
     next_node = _route_after_todo_check(
         {
             "todo_check_gate": {"stage": "finalize"},
@@ -208,7 +210,7 @@ def test_route_after_todo_check_finalizes_after_recovery_budget_exhausted():
             "last_render_path": None,
         }
     )
-    assert next_node == "finalize"
+    assert next_node == "agent"
 
 
 def test_route_after_todo_check_finalizes_when_finalize_stage_terminal():
@@ -314,11 +316,6 @@ def test_route_after_blocked_recovery_action_routes_to_tools_on_forced_calls():
     assert next_node == "tools"
 
 
-def test_route_after_verify_routes_to_tools_when_forced_recovery_enabled():
-    next_node = _route_after_verify({"verify_forced_recovery": True})
-    assert next_node == "tools"
-
-
 def test_route_after_verify_routes_to_checkpoint_when_no_forced_recovery():
     next_node = _route_after_verify({"verify_forced_recovery": False})
     assert next_node == "checkpoint_loop"
@@ -332,7 +329,63 @@ def test_route_after_verify_routes_to_verifier_in_dual_plan_mode():
             "workflow_topology": "dual_agent",
         }
     )
-    assert next_node == "verifier_agent"
+    assert next_node == "verifier_camera_agent"
+
+
+def test_route_after_post_builder_routes_to_verifier_when_no_tool_calls():
+    next_node = _route_after_post_builder(
+        {
+            "messages": [AIMessage(content="Verifier should inspect this result.")],
+            "request_agent_turns": 1,
+            "max_request_agent_turns": 8,
+        }
+    )
+    assert next_node == "verifier_camera_agent"
+
+
+def test_route_after_post_verifier_routes_to_tools_when_tool_calls_present():
+    next_node = _route_after_post_verifier(
+        {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "camera_set_pose",
+                            "args": {"location": [0, 0, 2], "rotation_euler": [1, 0, 0]},
+                            "id": "tc-camera-pose",
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+            ],
+            "request_agent_turns": 1,
+            "max_request_agent_turns": 8,
+        }
+    )
+    assert next_node == "tools"
+
+
+def test_route_after_post_verifier_routes_to_feedback_without_tool_calls():
+    next_node = _route_after_post_verifier(
+        {
+            "messages": [AIMessage(content="Need builder to move the lamp 10cm left.")],
+            "request_agent_turns": 1,
+            "max_request_agent_turns": 8,
+        }
+    )
+    assert next_node == "verifier_feedback"
+
+
+def test_route_after_post_verifier_routes_to_checkpoint_on_turn_budget_exhaustion():
+    next_node = _route_after_post_verifier(
+        {
+            "messages": [AIMessage(content="No more tool calls.")],
+            "request_agent_turns": 8,
+            "max_request_agent_turns": 8,
+        }
+    )
+    assert next_node == "checkpoint_finalize"
 
 
 def test_route_after_post_agent_retries_once_when_tools_expected_but_missing():
@@ -377,6 +430,18 @@ def test_route_after_todo_check_returns_builder_for_dual_plan_mode():
             "workflow_topology": "dual_agent",
             "todo_check_gate": {"stage": "loop"},
             "todo_check": {"status": "continue"},
+        }
+    )
+    assert next_node == "builder_agent"
+
+
+def test_route_after_todo_check_returns_builder_for_dual_plan_blocked_finalize_stage():
+    next_node = _route_after_todo_check(
+        {
+            "task_mode": "plan_mode",
+            "workflow_topology": "dual_agent",
+            "todo_check_gate": {"stage": "finalize"},
+            "todo_check": {"status": "blocked", "stagnation_count": 3},
         }
     )
     assert next_node == "builder_agent"
