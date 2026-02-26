@@ -54,6 +54,8 @@ function sanitizeMessageContent(content: string): string {
 function sanitizeThreads(threads: Thread[]): Thread[] {
   return threads.map((thread) => {
     const persistedThread: Thread = { ...thread }
+    const persistedAny = persistedThread as Thread & { referenceImages?: Thread['images'] }
+    const threadImages = persistedThread.images ?? persistedAny.referenceImages ?? []
     delete persistedThread.occupyingResources
     delete persistedThread.lastRuntimeActiveMs
     // Limit messages per thread to avoid storage overflow
@@ -76,12 +78,11 @@ function sanitizeThreads(threads: Thread[]): Thread[] {
       sceneHierarchy: [],
       sceneHasChange: false,
       graphEvents: [],
-      referenceImages:
-        persistedThread.referenceImages?.map((image) => {
-          const sanitizedImage = { ...image }
-          delete sanitizedImage.previewUrl
-          return sanitizedImage
-        }) ?? []
+      images: threadImages.map((image) => {
+        const sanitizedImage = { ...image }
+        delete sanitizedImage.previewUrl
+        return sanitizedImage
+      })
     }
   })
 }
@@ -90,8 +91,17 @@ function loadThreadsFromLocalStorage(): Thread[] {
   try {
     const raw = localStorage.getItem(THREADS_KEY)
     if (!raw) return []
-    const parsed = JSON.parse(raw) as Thread[]
-    return Array.isArray(parsed) ? parsed : []
+    const parsed = JSON.parse(raw) as Array<Thread & { referenceImages?: Thread['images'] }>
+    if (!Array.isArray(parsed)) return []
+    return parsed.map((thread) => {
+      const threadAny = thread as Thread & { referenceImages?: Thread['images'] }
+      const { referenceImages, ...rest } = threadAny
+      const images = thread.images ?? referenceImages ?? []
+      return {
+        ...rest,
+        images
+      }
+    })
   } catch {
     return []
   }

@@ -8,7 +8,6 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable
-from uuid import uuid4
 
 from PIL import Image
 
@@ -47,17 +46,16 @@ class ImageBinding:
     task_id: str
     image_id: str
     role: str
-    weight: float
     created_at: str
     updated_at: str
 
 
-# Legacy naming alias for compatibility with existing imports.
+# Legacy naming alias kept for compatibility with existing internal imports.
 ReferenceImage = ImageAsset
 
 
 class ReferenceImageMemory:
-    """Thread-level image asset manager with task-level role bindings."""
+    """Thread-level image asset manager with internal task-level role bindings."""
 
     def __init__(self) -> None:
         self._store = get_image_asset_store()
@@ -85,7 +83,7 @@ class ReferenceImageMemory:
         *,
         thread_id: str,
         task_id: str,
-        bindings: Iterable[tuple[str, str, float]],
+        bindings: Iterable[tuple[str, str]],
     ) -> list[ImageBinding]:
         normalized_task_id = self._normalize_task_id(task_id)
         assets = self.list_assets(thread_id)
@@ -95,22 +93,25 @@ class ReferenceImageMemory:
         results: list[ImageBinding] = []
         now = datetime.now().isoformat()
 
-        # Remove duplicate (image_id, role) pairs while keeping the latest provided weight.
-        dedup: dict[tuple[str, str], float] = {}
-        for image_id_raw, role_raw, weight_raw in bindings:
+        dedup: list[tuple[str, str]] = []
+        dedup_seen: set[tuple[str, str]] = set()
+        for image_id_raw, role_raw in bindings:
             image_id = str(image_id_raw).strip()
             role = self._normalize_role(role_raw)
-            weight = self._coerce_weight(weight_raw)
             if not image_id:
                 continue
             if image_id not in asset_ids:
                 raise ValueError(f"Image '{image_id}' does not exist in thread '{thread_id}'.")
-            dedup[(image_id, role)] = weight
+            pair = (image_id, role)
+            if pair in dedup_seen:
+                continue
+            dedup_seen.add(pair)
+            dedup.append(pair)
 
         existing = self.list_bindings(thread_id, normalized_task_id)
         existing_by_key = {(binding.image_id, binding.role): binding for binding in existing}
 
-        for (image_id, role), weight in dedup.items():
+        for image_id, role in dedup:
             existing_binding = existing_by_key.get((image_id, role))
             binding_id = existing_binding.id if existing_binding is not None else self._binding_id(
                 normalized_task_id,
@@ -124,7 +125,6 @@ class ReferenceImageMemory:
                 task_id=normalized_task_id,
                 image_id=image_id,
                 role=role,
-                weight=weight,
                 created_at=created_at,
                 updated_at=now,
             )
@@ -137,6 +137,27 @@ class ReferenceImageMemory:
             bindings=payloads,
         )
         return results
+
+    def ensure_auto_bindings(
+        self,
+        *,
+        thread_id: str,
+        task_id: str | None,
+        preferred_role: str,
+    ) -> list[ImageBinding]:
+        """Create task-scoped bindings automatically when none exists."""
+        normalized_task_id = self._normalize_task_id(task_id)
+        existing = self.list_bindings(thread_id, normalized_task_id)
+        if existing:
+            return existing
+        assets = self.list_assets(thread_id)
+        if not assets:
+            return []
+        return self.bind_images(
+            thread_id=thread_id,
+            task_id=normalized_task_id,
+            bindings=[(asset.id, preferred_role) for asset in assets],
+        )
 
     def resolve_assets(
         self,
@@ -182,7 +203,7 @@ class ReferenceImageMemory:
         if deduped_selected:
             resolved = [asset_by_id[image_id] for image_id in deduped_selected if image_id in asset_by_id]
         else:
-            # Fallback: if no bindings matched, expose latest thread assets.
+            # Fallback for unbound assets: return latest thread assets.
             resolved = assets
 
         if isinstance(limit, int) and limit > 0 and len(resolved) > limit:
@@ -216,8 +237,6 @@ class ReferenceImageMemory:
         thread_id: str,
         uploads: Iterable[tuple[str, str, bytes]],
         source: str = "upload",
-        bind_task_id: str | None = None,
-        bind_role: str | None = None,
     ) -> list[ImageAsset]:
         settings = get_settings()
         max_count = settings.reference_image_max_count
@@ -231,15 +250,15 @@ class ReferenceImageMemory:
         existing_by_id = {asset.id: asset for asset in existing_assets}
 
         candidate_ids: set[str] = set()
-        upload_payloads: list[tuple[str, str, bytes, str, str, int, int]] = []
+        upload_payloads: list[tuple[str, str, bytes, str, str]] = []
         for filename, content_type, payload in uploads_list:
             if len(payload) > max_bytes:
                 raise ValueError("Reference image exceeds maximum upload size.")
-            width, height = self._validate_image_payload(payload, content_type)
+            self._validate_image_payload(payload, content_type)
             sha256 = hashlib.sha256(payload).hexdigest()
             image_id = self._asset_id(sha256)
             candidate_ids.add(image_id)
-            upload_payloads.append((filename, content_type, payload, sha256, image_id, width, height))
+            upload_payloads.append((filename, content_type, payload, sha256, image_id))
 
         projected_total = len(existing_by_id | {image_id: None for image_id in candidate_ids})
         if projected_total > max_count:
@@ -252,7 +271,7 @@ class ReferenceImageMemory:
         returned_assets: list[ImageAsset] = []
         now = datetime.now().isoformat()
 
-        for filename, content_type, payload, sha256, image_id, _width, _height in upload_payloads:
+        for filename, content_type, payload, sha256, image_id in upload_payloads:
             existing = existing_by_id.get(image_id)
             if existing is not None:
                 returned_assets.append(existing)
@@ -281,28 +300,16 @@ class ReferenceImageMemory:
         if new_assets_payload:
             self._store.add_assets(thread_id=thread_id, assets=new_assets_payload)
 
-        if bind_role is not None:
-            target_task_id = bind_task_id or GLOBAL_TASK_ID
-            self.bind_images(
-                thread_id=thread_id,
-                task_id=target_task_id,
-                bindings=[(asset.id, bind_role, 1.0) for asset in returned_assets],
-            )
-
         return returned_assets
 
-    # ---------------------------------------------------------------------
-    # Legacy wrapper methods (reference-images)
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Internal/legacy helpers
+    # ------------------------------------------------------------------
     def list_images(self, thread_id: str) -> list[ReferenceImage]:
-        return self.resolve_assets(
-            thread_id=thread_id,
-            task_id=GLOBAL_TASK_ID,
-            roles={"verification_reference"},
-        )
+        return self.list_assets(thread_id)
 
     def get_image_paths(self, thread_id: str) -> list[str]:
-        return [image.stored_path for image in self.list_images(thread_id)]
+        return [image.stored_path for image in self.list_assets(thread_id)]
 
     def add_images(
         self,
@@ -314,13 +321,8 @@ class ReferenceImageMemory:
             thread_id=thread_id,
             uploads=uploads,
             source="legacy_reference_upload",
-            bind_task_id=GLOBAL_TASK_ID,
-            bind_role="verification_reference",
         )
 
-    # ---------------------------------------------------------------------
-    # Internal helpers
-    # ---------------------------------------------------------------------
     @staticmethod
     def _normalize_task_id(task_id: str | None) -> str:
         text = str(task_id or "").strip()
@@ -335,16 +337,6 @@ class ReferenceImageMemory:
             valid = ", ".join(sorted(VALID_IMAGE_ROLES))
             raise ValueError(f"Invalid image role '{role}'. Valid roles: {valid}.")
         return normalized
-
-    @staticmethod
-    def _coerce_weight(weight: float | int) -> float:
-        try:
-            value = float(weight)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("Binding weight must be numeric.") from exc
-        if value <= 0:
-            raise ValueError("Binding weight must be > 0.")
-        return value
 
     @staticmethod
     def _safe_storage_thread_id(thread_id: str) -> str:
@@ -414,7 +406,6 @@ class ReferenceImageMemory:
             "task_id": binding.task_id,
             "image_id": binding.image_id,
             "role": binding.role,
-            "weight": str(binding.weight),
             "created_at": binding.created_at,
             "updated_at": binding.updated_at,
         }
@@ -445,7 +436,6 @@ class ReferenceImageMemory:
                 task_id=str(row.get("task_id", GLOBAL_TASK_ID)),
                 image_id=str(row.get("image_id", "")),
                 role=str(row.get("role", "verification_reference")),
-                weight=float(row.get("weight", 1.0)),
                 created_at=str(row.get("created_at", "")),
                 updated_at=str(row.get("updated_at", "")),
             )

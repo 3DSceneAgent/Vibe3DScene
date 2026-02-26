@@ -1,8 +1,8 @@
 import type {
   BlendFileEntry,
   HeadlessSessionCapacityInfo,
+  ImageAsset,
   McpToolsInfo,
-  ReferenceImage,
   ReleaseRuntimeInfo,
   RenderImage,
   SceneInfo,
@@ -383,30 +383,30 @@ export async function getSceneBlendFile(
   return await response.blob()
 }
 
-export async function uploadReferenceImages(
+export async function uploadThreadImages(
   baseUrl: string,
   threadId: string,
   files: File[]
-): Promise<ReferenceImage[]> {
+): Promise<ImageAsset[]> {
   const formData = new FormData()
   files.forEach((file) => formData.append('images', file))
-  const response = await apiFetch(`${baseUrl}/threads/${threadId}/reference-images`, {
+  const response = await apiFetch(`${baseUrl}/threads/${threadId}/images`, {
     method: 'POST',
     body: formData
   })
   if (!response.ok) {
-    throw await buildHttpError(response, `Failed to upload reference images (${response.status})`)
+    throw await buildHttpError(response, `Failed to upload images (${response.status})`)
   }
-  const data = (await response.json()) as { images?: ReferenceImage[] }
+  const data = (await response.json()) as { images?: ImageAsset[] }
   return data.images ?? []
 }
 
-export async function listReferenceImages(baseUrl: string, threadId: string): Promise<ReferenceImage[]> {
-  const response = await apiFetch(`${baseUrl}/threads/${threadId}/reference-images`)
+export async function listThreadImages(baseUrl: string, threadId: string): Promise<ImageAsset[]> {
+  const response = await apiFetch(`${baseUrl}/threads/${threadId}/images`)
   if (!response.ok) {
-    throw await buildHttpError(response, `Failed to load reference images (${response.status})`)
+    throw await buildHttpError(response, `Failed to load images (${response.status})`)
   }
-  const data = (await response.json()) as { images?: ReferenceImage[] }
+  const data = (await response.json()) as { images?: ImageAsset[] }
   return data.images ?? []
 }
 

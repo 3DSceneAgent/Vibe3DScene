@@ -1,7 +1,7 @@
-import type { ReferenceImage } from '../api/types'
+import type { ImageAsset } from '../api/types'
 
 type ReferenceImageStripProps = {
-  images: ReferenceImage[]
+  images: ImageAsset[]
 }
 
 export function ReferenceImageStrip({ images }: ReferenceImageStripProps) {

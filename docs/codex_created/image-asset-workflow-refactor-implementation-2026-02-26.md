@@ -136,3 +136,59 @@ pytest -q tests/contract/test_reference_images.py tests/integration/test_referen
 3. 旧接口仍可用，前后端可渐进迁移。
 4. 测试已覆盖关键新接口与解析路径，整体回归通过。
 
+
+---
+
+## 6. 后续迭代：自动绑定优先（2026-02-26，追加）
+
+本次追加改动围绕三点：
+
+1. 去除手动语义绑定接口（`image-bindings`）。
+2. 去除 legacy `reference-images` API。
+3. 前端统一切换到 `/threads/{thread_id}/images`。
+
+### 6.1 后端接口调整
+
+1. 删除：
+   - `POST /threads/{thread_id}/tasks/{task_id}/image-bindings`
+   - `GET /threads/{thread_id}/tasks/{task_id}/image-bindings`
+   - `POST /threads/{thread_id}/reference-images`
+   - `GET /threads/{thread_id}/reference-images`
+2. 保留：
+   - `POST /threads/{thread_id}/images`
+   - `GET /threads/{thread_id}/images`
+3. `weight` 字段从 API 层移除。
+
+### 6.2 自动绑定策略
+
+1. `verify_node` 在解析参考图前，会按当前 `task_mode` 自动补齐 task 绑定（仅内部行为）：
+   - `conversation_mode -> question_image`
+   - `single_action_mode -> object_reference`
+   - `plan_mode -> scene_reference`
+2. 若 task 无绑定，自动把当前 thread 的图片资产绑定到该 mode 对应 role。
+3. `resolve_assets` 仍保留无绑定回退（返回 thread 最新资产）以保证鲁棒性。
+
+### 6.3 前端改造
+
+1. API client 切换为：
+   - `uploadThreadImages()` -> `POST /threads/{thread_id}/images`
+   - `listThreadImages()` -> `GET /threads/{thread_id}/images`
+2. 线程状态从 `referenceImages` 迁移为 `images`。
+3. 本地存储增加兼容迁移：老数据中的 `referenceImages` 自动映射到 `images`。
+
+### 6.4 追加验证
+
+执行命令：
+
+```bash
+pytest -q tests/unit
+pytest -q tests/contract/test_reference_images.py tests/integration/test_reference_images.py
+cd web && npm run build && npm run lint
+```
+
+结果：
+
+1. `tests/unit`: 194 passed, 4 skipped
+2. `contract + integration(image)`: 4 passed
+3. `web build + lint`: 通过
+

@@ -35,7 +35,7 @@ export type BlendFileEntry = {
   category: string
 }
 
-export type ReferenceImage = {
+export type ImageAsset = {
   id: string
   thread_id: string
   filename: string
@@ -43,6 +43,7 @@ export type ReferenceImage = {
   size_bytes: number
   sha256: string
   uploaded_at: string
+  source?: string
   previewUrl?: string
 }
 

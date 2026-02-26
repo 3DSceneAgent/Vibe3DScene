@@ -35,13 +35,8 @@ from scene_agent.config import get_settings
 from scene_agent.env import load_project_dotenv
 from scene_agent.memory.scene_memory import SceneMemory
 from scene_agent.memory.reference_image_memory import (
-    GLOBAL_TASK_ID,
     ImageAsset,
-    ImageBinding,
-    VALID_IMAGE_ROLES,
-    ReferenceImage,
     get_image_asset_memory,
-    get_reference_image_memory,
 )
 from scene_agent.session import get_session_coordinator
 from scene_agent.session.owner_proxy import OwnerProxyError, forward_request_to_owner
@@ -1042,48 +1037,6 @@ class ImageAssetListResponse(BaseModel):
     images: list[ImageAssetResponse]
 
 
-class ImageBindingResponse(BaseModel):
-    id: str
-    thread_id: str
-    task_id: str
-    image_id: str
-    role: str
-    weight: float
-    created_at: str
-    updated_at: str
-
-
-class ImageBindingItem(BaseModel):
-    image_id: str
-    role: str
-    weight: float = 1.0
-
-
-class ImageBindingUpsertRequest(BaseModel):
-    bindings: list[ImageBindingItem]
-
-
-class ImageBindingListResponse(BaseModel):
-    thread_id: str
-    task_id: str
-    bindings: list[ImageBindingResponse]
-
-
-class ReferenceImageResponse(BaseModel):
-    id: str
-    thread_id: str
-    filename: str
-    content_type: str
-    size_bytes: int
-    sha256: str
-    uploaded_at: str
-
-
-class ReferenceImageListResponse(BaseModel):
-    thread_id: str
-    images: list[ReferenceImageResponse]
-
-
 class ExamplePromptsResponse(BaseModel):
     prompts: list[str]
 
@@ -1193,18 +1146,6 @@ class BlendFileListResponse(BaseModel):
     files: list[BlendFileEntry]
 
 
-def serialize_reference_image(image: ReferenceImage) -> ReferenceImageResponse:
-    return ReferenceImageResponse(
-        id=image.id,
-        thread_id=image.thread_id,
-        filename=image.filename,
-        content_type=image.content_type,
-        size_bytes=image.size_bytes,
-        sha256=image.sha256,
-        uploaded_at=image.uploaded_at,
-    )
-
-
 def serialize_image_asset(image: ImageAsset) -> ImageAssetResponse:
     return ImageAssetResponse(
         id=image.id,
@@ -1215,19 +1156,6 @@ def serialize_image_asset(image: ImageAsset) -> ImageAssetResponse:
         sha256=image.sha256,
         uploaded_at=image.uploaded_at,
         source=image.source,
-    )
-
-
-def serialize_image_binding(binding: ImageBinding) -> ImageBindingResponse:
-    return ImageBindingResponse(
-        id=binding.id,
-        thread_id=binding.thread_id,
-        task_id=binding.task_id,
-        image_id=binding.image_id,
-        role=binding.role,
-        weight=binding.weight,
-        created_at=binding.created_at,
-        updated_at=binding.updated_at,
     )
 
 
@@ -1787,8 +1715,6 @@ async def root():
             "scene_renders": "GET /scene/{thread_id}/renders",
             "scene_gltf": "GET /scene/{thread_id}/gltf",
             "images": "GET/POST /threads/{thread_id}/images",
-            "image_bindings": "GET/POST /threads/{thread_id}/tasks/{task_id}/image-bindings",
-            "reference_images": "GET/POST /threads/{thread_id}/reference-images (legacy)",
             "example_prompts": "GET /example-prompts",
             "vlm_models": "GET /vlm/models",
             "mcp_tools": "GET /threads/{thread_id}/mcp-tools",
@@ -2911,21 +2837,10 @@ async def download_scene_blend_file(thread_id: str, path: str, request: Request)
     return result
 
 
-def _normalize_image_role(role: str | None) -> str | None:
-    if role is None:
-        return None
-    normalized = role.strip().lower().replace("-", "_").replace(" ", "_")
-    if not normalized:
-        return None
-    if normalized not in VALID_IMAGE_ROLES:
-        valid = ", ".join(sorted(VALID_IMAGE_ROLES))
-        raise HTTPException(status_code=400, detail=f"Invalid role '{role}'. Valid roles: {valid}.")
-    return normalized
-
-
-def _normalize_image_task_id(task_id: str | None) -> str:
-    text = str(task_id or "").strip()
-    return text or GLOBAL_TASK_ID
+def _normalize_image_limit(limit: int | None) -> int | None:
+    if isinstance(limit, int) and limit > 0:
+        return limit
+    return None
 
 
 @app.post("/threads/{thread_id}/images", response_model=ImageAssetListResponse)
@@ -2934,12 +2849,10 @@ async def upload_image_assets(
     request: Request,
     response: Response,
     images: list[UploadFile] = File(...),
-    task_id: str | None = None,
-    role: str | None = None,
     source: str = "upload",
 ):
     """
-    Upload image assets for a thread and optionally bind them to a task role.
+    Upload image assets for a thread.
     """
     resolution = await _claim_or_takeover_upload_request(request=request, thread_id=thread_id)
     settings = get_settings()
@@ -2947,9 +2860,6 @@ async def upload_image_assets(
         raise HTTPException(status_code=400, detail="No images provided.")
     if len(images) > settings.reference_image_max_count:
         raise HTTPException(status_code=400, detail="Too many images uploaded.")
-
-    normalized_role = _normalize_image_role(role)
-    normalized_task_id = _normalize_image_task_id(task_id) if normalized_role is not None else None
 
     uploads: list[tuple[str, str, bytes]] = []
     for image in images:
@@ -2962,8 +2872,6 @@ async def upload_image_assets(
             thread_id=thread_id,
             uploads=uploads,
             source=source,
-            bind_task_id=normalized_task_id,
-            bind_role=normalized_role,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2981,165 +2889,25 @@ async def list_image_assets(
     thread_id: str,
     request: Request,
     response: Response,
-    task_id: str | None = None,
-    role: str | None = None,
     limit: int | None = None,
 ):
     """
-    List image assets; optionally resolve by task bindings and role.
+    List image assets for a thread.
     """
     resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
     if proxied is not None:
         return proxied
 
-    normalized_role = _normalize_image_role(role)
-    normalized_task_id = _normalize_image_task_id(task_id) if task_id is not None else None
-    normalized_limit = limit if isinstance(limit, int) and limit > 0 else None
+    normalized_limit = _normalize_image_limit(limit)
 
     memory = get_image_asset_memory()
-    images = memory.resolve_assets(
-        thread_id=thread_id,
-        task_id=normalized_task_id,
-        roles={normalized_role} if normalized_role else None,
-        limit=normalized_limit,
-    )
+    images = memory.list_assets(thread_id)
+    if normalized_limit is not None and len(images) > normalized_limit:
+        images = images[-normalized_limit:]
+
     payload = ImageAssetListResponse(
         thread_id=thread_id,
         images=[serialize_image_asset(image) for image in images],
-    )
-    _set_owner_headers(response, resolution)
-    return payload
-
-
-@app.post(
-    "/threads/{thread_id}/tasks/{task_id}/image-bindings",
-    response_model=ImageBindingListResponse,
-)
-async def upsert_image_bindings(
-    thread_id: str,
-    task_id: str,
-    payload: ImageBindingUpsertRequest,
-    request: Request,
-    response: Response,
-):
-    """
-    Bind existing image assets to a task with explicit semantic roles.
-    """
-    resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
-    if proxied is not None:
-        return proxied
-
-    if not payload.bindings:
-        raise HTTPException(status_code=400, detail="No bindings provided.")
-
-    memory = get_image_asset_memory()
-    try:
-        bindings = memory.bind_images(
-            thread_id=thread_id,
-            task_id=_normalize_image_task_id(task_id),
-            bindings=[
-                (
-                    item.image_id,
-                    _normalize_image_role(item.role) or "verification_reference",
-                    item.weight,
-                )
-                for item in payload.bindings
-            ],
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    result = ImageBindingListResponse(
-        thread_id=thread_id,
-        task_id=_normalize_image_task_id(task_id),
-        bindings=[serialize_image_binding(binding) for binding in bindings],
-    )
-    _set_owner_headers(response, resolution)
-    return result
-
-
-@app.get(
-    "/threads/{thread_id}/tasks/{task_id}/image-bindings",
-    response_model=ImageBindingListResponse,
-)
-async def list_image_bindings(
-    thread_id: str,
-    task_id: str,
-    request: Request,
-    response: Response,
-    role: str | None = None,
-):
-    """
-    List role bindings for one task.
-    """
-    resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
-    if proxied is not None:
-        return proxied
-
-    normalized_role = _normalize_image_role(role)
-    memory = get_image_asset_memory()
-    bindings = memory.list_bindings(thread_id, _normalize_image_task_id(task_id))
-    if normalized_role is not None:
-        bindings = [binding for binding in bindings if binding.role == normalized_role]
-
-    result = ImageBindingListResponse(
-        thread_id=thread_id,
-        task_id=_normalize_image_task_id(task_id),
-        bindings=[serialize_image_binding(binding) for binding in bindings],
-    )
-    _set_owner_headers(response, resolution)
-    return result
-
-
-@app.post("/threads/{thread_id}/reference-images", response_model=ReferenceImageListResponse)
-async def upload_reference_images(
-    thread_id: str,
-    request: Request,
-    response: Response,
-    images: list[UploadFile] = File(...),
-):
-    """
-    Legacy endpoint: upload reference images for verification.
-    """
-    resolution = await _claim_or_takeover_upload_request(request=request, thread_id=thread_id)
-    settings = get_settings()
-    if not images:
-        raise HTTPException(status_code=400, detail="No images provided.")
-    if len(images) > settings.reference_image_max_count:
-        raise HTTPException(status_code=400, detail="Too many images uploaded.")
-
-    uploads: list[tuple[str, str, bytes]] = []
-    for image in images:
-        payload = await image.read()
-        uploads.append((image.filename or "reference.png", image.content_type or "image/unknown", payload))
-
-    memory = get_reference_image_memory()
-    try:
-        stored = memory.add_images(thread_id=thread_id, uploads=uploads)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    payload = ReferenceImageListResponse(
-        thread_id=thread_id,
-        images=[serialize_reference_image(image) for image in stored],
-    )
-    _set_owner_headers(response, resolution)
-    return payload
-
-
-@app.get("/threads/{thread_id}/reference-images", response_model=ReferenceImageListResponse)
-async def list_reference_images(thread_id: str, request: Request, response: Response):
-    """
-    Legacy endpoint: list verification reference images.
-    """
-    resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
-    if proxied is not None:
-        return proxied
-    memory = get_reference_image_memory()
-    images = memory.list_images(thread_id)
-    payload = ReferenceImageListResponse(
-        thread_id=thread_id,
-        images=[serialize_reference_image(image) for image in images],
     )
     _set_owner_headers(response, resolution)
     return payload

@@ -3,7 +3,7 @@ import { MessageList } from './MessageList'
 import { ChatComposer } from './ChatComposer'
 import { ReferenceImageStrip } from './ReferenceImageStrip'
 import { GraphTimeline } from './GraphTimeline'
-import type { GraphNodeStream, ReferenceImage, VlmProviderOption } from '../api/types'
+import type { GraphNodeStream, ImageAsset, VlmProviderOption } from '../api/types'
 
 type ChatTabProps = {
   thread: Thread | null
@@ -104,15 +104,15 @@ export function ChatTab({
       <div className="chat-scroll-area">
         <MessageList messages={thread.messages} backendUrl={backendUrl} />
       </div>
-      {thread.referenceImages && thread.referenceImages.length > 0 && (
-        <ReferenceImageStrip images={thread.referenceImages as ReferenceImage[]} />
+      {thread.images && thread.images.length > 0 && (
+        <ReferenceImageStrip images={thread.images as ImageAsset[]} />
       )}
       {runtimeClaimHint && <div className="chat-runtime-hint">{runtimeClaimHint}</div>}
       <ChatComposer
         disabled={isStreaming}
         onSend={onSend}
         onStop={onStop}
-        referenceImagesCount={thread.referenceImages?.length ?? 0}
+        referenceImagesCount={thread.images?.length ?? 0}
         examplePrompts={availablePrompts}
         mcpTools={mcpTools}
         mcpToolHints={mcpToolHints}

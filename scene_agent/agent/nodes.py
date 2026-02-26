@@ -148,6 +148,14 @@ def _verification_roles_for_mode(mode: TaskMode) -> set[str]:
     return {"scene_reference", "object_reference", "verification_reference", "style_reference"}
 
 
+def _auto_binding_role_for_mode(mode: TaskMode) -> str:
+    if mode == MODE_CONVERSATION:
+        return "question_image"
+    if mode == MODE_SINGLE_ACTION:
+        return "object_reference"
+    return "scene_reference"
+
+
 def _unfinished_todo_count(state: AgentState) -> int:
     todos = _coerce_todos(state.get("todos"))
     latest = _latest_todos_by_description(todos)
@@ -187,6 +195,12 @@ def _resolve_verification_assets(state: AgentState) -> list[Any]:
     memory = get_reference_image_memory()
     if hasattr(memory, "resolve_assets"):
         try:
+            if hasattr(memory, "ensure_auto_bindings"):
+                memory.ensure_auto_bindings(
+                    thread_id=thread_id,
+                    task_id=normalized_task_id or GLOBAL_TASK_ID,
+                    preferred_role=_auto_binding_role_for_mode(mode),
+                )
             return memory.resolve_assets(
                 thread_id=thread_id,
                 task_id=normalized_task_id or GLOBAL_TASK_ID,

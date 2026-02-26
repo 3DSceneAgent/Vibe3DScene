@@ -9,8 +9,8 @@ import {
   getSceneBlendFile,
   deleteThread as deleteThreadApi,
   getHealth,
-  uploadReferenceImages,
-  listReferenceImages,
+  uploadThreadImages,
+  listThreadImages,
   getExamplePrompts,
   getMcpTools,
   getVlmModels,
@@ -21,7 +21,7 @@ import type {
   BlendFileEntry,
   GraphNodeStream,
   HeadlessSessionCapacityInfo,
-  ReferenceImage,
+  ImageAsset,
   StreamEvent,
   TodoItem,
   VlmProviderOption
@@ -183,7 +183,7 @@ function App() {
   const receivedDeltaRef = useRef(false)
   const sceneChangeRef = useRef<Record<string, boolean>>({})
   const settingsRef = useRef(settings)
-  const loadedReferenceImagesRef = useRef<Set<string>>(new Set())
+  const loadedThreadImagesRef = useRef<Set<string>>(new Set())
   const currentStreamRef = useRef<{ threadId: string; assistantId: string; runId: number } | null>(null)
   const streamRunIdRef = useRef(0)
   const messageIdMapRef = useRef<Map<string, string>>(new Map())
@@ -635,7 +635,7 @@ function App() {
         gltfUrl: null,
         sceneHierarchy: [],
         sceneHasChange: false,
-        referenceImages: [],
+        images: [],
         graphEvents: [],
         occupyingResources: false,
         lastRuntimeActiveMs: 0
@@ -663,8 +663,8 @@ function App() {
       if (target?.gltfUrl) {
         URL.revokeObjectURL(target.gltfUrl)
       }
-      if (target?.referenceImages) {
-        target.referenceImages.forEach((image) => {
+      if (target?.images) {
+        target.images.forEach((image) => {
           if (image.previewUrl) {
             URL.revokeObjectURL(image.previewUrl)
           }
@@ -672,7 +672,7 @@ function App() {
       }
       return prev.filter((thread) => thread.id !== threadId)
     })
-    loadedReferenceImagesRef.current.delete(threadId)
+    loadedThreadImagesRef.current.delete(threadId)
     delete autoFetchLastRunRef.current[threadId]
     delete sceneChangeRef.current[threadId]
     if (rendersAbortRef.current[threadId]) {
@@ -730,10 +730,10 @@ function App() {
     return Array.from(map.values())
   }
 
-  const mergeReferenceImages = (
-    existing: ReferenceImage[],
-    incoming: ReferenceImage[]
-  ): ReferenceImage[] => {
+  const mergeThreadImages = (
+    existing: ImageAsset[],
+    incoming: ImageAsset[]
+  ): ImageAsset[] => {
     const map = new Map(existing.map((image) => [image.id, image]))
     incoming.forEach((image) => {
       const previous = map.get(image.id)
@@ -916,20 +916,20 @@ function App() {
         return false
       }
       try {
-        const uploaded = await uploadReferenceImages(settings.backendUrl, threadId, files)
+        const uploaded = await uploadThreadImages(settings.backendUrl, threadId, files)
         const nextImages = uploaded.map((image, index) => ({
           ...image,
           previewUrl: files[index] ? URL.createObjectURL(files[index]) : undefined
         }))
         updateThread(threadId, (thread) => ({
           ...thread,
-          referenceImages: mergeReferenceImages(thread.referenceImages ?? [], nextImages)
+          images: mergeThreadImages(thread.images ?? [], nextImages)
         }))
       } catch (error) {
         const detail =
           error instanceof Error && error.message.trim()
-            ? `Failed to upload reference images: ${error.message.trim()}`
-            : 'Failed to upload reference images.'
+            ? `Failed to upload images: ${error.message.trim()}`
+            : 'Failed to upload images.'
         markSendFailed(detail)
         return false
       }
@@ -1496,17 +1496,17 @@ function App() {
     [backendStatus, fetchRenders, fetchGltf, isHeadlessRuntimeClaimed]
   )
 
-  const refreshReferenceImages = useCallback(
+  const refreshThreadImages = useCallback(
     async (threadId: string) => {
       if (!settings.backendUrl) return
       try {
-        const images = await listReferenceImages(settings.backendUrl, threadId)
+        const images = await listThreadImages(settings.backendUrl, threadId)
         updateThread(threadId, (thread) => ({
           ...thread,
-          referenceImages: mergeReferenceImages(thread.referenceImages ?? [], images)
+          images: mergeThreadImages(thread.images ?? [], images)
         }))
       } catch {
-        // No-op: reference images are optional
+        // No-op: thread images are optional
       }
     },
     [settings.backendUrl, updateThread]
@@ -1570,11 +1570,11 @@ function App() {
   useEffect(() => {
     if (!activeThread) return
     const threadId = activeThread.id
-    if (!loadedReferenceImagesRef.current.has(threadId)) {
-      loadedReferenceImagesRef.current.add(threadId)
-      void refreshReferenceImages(threadId)
+    if (!loadedThreadImagesRef.current.has(threadId)) {
+      loadedThreadImagesRef.current.add(threadId)
+      void refreshThreadImages(threadId)
     }
-  }, [activeThread, activeThread?.id, refreshReferenceImages])
+  }, [activeThread, activeThread?.id, refreshThreadImages])
 
   const statusLabel =
     backendStatus === 'online'

@@ -1,4 +1,4 @@
-import type { GraphNodeStream, ReferenceImage, RenderImage, SceneInfo, TodoItem } from '../api/types'
+import type { GraphNodeStream, ImageAsset, RenderImage, SceneInfo, TodoItem } from '../api/types'
 
 export type MessageRole = 'user' | 'assistant' | 'tool'
 export type MessageStatus = 'streaming' | 'final' | 'error'
@@ -45,7 +45,7 @@ export type Thread = {
   gltfUrl?: string | null
   sceneHierarchy?: SceneHierarchyNode[]
   sceneHasChange?: boolean
-  referenceImages?: ReferenceImage[]
+  images?: ImageAsset[]
   graphEvents?: GraphNodeStream[]
   occupyingResources?: boolean
   lastRuntimeActiveMs?: number
