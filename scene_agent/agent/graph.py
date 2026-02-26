@@ -20,15 +20,20 @@ from scene_agent.agent.nodes import (
     TODO_BLOCKED_RECOVERY_ATTEMPTS,
     TODO_STAGNATION_LIMIT,
     agent_node,
+    builder_agent_node,
     blocked_recovery_action_node,
     blocked_recovery_node,
     checkpoint_gate_node,
     finalize_node,
+    planner_refresh_node,
     post_agent_node,
+    post_builder_node,
     route_mode_node,
     scene_observe_node,
     todo_check_node,
+    transition_resolver_node,
     update_memory_node,
+    verifier_agent_node,
     verify_node,
 )
 from scene_agent.config import get_settings
@@ -91,6 +96,17 @@ def _task_mode(state: AgentState) -> str:
     return "plan_mode"
 
 
+def _workflow_topology(state: AgentState) -> str:
+    raw_topology = state.get("workflow_topology")
+    if isinstance(raw_topology, str) and raw_topology.strip():
+        return raw_topology.strip()
+    return "single_agent"
+
+
+def _is_dual_plan_mode(state: AgentState) -> bool:
+    return _task_mode(state) == "plan_mode" and _workflow_topology(state) == "dual_agent"
+
+
 def _has_unfinished_todos(state: AgentState) -> bool:
     todos = state.get("todos")
     if not isinstance(todos, list):
@@ -108,6 +124,12 @@ def _agent_turn_budget_exhausted(state: AgentState) -> bool:
     turns = _coerce_non_negative_int(state.get("request_agent_turns"))
     max_turns = _coerce_non_negative_int(state.get("max_request_agent_turns"), default=-1)
     return max_turns >= 0 and turns >= max_turns
+
+
+def _route_after_mode(state: AgentState) -> Literal["agent", "builder_agent"]:
+    if _is_dual_plan_mode(state):
+        return "builder_agent"
+    return "agent"
 
 
 def _route_after_post_agent(state: AgentState) -> Literal["tools", "checkpoint_finalize", "agent"]:
@@ -130,6 +152,22 @@ def _route_after_post_agent(state: AgentState) -> Literal["tools", "checkpoint_f
                 return "agent"
             return "checkpoint_finalize"
     return "checkpoint_finalize"
+
+
+def _route_after_post_builder(
+    state: AgentState,
+) -> Literal["tools", "verifier_agent", "checkpoint_finalize"]:
+    messages = state.get("messages") or []
+    for message in reversed(list(messages)):
+        if isinstance(message, AIMessage):
+            if _message_has_tool_calls(message):
+                return "tools"
+            if _agent_turn_budget_exhausted(state):
+                return "checkpoint_finalize"
+            return "verifier_agent"
+    if _agent_turn_budget_exhausted(state):
+        return "checkpoint_finalize"
+    return "verifier_agent"
 
 
 def _coerce_object_name_list(raw_value: Any) -> list[str] | None:
@@ -319,11 +357,13 @@ def _should_run_todo_check(state: AgentState) -> bool:
 
 def _route_after_loop_checkpoint(
     state: AgentState,
-) -> Literal["todo_check", "agent", "checkpoint_finalize"]:
+) -> Literal["todo_check", "agent", "builder_agent", "checkpoint_finalize"]:
     if _should_run_todo_check(state):
         return "todo_check"
     if _agent_turn_budget_exhausted(state):
         return "checkpoint_finalize"
+    if _is_dual_plan_mode(state):
+        return "builder_agent"
     return "agent"
 
 
@@ -333,7 +373,9 @@ def _route_after_finalize_checkpoint(state: AgentState) -> Literal["todo_check",
     return "finalize"
 
 
-def _route_after_todo_check(state: AgentState) -> Literal["finalize", "agent", "blocked_recovery"]:
+def _route_after_todo_check(
+    state: AgentState,
+) -> Literal["finalize", "agent", "builder_agent", "blocked_recovery"]:
     if _agent_turn_budget_exhausted(state):
         return "finalize"
     gate = state.get("todo_check_gate")
@@ -353,23 +395,46 @@ def _route_after_todo_check(state: AgentState) -> Literal["finalize", "agent", "
                 return "finalize"
         else:
             return "finalize"
+    if _is_dual_plan_mode(state):
+        return "builder_agent"
     return "agent"
 
 
-def _route_after_blocked_recovery_action(state: AgentState) -> Literal["tools", "agent"]:
+def _route_after_blocked_recovery_action(
+    state: AgentState,
+) -> Literal["tools", "agent", "builder_agent"]:
     messages = state.get("messages") or []
     for message in reversed(list(messages)):
         if isinstance(message, AIMessage):
             if _message_has_tool_calls(message):
                 return "tools"
+            if _is_dual_plan_mode(state):
+                return "builder_agent"
             return "agent"
+    if _is_dual_plan_mode(state):
+        return "builder_agent"
     return "agent"
 
 
-def _route_after_verify(state: AgentState) -> Literal["tools", "checkpoint_loop"]:
+def _route_after_verify(
+    state: AgentState,
+) -> Literal["tools", "checkpoint_loop", "verifier_agent"]:
     if bool(state.get("verify_forced_recovery")):
         return "tools"
+    if _is_dual_plan_mode(state):
+        return "verifier_agent"
     return "checkpoint_loop"
+
+
+def _route_after_transition_resolver(
+    state: AgentState,
+) -> Literal["builder_agent", "planner_refresh", "checkpoint_finalize"]:
+    transition_next = state.get("transition_next")
+    if transition_next == "planner_refresh":
+        return "planner_refresh"
+    if transition_next == "checkpoint_finalize":
+        return "checkpoint_finalize"
+    return "builder_agent"
 
 
 async def create_agent_graph(
@@ -431,6 +496,9 @@ async def create_agent_graph(
     # Define agent node with bound tools
     def call_model(state: AgentState) -> dict:
         return agent_node(state, llm_with_tools, available_tool_names)
+
+    def call_builder_model(state: AgentState) -> dict:
+        return builder_agent_node(state, llm_with_tools, available_tool_names)
     
     # Build graph
     builder = StateGraph(AgentState)
@@ -439,6 +507,11 @@ async def create_agent_graph(
     builder.add_node("route_mode", route_mode_node)
     builder.add_node("agent", call_model)
     builder.add_node("post_agent", post_agent_node)
+    builder.add_node("builder_agent", call_builder_model)
+    builder.add_node("post_builder", post_builder_node)
+    builder.add_node("verifier_agent", verifier_agent_node)
+    builder.add_node("transition_resolver", transition_resolver_node)
+    builder.add_node("planner_refresh", planner_refresh_node)
     builder.add_node(
         "tools",
         ToolNode(
@@ -477,13 +550,18 @@ async def create_agent_graph(
     
     # Connect nodes
     builder.add_edge(START, "route_mode")
-    builder.add_edge("route_mode", "agent")
+    builder.add_conditional_edges("route_mode", _route_after_mode)
 
     # Persist decision/todo after each assistant response, then branch.
     builder.add_edge("agent", "post_agent")
     builder.add_conditional_edges(
         "post_agent",
         _route_after_post_agent,
+    )
+    builder.add_edge("builder_agent", "post_builder")
+    builder.add_conditional_edges(
+        "post_builder",
+        _route_after_post_builder,
     )
     
     # After tools: update_memory -> scene_observe -> verify -> checkpoint_loop
@@ -494,6 +572,12 @@ async def create_agent_graph(
         "verify",
         _route_after_verify,
     )
+    builder.add_edge("verifier_agent", "transition_resolver")
+    builder.add_conditional_edges(
+        "transition_resolver",
+        _route_after_transition_resolver,
+    )
+    builder.add_edge("planner_refresh", "builder_agent")
     builder.add_conditional_edges(
         "checkpoint_loop",
         _route_after_loop_checkpoint,

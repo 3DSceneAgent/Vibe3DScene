@@ -1013,6 +1013,8 @@ class ChatRequest(BaseModel):
     vlm_model: str | None = None
     enabled_mcp_tools: list[str] | None = None
     task_id: str | None = None
+    workflow_topology: str | None = None
+    memory_profile: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -1849,6 +1851,8 @@ async def chat(request: ChatRequest, request_http: Request, response: Response):
                 "thread_id": request.thread_id,
                 "enabled_tool_names": enabled_tool_names,
                 "task_id": request.task_id,
+                "workflow_topology_request": request.workflow_topology,
+                "memory_profile_request": request.memory_profile,
             },
             config=config
         )
@@ -1946,6 +1950,8 @@ async def chat_stream(request: ChatRequest, request_http: Request):
                     "thread_id": request.thread_id,
                     "enabled_tool_names": enabled_tool_names,
                     "task_id": request.task_id,
+                    "workflow_topology_request": request.workflow_topology,
+                    "memory_profile_request": request.memory_profile,
                 },
                 config=config,
                 stream_mode=["messages", "values", "updates"]

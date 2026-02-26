@@ -2,6 +2,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from scene_agent.agent.graph import (
     _route_after_blocked_recovery_action,
+    _route_after_loop_checkpoint,
     _route_after_post_agent,
     _route_after_verify,
     _route_after_todo_check,
@@ -14,10 +15,14 @@ from scene_agent.agent.nodes import (
     blocked_recovery_node,
     checkpoint_gate_node,
     finalize_node,
+    planner_refresh_node,
     post_agent_node,
+    post_builder_node,
     route_mode_node,
     scene_observe_node,
     todo_check_node,
+    transition_resolver_node,
+    verifier_agent_node,
 )
 
 
@@ -129,6 +134,30 @@ def test_route_mode_node_forces_plan_mode_when_unfinished_todos_exist():
     )
     assert result["task_mode"] == "plan_mode"
     assert result["task_intent"] == "continue_existing_plan"
+
+
+def test_route_mode_node_sets_dual_topology_for_plan_mode_when_requested():
+    result = route_mode_node(
+        {
+            "messages": [HumanMessage(content="Create a chair and then add a lamp.")],
+            "workflow_topology_request": "dual_agent",
+        }
+    )
+    assert result["task_mode"] == "plan_mode"
+    assert result["workflow_topology"] == "dual_agent"
+    assert result["active_role"] == "builder"
+
+
+def test_route_mode_node_downgrades_dual_request_for_conversation_mode():
+    result = route_mode_node(
+        {
+            "messages": [HumanMessage(content="What is global illumination?")],
+            "workflow_topology_request": "dual_agent",
+        }
+    )
+    assert result["task_mode"] == "conversation_mode"
+    assert result["workflow_topology"] == "single_agent"
+    assert result["active_role"] == "general"
 
 
 def test_post_agent_reuses_todo_id_by_description():
@@ -295,6 +324,17 @@ def test_route_after_verify_routes_to_checkpoint_when_no_forced_recovery():
     assert next_node == "checkpoint_loop"
 
 
+def test_route_after_verify_routes_to_verifier_in_dual_plan_mode():
+    next_node = _route_after_verify(
+        {
+            "verify_forced_recovery": False,
+            "task_mode": "plan_mode",
+            "workflow_topology": "dual_agent",
+        }
+    )
+    assert next_node == "verifier_agent"
+
+
 def test_route_after_post_agent_retries_once_when_tools_expected_but_missing():
     next_node = _route_after_post_agent(
         {
@@ -317,6 +357,40 @@ def test_route_after_post_agent_finalizes_after_retry_budget_exhausted():
         }
     )
     assert next_node == "checkpoint_finalize"
+
+
+def test_route_after_loop_checkpoint_routes_to_builder_for_dual_plan_mode():
+    next_node = _route_after_loop_checkpoint(
+        {
+            "task_mode": "plan_mode",
+            "workflow_topology": "dual_agent",
+            "todo_check_gate": {"should_run": False},
+        }
+    )
+    assert next_node == "builder_agent"
+
+
+def test_route_after_todo_check_returns_builder_for_dual_plan_mode():
+    next_node = _route_after_todo_check(
+        {
+            "task_mode": "plan_mode",
+            "workflow_topology": "dual_agent",
+            "todo_check_gate": {"stage": "loop"},
+            "todo_check": {"status": "continue"},
+        }
+    )
+    assert next_node == "builder_agent"
+
+
+def test_route_after_blocked_recovery_action_returns_builder_for_dual_plan_without_calls():
+    next_node = _route_after_blocked_recovery_action(
+        {
+            "task_mode": "plan_mode",
+            "workflow_topology": "dual_agent",
+            "messages": [AIMessage(content="no tool call")],
+        }
+    )
+    assert next_node == "builder_agent"
 
 
 def test_finalize_node_emits_summary_message():
@@ -521,3 +595,68 @@ def test_latest_human_message_skips_internal_render_and_scene_observe_messages()
         ]
     }
     assert _latest_human_message(state) == "Create a red chair beside a wooden table."
+
+
+def test_post_builder_node_increments_stall_count_without_tool_calls():
+    result = post_builder_node(
+        {
+            "messages": [AIMessage(content="Trying to plan next step")],
+            "request_agent_turns": 0,
+            "builder_turn_count": 0,
+            "builder_stall_count": 0,
+            "max_request_agent_turns": 8,
+        }
+    )
+    assert result["request_agent_turns"] == 1
+    assert result["builder_turn_count"] == 1
+    assert result["builder_stall_count"] == 1
+
+
+def test_verifier_agent_node_marks_ready_to_finalize_on_match_without_open_todos():
+    result = verifier_agent_node(
+        {
+            "messages": [
+                ToolMessage(
+                    name="verification",
+                    content={"status": "match", "reason": "Looks good."},
+                    tool_call_id="verification_match",
+                )
+            ],
+            "todos": [_todo("todo-1", "Add lamp", "completed", completed_at="2026-01-01T00:10:00")],
+        }
+    )
+    feedback = result["verifier_feedback"]
+    assert feedback["status"] == "pass"
+    assert feedback["ready_to_finalize"] is True
+    assert feedback["should_replan"] is False
+
+
+def test_transition_resolver_node_routes_to_planner_refresh_on_replan_signal():
+    result = transition_resolver_node(
+        {
+            "verifier_feedback": {
+                "status": "needs_fix",
+                "should_replan": True,
+                "ready_to_finalize": False,
+            },
+            "plan_replan_count": 0,
+            "max_plan_replans": 2,
+        }
+    )
+    assert result["transition_next"] == "planner_refresh"
+
+
+def test_planner_refresh_node_adds_replan_todo():
+    result = planner_refresh_node(
+        {
+            "verifier_feedback": {
+                "reason": "layout mismatch",
+                "fix_instructions": ["Move chair closer to table"],
+            },
+            "plan_replan_count": 0,
+            "max_plan_replans": 2,
+        }
+    )
+    assert result["plan_replan_count"] == 1
+    assert result["builder_stall_count"] == 0
+    assert len(result["todos"]) >= 1

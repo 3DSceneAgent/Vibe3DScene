@@ -14,7 +14,17 @@ from datetime import datetime
 from typing import Any, Dict, Literal
 from urllib.parse import unquote, urlparse
 from langchain_core.messages import ToolMessage, AIMessage, SystemMessage, HumanMessage
+from scene_agent.agent.memory_scope import merge_role_private_memory, resolve_memory_profile
 from scene_agent.agent.state import AgentState, TaskMode, TodoItem, create_todo
+from scene_agent.agent.tool_policy import (
+    READ_ONLY_TOOLS,
+    coerce_request_tool_budgets,
+    resolve_effective_tool_names,
+)
+from scene_agent.agent.workflow_profiles import (
+    normalize_workflow_topology_request,
+    resolve_workflow_topology,
+)
 from scene_agent.config import get_settings
 from scene_agent.memory.scene_memory import SceneMemory
 from scene_agent.memory.reference_image_memory import GLOBAL_TASK_ID, get_image_asset_memory
@@ -72,6 +82,12 @@ _CATASTROPHIC_RECOVERY_MAX_FORCED_ATTEMPTS = 2
 MODE_CONVERSATION: TaskMode = "conversation_mode"
 MODE_SINGLE_ACTION: TaskMode = "single_action_mode"
 MODE_PLAN: TaskMode = "plan_mode"
+TOPOLOGY_SINGLE = "single_agent"
+TOPOLOGY_DUAL = "dual_agent"
+ROLE_GENERAL = "general"
+ROLE_BUILDER = "builder"
+ROLE_VERIFIER = "verifier"
+DEFAULT_MAX_PLAN_REPLANS = 2
 
 REQUEST_BUDGET_DEFAULTS: dict[TaskMode, dict[str, int]] = {
     MODE_CONVERSATION: {"max_request_agent_turns": 2, "max_request_tool_batches": 0},
@@ -79,18 +95,7 @@ REQUEST_BUDGET_DEFAULTS: dict[TaskMode, dict[str, int]] = {
     MODE_PLAN: {"max_request_agent_turns": 8, "max_request_tool_batches": 6},
 }
 
-CONVERSATION_READ_ONLY_TOOLS: frozenset[str] = frozenset(
-    {
-        "get_scene_info",
-        "get_object_info",
-        "observe_scene_global",
-        "camera_observe",
-        "render_from_camera",
-        "render_from_objects",
-        "camera_act",
-        "camera_set_pose",
-    }
-)
+CONVERSATION_READ_ONLY_TOOLS: frozenset[str] = READ_ONLY_TOOLS
 
 _PLAN_INTENT_MARKERS: tuple[str, ...] = (
     "recreate",
@@ -134,6 +139,22 @@ def _coerce_task_mode(raw_mode: Any) -> TaskMode:
     if raw_mode in {MODE_CONVERSATION, MODE_SINGLE_ACTION, MODE_PLAN}:
         return raw_mode
     return MODE_PLAN
+
+
+def _coerce_workflow_topology(raw_topology: Any) -> str:
+    if isinstance(raw_topology, str):
+        normalized = raw_topology.strip()
+        if normalized in {TOPOLOGY_SINGLE, TOPOLOGY_DUAL}:
+            return normalized
+    return TOPOLOGY_SINGLE
+
+
+def _coerce_role(raw_role: Any) -> str:
+    if isinstance(raw_role, str):
+        normalized = raw_role.strip()
+        if normalized in {ROLE_GENERAL, ROLE_BUILDER, ROLE_VERIFIER}:
+            return normalized
+    return ROLE_GENERAL
 
 
 def _request_budget(mode: TaskMode) -> dict[str, int]:
@@ -238,6 +259,29 @@ def route_mode_node(state: AgentState) -> Dict[str, Any]:
     else:
         mode, intent = _classify_task_mode_from_text(latest_user_request)
 
+    raw_topology_request = state.get("workflow_topology_request")
+    if raw_topology_request is None:
+        raw_topology_request = state.get("workflow_topology")
+    requested_topology = normalize_workflow_topology_request(raw_topology_request)
+    workflow_topology = resolve_workflow_topology(
+        task_mode=mode,
+        requested_topology=requested_topology,
+    )
+
+    raw_memory_profile_request = state.get("memory_profile_request")
+    if raw_memory_profile_request is None:
+        raw_memory_profile_request = state.get("memory_profile")
+    memory_profile_request = "auto"
+    if isinstance(raw_memory_profile_request, str):
+        normalized_memory_request = raw_memory_profile_request.strip().lower().replace("-", "_")
+        if normalized_memory_request in {
+            "auto",
+            "thread_shared_only",
+            "shared_plus_role_private",
+        }:
+            memory_profile_request = normalized_memory_request
+    memory_profile = resolve_memory_profile(memory_profile_request)
+
     current_task_id = state.get("task_id")
     if isinstance(current_task_id, str) and current_task_id.strip():
         normalized_task_id = current_task_id.strip()[:128]
@@ -256,13 +300,33 @@ def route_mode_node(state: AgentState) -> Dict[str, Any]:
     elif mode == MODE_SINGLE_ACTION:
         tool_policy = "allow_mutation_limited"
 
+    active_role = ROLE_GENERAL
+    if mode == MODE_PLAN and workflow_topology == TOPOLOGY_DUAL:
+        active_role = ROLE_BUILDER
+
+    max_plan_replans = _coerce_non_negative_int(
+        state.get("max_plan_replans"),
+        default=DEFAULT_MAX_PLAN_REPLANS,
+    )
+
     return {
         "task_mode": mode,
         "task_intent": intent,
         "task_id": normalized_task_id,
         "tool_policy": tool_policy,
+        "workflow_topology_request": requested_topology,
+        "memory_profile_request": memory_profile_request,
+        "workflow_topology": workflow_topology,
+        "memory_profile": memory_profile,
+        "active_role": active_role,
         "request_agent_turns": 0,
         "request_tool_batches": 0,
+        "builder_turn_count": 0,
+        "verifier_turn_count": 0,
+        "builder_stall_count": 0,
+        "plan_replan_count": 0,
+        "max_plan_replans": max_plan_replans,
+        "transition_next": None,
         "max_request_agent_turns": budget["max_request_agent_turns"],
         "max_request_tool_batches": budget["max_request_tool_batches"],
         "request_stop_reason": None,
@@ -272,20 +336,23 @@ def route_mode_node(state: AgentState) -> Dict[str, Any]:
 def _effective_tool_names_for_state(
     state: AgentState,
     tool_names: list[str] | None,
+    *,
+    role: str = ROLE_GENERAL,
 ) -> tuple[list[str] | None, str | None]:
-    if tool_names is None:
-        return None, None
-
     mode = _coerce_task_mode(state.get("task_mode"))
-    if mode == MODE_CONVERSATION:
-        filtered = [name for name in tool_names if name in CONVERSATION_READ_ONLY_TOOLS]
-        return filtered, "conversation_mode_read_only"
-
-    request_tool_batches = _coerce_non_negative_int(state.get("request_tool_batches"))
-    max_request_tool_batches = _coerce_non_negative_int(state.get("max_request_tool_batches"), default=-1)
-    if max_request_tool_batches >= 0 and request_tool_batches >= max_request_tool_batches:
-        return [], "request_tool_budget_exhausted"
-    return tool_names, None
+    safe_role = _coerce_role(role)
+    request_tool_batches, max_request_tool_batches = coerce_request_tool_budgets(
+        request_tool_batches=state.get("request_tool_batches"),
+        max_request_tool_batches=state.get("max_request_tool_batches"),
+    )
+    return resolve_effective_tool_names(
+        mode=mode,
+        role=safe_role,
+        available_tool_names=tool_names,
+        requested_tool_names=None,
+        request_tool_batches=request_tool_batches,
+        max_request_tool_batches=max_request_tool_batches,
+    )
 
 
 def agent_node(
@@ -304,12 +371,42 @@ def agent_node(
     Returns:
         Partial state update with new messages
     """
+    return _invoke_role_agent(
+        state=state,
+        llm_with_tools=llm_with_tools,
+        available_tool_names=available_tool_names,
+        role=ROLE_GENERAL,
+    )
+
+
+def _invoke_role_agent(
+    *,
+    state: AgentState,
+    llm_with_tools: Any,
+    available_tool_names: list[str] | None,
+    role: str,
+) -> Dict[str, Any]:
     # Build messages including system prompt
     from scene_agent.agent.prompts import get_full_system_prompt
+
     requested_tool_names = _resolve_effective_available_tools(state, available_tool_names)
-    effective_tool_names, tool_policy_reason = _effective_tool_names_for_state(state, requested_tool_names)
+    effective_tool_names, tool_policy_reason = _effective_tool_names_for_state(
+        state,
+        requested_tool_names,
+        role=role,
+    )
 
     messages = [SystemMessage(content=get_full_system_prompt(effective_tool_names))]
+    if role == ROLE_BUILDER:
+        messages.append(
+            SystemMessage(
+                content=(
+                    "You are the Builder agent for plan_mode execution. "
+                    "Focus on concrete scene edits and tool calls. "
+                    "Use verifier feedback and todo context to perform the next highest-impact fix."
+                )
+            )
+        )
     tool_constraints = _build_available_tools_constraint(effective_tool_names)
     if tool_constraints:
         messages.append(SystemMessage(content=tool_constraints))
@@ -319,6 +416,14 @@ def agent_node(
                 content=(
                     "Current mode is conversation_mode. "
                     "Do not call scene-mutation tools; answer directly unless a read-only check is essential."
+                )
+            )
+        )
+    elif tool_policy_reason == "verifier_role_read_only":
+        messages.append(
+            SystemMessage(
+                content=(
+                    "Current role is verifier. Only read-only camera/inspection tools are allowed."
                 )
             )
         )
@@ -345,7 +450,26 @@ def agent_node(
                 f"Skipped: {skipped}."
             )
     
-    return {"messages": [response]}
+    result: Dict[str, Any] = {"messages": [response]}
+    if _coerce_role(state.get("active_role")) != role:
+        result["active_role"] = role
+    return result
+
+
+def builder_agent_node(
+    state: AgentState,
+    llm_with_tools,
+    available_tool_names: list[str] | None = None,
+) -> Dict[str, Any]:
+    """
+    Builder agent node for dual-agent plan_mode execution.
+    """
+    return _invoke_role_agent(
+        state=state,
+        llm_with_tools=llm_with_tools,
+        available_tool_names=available_tool_names,
+        role=ROLE_BUILDER,
+    )
 
 
 def post_agent_node(state: AgentState) -> Dict[str, Any]:
@@ -370,6 +494,278 @@ def post_agent_node(state: AgentState) -> Dict[str, Any]:
     if max_turns >= 0 and next_turns >= max_turns:
         result["request_stop_reason"] = "agent_turn_budget_exhausted"
 
+    return result
+
+
+def _ai_message_has_tool_calls(message: AIMessage | None) -> bool:
+    if not isinstance(message, AIMessage):
+        return False
+    tool_calls = getattr(message, "tool_calls", None)
+    if isinstance(tool_calls, list) and len(tool_calls) > 0:
+        return True
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict):
+        raw_calls = additional_kwargs.get("tool_calls")
+        return isinstance(raw_calls, list) and len(raw_calls) > 0
+    return False
+
+
+def post_builder_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Post-builder node used in plan_mode dual-agent execution.
+    """
+    last_messages = state["messages"][-10:]
+    latest_ai_message = _find_last_ai_message(last_messages)
+    result: Dict[str, Any] = {"active_role": ROLE_BUILDER}
+
+    if latest_ai_message is not None:
+        todo_updates = extract_todo_updates([latest_ai_message])
+        aligned_todos = _align_todo_updates_with_existing(state.get("todos"), todo_updates)
+        if aligned_todos:
+            result["todos"] = aligned_todos
+
+    current_turns = _coerce_non_negative_int(state.get("request_agent_turns"))
+    next_turns = current_turns + 1
+    result["request_agent_turns"] = next_turns
+
+    current_builder_turns = _coerce_non_negative_int(state.get("builder_turn_count"))
+    result["builder_turn_count"] = current_builder_turns + 1
+
+    if _ai_message_has_tool_calls(latest_ai_message):
+        result["builder_stall_count"] = 0
+    else:
+        stall = _coerce_non_negative_int(state.get("builder_stall_count"))
+        result["builder_stall_count"] = stall + 1
+
+    max_turns = _coerce_non_negative_int(state.get("max_request_agent_turns"), default=-1)
+    if max_turns >= 0 and next_turns >= max_turns:
+        result["request_stop_reason"] = "agent_turn_budget_exhausted"
+
+    if latest_ai_message is not None:
+        builder_note = _message_content_to_text(latest_ai_message.content).strip()
+        if builder_note:
+            result["role_private_memory"] = merge_role_private_memory(
+                state.get("role_private_memory"),
+                role=ROLE_BUILDER,
+                patch={
+                    "last_action_summary": builder_note[:1200],
+                },
+            )
+
+    return result
+
+
+def _coerce_verification_dict(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, str):
+        parsed = _coerce_verification_payload_from_text(payload)
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _extract_verifier_fix_instructions(verification: dict[str, Any]) -> list[str]:
+    instructions: list[str] = []
+    seen: set[str] = set()
+
+    raw_suggestions = verification.get("edit_suggestions")
+    if isinstance(raw_suggestions, list):
+        for raw_item in raw_suggestions:
+            if not isinstance(raw_item, str):
+                continue
+            text = " ".join(raw_item.strip().split())
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            instructions.append(text)
+
+    for key in (
+        "reason",
+        "guidance",
+        "object_feedback",
+        "layout_feedback",
+        "placement_feedback",
+        "material_feedback",
+        "scale_feedback",
+        "environment_feedback",
+    ):
+        raw_value = verification.get(key)
+        if not isinstance(raw_value, str):
+            continue
+        text = " ".join(raw_value.strip().split())
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        instructions.append(text)
+
+    return instructions[:8]
+
+
+def _replan_budget_remaining(state: AgentState) -> bool:
+    current_replans = _coerce_non_negative_int(state.get("plan_replan_count"))
+    max_replans = _coerce_non_negative_int(
+        state.get("max_plan_replans"),
+        default=DEFAULT_MAX_PLAN_REPLANS,
+    )
+    if max_replans < 0:
+        return True
+    return current_replans < max_replans
+
+
+def verifier_agent_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Build compact structured verifier feedback from latest verification evidence.
+    """
+    verification_payload = _latest_verification_payload(state)
+    verification = _coerce_verification_dict(verification_payload)
+    raw_status = verification.get("status")
+    normalized_status = raw_status.strip().lower() if isinstance(raw_status, str) else ""
+    unfinished_todos = _unfinished_todo_count(state)
+
+    feedback_status = "needs_fix"
+    if normalized_status in {"match", "pass", "passed"}:
+        feedback_status = "pass"
+    elif normalized_status == "catastrophic":
+        feedback_status = "catastrophic"
+
+    fix_instructions = _extract_verifier_fix_instructions(verification)
+    should_replan = False
+    if feedback_status == "needs_fix":
+        stall_count = _coerce_non_negative_int(state.get("builder_stall_count"))
+        should_replan = _replan_budget_remaining(state) and (stall_count >= 2 or len(fix_instructions) == 0)
+
+    ready_to_finalize = feedback_status == "pass" and unfinished_todos == 0
+    confidence = 0.55
+    if feedback_status == "pass":
+        confidence = 0.9
+    elif feedback_status == "catastrophic":
+        confidence = 0.4
+
+    verifier_feedback = {
+        "status": feedback_status,
+        "source_verification_status": normalized_status or "unknown",
+        "ready_to_finalize": ready_to_finalize,
+        "should_replan": should_replan,
+        "focus_objects": [],
+        "fix_instructions": fix_instructions,
+        "confidence": confidence,
+    }
+
+    if isinstance(verification.get("reason"), str) and verification["reason"].strip():
+        verifier_feedback["reason"] = verification["reason"].strip()
+    elif fix_instructions:
+        verifier_feedback["reason"] = fix_instructions[0]
+    else:
+        verifier_feedback["reason"] = "No explicit verification guidance was available."
+
+    next_verifier_turns = _coerce_non_negative_int(state.get("verifier_turn_count")) + 1
+    role_private_memory = merge_role_private_memory(
+        state.get("role_private_memory"),
+        role=ROLE_VERIFIER,
+        patch={
+            "last_feedback_status": verifier_feedback["status"],
+            "last_feedback_reason": verifier_feedback["reason"],
+            "last_feedback_confidence": verifier_feedback["confidence"],
+        },
+    )
+
+    return {
+        "verifier_feedback": verifier_feedback,
+        "verifier_turn_count": next_verifier_turns,
+        "active_role": ROLE_VERIFIER,
+        "role_private_memory": role_private_memory,
+    }
+
+
+def transition_resolver_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Deterministic transition resolver for plan_mode dual-agent loop.
+    """
+    request_stop_reason = state.get("request_stop_reason")
+    if isinstance(request_stop_reason, str) and request_stop_reason:
+        return {"transition_next": "checkpoint_finalize"}
+
+    turns = _coerce_non_negative_int(state.get("request_agent_turns"))
+    max_turns = _coerce_non_negative_int(state.get("max_request_agent_turns"), default=-1)
+    if max_turns >= 0 and turns >= max_turns:
+        return {"transition_next": "checkpoint_finalize"}
+
+    feedback = state.get("verifier_feedback")
+    if not isinstance(feedback, dict):
+        return {"transition_next": "builder_agent"}
+
+    status = str(feedback.get("status", "")).strip().lower()
+    if status == "pass":
+        if _unfinished_todo_count(state) == 0:
+            return {"transition_next": "checkpoint_finalize"}
+        return {"transition_next": "builder_agent"}
+
+    if status == "catastrophic":
+        return {"transition_next": "builder_agent"}
+
+    if bool(feedback.get("should_replan")) and _replan_budget_remaining(state):
+        return {"transition_next": "planner_refresh"}
+
+    builder_stall_count = _coerce_non_negative_int(state.get("builder_stall_count"))
+    if builder_stall_count >= 2 and _replan_budget_remaining(state):
+        return {"transition_next": "planner_refresh"}
+
+    return {"transition_next": "builder_agent"}
+
+
+def planner_refresh_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Lightweight plan refresh from verifier feedback.
+    """
+    current_replans = _coerce_non_negative_int(state.get("plan_replan_count"))
+    max_replans = _coerce_non_negative_int(
+        state.get("max_plan_replans"),
+        default=DEFAULT_MAX_PLAN_REPLANS,
+    )
+    next_replans = current_replans + 1
+
+    result: Dict[str, Any] = {
+        "plan_replan_count": next_replans,
+        "active_role": ROLE_BUILDER,
+        "builder_stall_count": 0,
+    }
+    if max_replans >= 0 and next_replans > max_replans:
+        result["request_stop_reason"] = "plan_replan_budget_exhausted"
+        return result
+
+    feedback = state.get("verifier_feedback")
+    reason = ""
+    instructions: list[str] = []
+    if isinstance(feedback, dict):
+        reason_value = feedback.get("reason")
+        if isinstance(reason_value, str):
+            reason = reason_value.strip()
+        raw_instructions = feedback.get("fix_instructions")
+        if isinstance(raw_instructions, list):
+            for item in raw_instructions:
+                if isinstance(item, str):
+                    text = " ".join(item.strip().split())
+                    if text:
+                        instructions.append(text)
+
+    new_todos: list[TodoItem] = []
+    for instruction in instructions[:2]:
+        new_todos.append(create_todo(description=f"Replan fix: {instruction}", status="pending"))
+
+    if not new_todos:
+        fallback_description = reason or "Re-evaluate scene plan and continue fixing unresolved mismatches"
+        new_todos.append(create_todo(description=f"Replan: {fallback_description}", status="pending"))
+
+    result["todos"] = new_todos
+    result["role_private_memory"] = merge_role_private_memory(
+        state.get("role_private_memory"),
+        role=ROLE_BUILDER,
+        patch={
+            "last_replan_reason": reason or "verifier_requested_replan",
+            "replan_count": next_replans,
+        },
+    )
     return result
 
 
@@ -430,6 +826,8 @@ def _build_workflow_metadata(state: AgentState) -> dict[str, Any]:
         "finish_reason": finish_reason,
         "task_mode": task_mode,
         "task_intent": state.get("task_intent"),
+        "workflow_topology": _coerce_workflow_topology(state.get("workflow_topology")),
+        "memory_profile": state.get("memory_profile"),
         "request_agent_turns": _coerce_non_negative_int(state.get("request_agent_turns")),
         "request_tool_batches": _coerce_non_negative_int(state.get("request_tool_batches")),
     }
@@ -622,8 +1020,14 @@ def _build_finalize_summary_context(
         "workflow_status": workflow.get("workflow_status"),
         "task_mode": workflow.get("task_mode"),
         "task_intent": workflow.get("task_intent"),
+        "workflow_topology": workflow.get("workflow_topology"),
+        "memory_profile": workflow.get("memory_profile"),
         "request_agent_turns": workflow.get("request_agent_turns"),
         "request_tool_batches": workflow.get("request_tool_batches"),
+        "builder_turn_count": _coerce_non_negative_int(state.get("builder_turn_count")),
+        "verifier_turn_count": _coerce_non_negative_int(state.get("verifier_turn_count")),
+        "plan_replan_count": _coerce_non_negative_int(state.get("plan_replan_count")),
+        "verifier_feedback": state.get("verifier_feedback") if isinstance(state.get("verifier_feedback"), dict) else {},
         "latest_user_request": _latest_human_message(state),
         "todo_check": todo_summary,
         "active_todos": _active_todo_context(state),
