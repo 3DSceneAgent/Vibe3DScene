@@ -67,8 +67,6 @@ _RENDER_VISION_MESSAGE_ID = "render_vision_current"
 _SCENE_OBSERVE_MESSAGE_ID = "scene_observe_current"
 _TODO_BLOCKED_RECOVERY_MESSAGE_ID = "todo_blocked_recovery_current"
 _TODO_BLOCKED_RECOVERY_ACTION_MESSAGE_ID = "todo_blocked_recovery_action_current"
-_CATASTROPHIC_RECOVERY_ACTION_MESSAGE_ID = "catastrophic_recovery_action_current"
-_CATASTROPHIC_RECOVERY_NOTE_MESSAGE_ID = "catastrophic_recovery_note_current"
 
 _CATASTROPHIC_SCENE_DIMENSION_THRESHOLD = 5000.0
 _CATASTROPHIC_OBJECT_COORD_THRESHOLD = 5000.0
@@ -77,7 +75,6 @@ _CATASTROPHIC_RENDER_STDDEV_THRESHOLD = 2.0
 _CATASTROPHIC_RENDER_GRAY_DRIFT_THRESHOLD = 3.0
 _CATASTROPHIC_RENDER_BLACK_MEAN_THRESHOLD = 4.0
 _CATASTROPHIC_RENDER_WHITE_MEAN_THRESHOLD = 251.0
-_CATASTROPHIC_RECOVERY_MAX_FORCED_ATTEMPTS = 2
 
 MODE_CONVERSATION: TaskMode = "conversation_mode"
 MODE_SINGLE_ACTION: TaskMode = "single_action_mode"
@@ -419,11 +416,12 @@ def _invoke_role_agent(
                 )
             )
         )
-    elif tool_policy_reason == "verifier_role_read_only":
+    elif tool_policy_reason == "verifier_role_camera_tools":
         messages.append(
             SystemMessage(
                 content=(
-                    "Current role is verifier. Only read-only camera/inspection tools are allowed."
+                    "Current role is verifier. "
+                    "Use camera and render tools for verification; do not use scene-asset mutation tools."
                 )
             )
         )
@@ -469,6 +467,25 @@ def builder_agent_node(
         llm_with_tools=llm_with_tools,
         available_tool_names=available_tool_names,
         role=ROLE_BUILDER,
+    )
+
+
+def verifier_camera_agent_node(
+    state: AgentState,
+    llm_with_tools,
+    available_tool_names: list[str] | None = None,
+) -> Dict[str, Any]:
+    """
+    Tool-capable verifier agent.
+
+    This role can operate camera/render inspection tools (including camera
+    adjustments) but is blocked from scene asset mutation tools.
+    """
+    return _invoke_role_agent(
+        state=state,
+        llm_with_tools=llm_with_tools,
+        available_tool_names=available_tool_names,
+        role=ROLE_VERIFIER,
     )
 
 
@@ -549,6 +566,39 @@ def post_builder_node(state: AgentState) -> Dict[str, Any]:
                 role=ROLE_BUILDER,
                 patch={
                     "last_action_summary": builder_note[:1200],
+                },
+            )
+
+    return result
+
+
+def post_verifier_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Post-verifier node used in plan_mode dual-agent execution.
+    """
+    last_messages = state["messages"][-10:]
+    latest_ai_message = _find_last_ai_message(last_messages)
+    result: Dict[str, Any] = {"active_role": ROLE_VERIFIER}
+
+    current_turns = _coerce_non_negative_int(state.get("request_agent_turns"))
+    next_turns = current_turns + 1
+    result["request_agent_turns"] = next_turns
+
+    current_verifier_turns = _coerce_non_negative_int(state.get("verifier_turn_count"))
+    result["verifier_turn_count"] = current_verifier_turns + 1
+
+    max_turns = _coerce_non_negative_int(state.get("max_request_agent_turns"), default=-1)
+    if max_turns >= 0 and next_turns >= max_turns:
+        result["request_stop_reason"] = "agent_turn_budget_exhausted"
+
+    if latest_ai_message is not None:
+        verifier_note = _message_content_to_text(latest_ai_message.content).strip()
+        if verifier_note:
+            result["role_private_memory"] = merge_role_private_memory(
+                state.get("role_private_memory"),
+                role=ROLE_VERIFIER,
+                patch={
+                    "last_verifier_action_summary": verifier_note[:1200],
                 },
             )
 
@@ -659,7 +709,7 @@ def verifier_agent_node(state: AgentState) -> Dict[str, Any]:
     else:
         verifier_feedback["reason"] = "No explicit verification guidance was available."
 
-    next_verifier_turns = _coerce_non_negative_int(state.get("verifier_turn_count")) + 1
+    next_verifier_turns = _coerce_non_negative_int(state.get("verifier_turn_count"))
     role_private_memory = merge_role_private_memory(
         state.get("role_private_memory"),
         role=ROLE_VERIFIER,
@@ -676,6 +726,11 @@ def verifier_agent_node(state: AgentState) -> Dict[str, Any]:
         "active_role": ROLE_VERIFIER,
         "role_private_memory": role_private_memory,
     }
+
+
+def verifier_feedback_node(state: AgentState) -> Dict[str, Any]:
+    """Alias node for readability in graph composition."""
+    return verifier_agent_node(state)
 
 
 def transition_resolver_node(state: AgentState) -> Dict[str, Any]:
@@ -2635,75 +2690,6 @@ def _resolve_enabled_tool_set(state: AgentState) -> set[str]:
     }
 
 
-def _tool_is_available(enabled_tool_set: set[str], tool_name: str) -> bool:
-    if not enabled_tool_set:
-        return True
-    return tool_name in enabled_tool_set
-
-
-def _build_catastrophic_recovery_tool_calls(
-    *,
-    enabled_tool_set: set[str],
-    recovery_attempt: int,
-) -> tuple[str | None, list[dict[str, Any]]]:
-    primary_action: str | None = None
-    if recovery_attempt <= 1 and _tool_is_available(enabled_tool_set, "undo_last_snapshot"):
-        primary_action = "undo_last_snapshot"
-    elif _tool_is_available(enabled_tool_set, "clear_scene"):
-        primary_action = "clear_scene"
-
-    tool_calls: list[dict[str, Any]] = []
-    if primary_action:
-        tool_calls.append(
-            {
-                "name": primary_action,
-                "args": {},
-                "id": f"catastrophic-{primary_action}-{recovery_attempt}",
-                "type": "tool_call",
-            }
-        )
-        if _tool_is_available(enabled_tool_set, "get_scene_info"):
-            tool_calls.append(
-                {
-                    "name": "get_scene_info",
-                    "args": {},
-                    "id": f"catastrophic-scene-info-{recovery_attempt}",
-                    "type": "tool_call",
-                }
-            )
-        if _tool_is_available(enabled_tool_set, "observe_scene_global"):
-            tool_calls.append(
-                {
-                    "name": "observe_scene_global",
-                    "args": {},
-                    "id": f"catastrophic-observe-{recovery_attempt}",
-                    "type": "tool_call",
-                }
-            )
-    return primary_action, tool_calls
-
-
-def _should_reset_catastrophic_recovery_attempts(state: AgentState) -> bool:
-    """Start a fresh catastrophic-recovery budget for new non-recovery scene edits."""
-    latest_tools = state.get("last_tool_batch_names")
-    if not isinstance(latest_tools, list):
-        return False
-
-    for raw_name in latest_tools:
-        if not isinstance(raw_name, str):
-            continue
-        name = raw_name.strip()
-        if not name:
-            continue
-        if name in {"undo_last_snapshot", "clear_scene"}:
-            # This is a recovery step from the current incident; keep budget.
-            continue
-        if name in SCENE_MUTATING_TOOLS:
-            # A new regular scene mutation can introduce a new catastrophic incident.
-            return True
-    return False
-
-
 def verify_node(
     state: AgentState,
     *,
@@ -2732,39 +2718,23 @@ def verify_node(
         state,
         render_reference=render_path,
     )
-    catastrophic_recovery_attempts = _coerce_non_negative_int(state.get("catastrophic_recovery_attempts"))
-    if _should_reset_catastrophic_recovery_attempts(state):
-        catastrophic_recovery_attempts = 0
     if catastrophic_report.get("is_catastrophic"):
-        recovery_attempt = catastrophic_recovery_attempts + 1
-        enabled_tool_set = _resolve_enabled_tool_set(state)
-        recovery_action, recovery_tool_calls = _build_catastrophic_recovery_tool_calls(
-            enabled_tool_set=enabled_tool_set,
-            recovery_attempt=recovery_attempt,
-        )
-        forced_recovery = (
-            bool(recovery_action)
-            and recovery_attempt <= _CATASTROPHIC_RECOVERY_MAX_FORCED_ATTEMPTS
-            and len(recovery_tool_calls) > 0
-        )
-
         verification = {
             "status": "catastrophic",
-            "reason": "Catastrophic scene-state signal detected; hard recovery gate activated.",
+            "reason": (
+                "Catastrophic scene-state signal detected. "
+                "Automatic hard-recovery tool injection is disabled; use verifier-guided remediation."
+            ),
             "render_path": render_path,
             "render_source": render_source,
             "catastrophic_signals": catastrophic_report.get("signals", []),
             "catastrophic_metrics": catastrophic_report.get("metrics", {}),
             "hard_recovery": {
-                "forced": forced_recovery,
-                "attempt": recovery_attempt,
-                "max_forced_attempts": _CATASTROPHIC_RECOVERY_MAX_FORCED_ATTEMPTS,
-                "action": recovery_action or "none",
-                "tool_calls": [call.get("name") for call in recovery_tool_calls if isinstance(call, dict)],
+                "forced": False,
+                "action": "disabled",
+                "tool_calls": [],
             },
         }
-        if recovery_action == "clear_scene":
-            verification["todo_rebuild_recommended"] = True
 
         guidance_text = _build_verification_guidance_message(state, verification)
         if guidance_text:
@@ -2774,41 +2744,17 @@ def verify_node(
             "verification_"
             + hashlib.sha1(str(render_path).encode("utf-8")).hexdigest()[:12]
         )
-        messages: list[Any] = [
-            ToolMessage(
-                name="verification",
-                content=verification,
-                tool_call_id=verification_tool_call_id,
-            )
-        ]
-        if recovery_action == "clear_scene":
-            messages.append(
-                SystemMessage(
-                    id=_CATASTROPHIC_RECOVERY_NOTE_MESSAGE_ID,
-                    content=(
-                        "Hard recovery executed clear_scene. Re-evaluate current todos against an empty baseline "
-                        "and rebuild the todo plan if old tasks assume deleted scene assets."
-                    ),
-                )
-            )
-        if forced_recovery:
-            messages.append(
-                AIMessage(
-                    id=_CATASTROPHIC_RECOVERY_ACTION_MESSAGE_ID,
-                    content="",
-                    tool_calls=recovery_tool_calls,
-                )
-            )
-
         result: Dict[str, Any] = {
-            "messages": messages,
+            "messages": [
+                ToolMessage(
+                    name="verification",
+                    content=verification,
+                    tool_call_id=verification_tool_call_id,
+                )
+            ],
             "last_verified_path": render_path,
-            "verify_forced_recovery": forced_recovery,
-            "catastrophic_recovery_attempts": (
-                min(recovery_attempt, _CATASTROPHIC_RECOVERY_MAX_FORCED_ATTEMPTS)
-                if forced_recovery
-                else catastrophic_recovery_attempts
-            ),
+            "verify_forced_recovery": False,
+            "catastrophic_recovery_attempts": 0,
         }
         return result
 

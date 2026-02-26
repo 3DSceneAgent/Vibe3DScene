@@ -17,24 +17,22 @@ from scene_agent.agent.graph_factory import build_agent_state_graph
 from scene_agent.agent.state import AgentState
 from scene_agent.agent.redis_checkpointer import get_graph_checkpointer
 from scene_agent.agent.nodes import (
-    TODO_BLOCKED_RECOVERY_ATTEMPTS,
-    TODO_STAGNATION_LIMIT,
     agent_node,
     builder_agent_node,
-    blocked_recovery_action_node,
-    blocked_recovery_node,
-    checkpoint_gate_node,
     finalize_node,
     planner_refresh_node,
     post_agent_node,
     post_builder_node,
+    post_verifier_node,
     route_mode_node,
     scene_observe_node,
     todo_check_node,
     transition_resolver_node,
     update_memory_node,
-    verifier_agent_node,
+    verifier_camera_agent_node,
+    verifier_feedback_node,
     verify_node,
+    checkpoint_gate_node,
 )
 from scene_agent.config import get_settings
 from scene_agent.vlm import get_vlm_provider
@@ -156,7 +154,7 @@ def _route_after_post_agent(state: AgentState) -> Literal["tools", "checkpoint_f
 
 def _route_after_post_builder(
     state: AgentState,
-) -> Literal["tools", "verifier_agent", "checkpoint_finalize"]:
+) -> Literal["tools", "verifier_camera_agent", "checkpoint_finalize"]:
     messages = state.get("messages") or []
     for message in reversed(list(messages)):
         if isinstance(message, AIMessage):
@@ -164,10 +162,26 @@ def _route_after_post_builder(
                 return "tools"
             if _agent_turn_budget_exhausted(state):
                 return "checkpoint_finalize"
-            return "verifier_agent"
+            return "verifier_camera_agent"
     if _agent_turn_budget_exhausted(state):
         return "checkpoint_finalize"
-    return "verifier_agent"
+    return "verifier_camera_agent"
+
+
+def _route_after_post_verifier(
+    state: AgentState,
+) -> Literal["tools", "verifier_feedback", "checkpoint_finalize"]:
+    messages = state.get("messages") or []
+    for message in reversed(list(messages)):
+        if isinstance(message, AIMessage):
+            if _message_has_tool_calls(message):
+                return "tools"
+            if _agent_turn_budget_exhausted(state):
+                return "checkpoint_finalize"
+            return "verifier_feedback"
+    if _agent_turn_budget_exhausted(state):
+        return "checkpoint_finalize"
+    return "verifier_feedback"
 
 
 def _coerce_object_name_list(raw_value: Any) -> list[str] | None:
@@ -375,7 +389,7 @@ def _route_after_finalize_checkpoint(state: AgentState) -> Literal["todo_check",
 
 def _route_after_todo_check(
     state: AgentState,
-) -> Literal["finalize", "agent", "builder_agent", "blocked_recovery"]:
+) -> Literal["finalize", "agent", "builder_agent"]:
     if _agent_turn_budget_exhausted(state):
         return "finalize"
     gate = state.get("todo_check_gate")
@@ -386,13 +400,9 @@ def _route_after_todo_check(
             if status in {"completed", "not_applicable"}:
                 return "finalize"
             if status == "blocked":
-                stagnation_count = todo_check.get("stagnation_count")
-                if (
-                    isinstance(stagnation_count, int)
-                    and stagnation_count < (TODO_STAGNATION_LIMIT + TODO_BLOCKED_RECOVERY_ATTEMPTS)
-                ):
-                    return "blocked_recovery"
-                return "finalize"
+                if _is_dual_plan_mode(state):
+                    return "builder_agent"
+                return "agent"
         else:
             return "finalize"
     if _is_dual_plan_mode(state):
@@ -418,11 +428,9 @@ def _route_after_blocked_recovery_action(
 
 def _route_after_verify(
     state: AgentState,
-) -> Literal["tools", "checkpoint_loop", "verifier_agent"]:
-    if bool(state.get("verify_forced_recovery")):
-        return "tools"
+) -> Literal["checkpoint_loop", "verifier_camera_agent"]:
     if _is_dual_plan_mode(state):
-        return "verifier_agent"
+        return "verifier_camera_agent"
     return "checkpoint_loop"
 
 
@@ -499,6 +507,9 @@ async def create_agent_graph(
 
     def call_builder_model(state: AgentState) -> dict:
         return builder_agent_node(state, llm_with_tools, available_tool_names)
+
+    def call_verifier_camera_model(state: AgentState) -> dict:
+        return verifier_camera_agent_node(state, llm_with_tools, available_tool_names)
     
     builder = build_agent_state_graph(
         route_mode_node=route_mode_node,
@@ -506,6 +517,9 @@ async def create_agent_graph(
         post_agent_node=post_agent_node,
         builder_agent_node=call_builder_model,
         post_builder_node=post_builder_node,
+        verifier_camera_agent_node=call_verifier_camera_model,
+        post_verifier_node=post_verifier_node,
+        verifier_feedback_node=verifier_feedback_node,
         tools_node=ToolNode(
             tools,
             handle_tool_errors=False,
@@ -517,27 +531,24 @@ async def create_agent_graph(
         checkpoint_loop_node=lambda state: checkpoint_gate_node(state, stage="loop"),
         checkpoint_finalize_node=lambda state: checkpoint_gate_node(state, stage="finalize"),
         todo_check_node=todo_check_node,
-        blocked_recovery_node=blocked_recovery_node,
-        blocked_recovery_action_node=blocked_recovery_action_node,
         verify_node=lambda state: verify_node(
             state,
             provider_name=selected_provider,
             api_key=selected_api_key,
             model=selected_model,
         ),
-        verifier_agent_node=verifier_agent_node,
         transition_resolver_node=transition_resolver_node,
         planner_refresh_node=planner_refresh_node,
         finalize_node=lambda state: finalize_node(state, finalizer_model=model),
         route_after_mode=_route_after_mode,
         route_after_post_agent=_route_after_post_agent,
         route_after_post_builder=_route_after_post_builder,
+        route_after_post_verifier=_route_after_post_verifier,
         route_after_verify=_route_after_verify,
         route_after_transition_resolver=_route_after_transition_resolver,
         route_after_loop_checkpoint=_route_after_loop_checkpoint,
         route_after_finalize_checkpoint=_route_after_finalize_checkpoint,
         route_after_todo_check=_route_after_todo_check,
-        route_after_blocked_recovery_action=_route_after_blocked_recovery_action,
     )
     
     # Compile with checkpointing

@@ -8,10 +8,34 @@ from typing import Any
 from scene_agent.agent.state import TaskMode
 from scene_agent.agent.workflow_profiles import AgentRole, ToolProfile
 
+VERIFIER_CAMERA_TOOLS: frozenset[str] = frozenset(
+    {
+        "get_scene_info",
+        "get_object_info",
+        "observe_scene_global",
+        "camera_observe",
+        "render_from_camera",
+        "render_from_objects",
+        "camera_act",
+        "camera_set_pose",
+        "get_viewport_screenshot",
+    }
+)
+
 READ_ONLY_TOOLS: frozenset[str] = frozenset(
     {
         "get_scene_info",
         "get_object_info",
+        "observe_scene_global",
+        "camera_observe",
+        "render_from_camera",
+        "render_from_objects",
+        "get_viewport_screenshot",
+    }
+)
+
+BUILDER_CAMERA_TOOLS: frozenset[str] = frozenset(
+    {
         "observe_scene_global",
         "camera_observe",
         "render_from_camera",
@@ -69,10 +93,12 @@ def _default_profile_for_role(mode: TaskMode, role: AgentRole) -> ToolProfile:
 
 
 def _filter_for_profile(tool_names: list[str], profile: ToolProfile) -> list[str]:
-    if profile in {"read_only", "verifier_default"}:
+    if profile == "read_only":
         return [name for name in tool_names if name in READ_ONLY_TOOLS]
+    if profile == "verifier_default":
+        return [name for name in tool_names if name in VERIFIER_CAMERA_TOOLS]
     if profile == "builder_default":
-        return list(tool_names)
+        return [name for name in tool_names if name not in BUILDER_CAMERA_TOOLS]
     return list(tool_names)
 
 
@@ -100,7 +126,7 @@ def resolve_effective_tool_names(
         filtered = _filter_for_profile(filtered, "read_only")
         return filtered, "conversation_mode_read_only"
     if role == "verifier":
-        return filtered, "verifier_role_read_only"
+        return filtered, "verifier_role_camera_tools"
     return filtered, None
 
 
