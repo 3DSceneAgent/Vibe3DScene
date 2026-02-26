@@ -77,6 +77,7 @@ class AgentState(TypedDict):
         todos: List of todo items for task tracking
         thread_id: Conversation/session identifier
         enabled_tool_names: Optional runtime MCP tool allow-list for this request
+        task_id: Optional task identifier for image-role bindings
         last_render_path: Latest render file path from tools
         last_verified_path: Latest render path verified by VLM
         tool_round_count: Total tool batches executed for this thread graph state
@@ -103,6 +104,7 @@ class AgentState(TypedDict):
     # Session identifier
     thread_id: str
     enabled_tool_names: NotRequired[list[str] | None]
+    task_id: NotRequired[str | None]
     task_mode: NotRequired[TaskMode]
     task_intent: NotRequired[str]
     tool_policy: NotRequired[str]

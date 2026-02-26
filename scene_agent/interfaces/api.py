@@ -22,6 +22,7 @@ from langchain_core.messages import HumanMessage
 from scene_agent.blender.connection import BlenderConnection
 
 from scene_agent.agent.graph import create_agent_graph
+from scene_agent.agent.redis_checkpointer import get_graph_checkpointer
 from scene_agent.blender.session_manager import (
     SessionResourceError,
     SessionResourceReason,
@@ -34,7 +35,12 @@ from scene_agent.config import get_settings
 from scene_agent.env import load_project_dotenv
 from scene_agent.memory.scene_memory import SceneMemory
 from scene_agent.memory.reference_image_memory import (
+    GLOBAL_TASK_ID,
+    ImageAsset,
+    ImageBinding,
+    VALID_IMAGE_ROLES,
     ReferenceImage,
+    get_image_asset_memory,
     get_reference_image_memory,
 )
 from scene_agent.session import get_session_coordinator
@@ -1011,12 +1017,56 @@ class ChatRequest(BaseModel):
     vlm_provider: str | None = None
     vlm_model: str | None = None
     enabled_mcp_tools: list[str] | None = None
+    task_id: str | None = None
 
 
 class ChatResponse(BaseModel):
     response: str
     thread_id: str
     todos: list[Dict[str, Any]] = []
+
+
+class ImageAssetResponse(BaseModel):
+    id: str
+    thread_id: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    sha256: str
+    uploaded_at: str
+    source: str
+
+
+class ImageAssetListResponse(BaseModel):
+    thread_id: str
+    images: list[ImageAssetResponse]
+
+
+class ImageBindingResponse(BaseModel):
+    id: str
+    thread_id: str
+    task_id: str
+    image_id: str
+    role: str
+    weight: float
+    created_at: str
+    updated_at: str
+
+
+class ImageBindingItem(BaseModel):
+    image_id: str
+    role: str
+    weight: float = 1.0
+
+
+class ImageBindingUpsertRequest(BaseModel):
+    bindings: list[ImageBindingItem]
+
+
+class ImageBindingListResponse(BaseModel):
+    thread_id: str
+    task_id: str
+    bindings: list[ImageBindingResponse]
 
 
 class ReferenceImageResponse(BaseModel):
@@ -1152,6 +1202,32 @@ def serialize_reference_image(image: ReferenceImage) -> ReferenceImageResponse:
         size_bytes=image.size_bytes,
         sha256=image.sha256,
         uploaded_at=image.uploaded_at,
+    )
+
+
+def serialize_image_asset(image: ImageAsset) -> ImageAssetResponse:
+    return ImageAssetResponse(
+        id=image.id,
+        thread_id=image.thread_id,
+        filename=image.filename,
+        content_type=image.content_type,
+        size_bytes=image.size_bytes,
+        sha256=image.sha256,
+        uploaded_at=image.uploaded_at,
+        source=image.source,
+    )
+
+
+def serialize_image_binding(binding: ImageBinding) -> ImageBindingResponse:
+    return ImageBindingResponse(
+        id=binding.id,
+        thread_id=binding.thread_id,
+        task_id=binding.task_id,
+        image_id=binding.image_id,
+        role=binding.role,
+        weight=binding.weight,
+        created_at=binding.created_at,
+        updated_at=binding.updated_at,
     )
 
 
@@ -1435,6 +1511,19 @@ async def _claim_or_proxy_request(
         _bind_frontend_client_to_thread_if_unclaimed(thread_id, request_client_id)
         return resolution, None
 
+    if _is_multipart_request(request):
+        takeover = coordinator.force_takeover(thread_id)
+        if not takeover.is_owner:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Cannot proxy multipart upload for thread '{thread_id}'. "
+                    f"Current owner: {takeover.owner_worker_id}"
+                ),
+            )
+        _bind_frontend_client_to_thread_if_unclaimed(thread_id, request_client_id)
+        return takeover, None
+
     if not resolution.owner_url:
         raise HTTPException(
             status_code=503,
@@ -1488,6 +1577,40 @@ async def _claim_or_proxy_request(
                 ),
             ) from retry_error
         return takeover, None
+
+
+def _is_multipart_request(request: Request) -> bool:
+    content_type = request.headers.get("content-type", "")
+    return content_type.lower().startswith("multipart/form-data")
+
+
+async def _claim_or_takeover_upload_request(
+    *,
+    request: Request,
+    thread_id: str,
+) -> Any:
+    """
+    Ensure current worker owns upload requests.
+
+    Multipart form bodies are consumed by FastAPI before endpoint logic runs,
+    so proxy forwarding is unreliable for UploadFile endpoints.
+    """
+    coordinator = get_session_coordinator()
+    request_client_id = _resolve_frontend_client_id(request)
+    resolution = coordinator.claim_or_get_owner(thread_id)
+    if not resolution.is_owner:
+        takeover = coordinator.force_takeover(thread_id)
+        if not takeover.is_owner:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Cannot process upload for thread '{thread_id}' on this worker; "
+                    f"current owner is '{takeover.owner_worker_id}'."
+                ),
+            )
+        resolution = takeover
+    _bind_frontend_client_to_thread_if_unclaimed(thread_id, request_client_id)
+    return resolution
 
 
 async def _idle_session_sweeper() -> None:
@@ -1663,7 +1786,9 @@ async def root():
             "scene": "GET /scene/{thread_id}",
             "scene_renders": "GET /scene/{thread_id}/renders",
             "scene_gltf": "GET /scene/{thread_id}/gltf",
-            "reference_images": "GET/POST /threads/{thread_id}/reference-images",
+            "images": "GET/POST /threads/{thread_id}/images",
+            "image_bindings": "GET/POST /threads/{thread_id}/tasks/{task_id}/image-bindings",
+            "reference_images": "GET/POST /threads/{thread_id}/reference-images (legacy)",
             "example_prompts": "GET /example-prompts",
             "vlm_models": "GET /vlm/models",
             "mcp_tools": "GET /threads/{thread_id}/mcp-tools",
@@ -1797,6 +1922,7 @@ async def chat(request: ChatRequest, request_http: Request, response: Response):
                 "messages": [HumanMessage(content=request.message)],
                 "thread_id": request.thread_id,
                 "enabled_tool_names": enabled_tool_names,
+                "task_id": request.task_id,
             },
             config=config
         )
@@ -1893,6 +2019,7 @@ async def chat_stream(request: ChatRequest, request_http: Request):
                     "messages": [HumanMessage(content=request.message)],
                     "thread_id": request.thread_id,
                     "enabled_tool_names": enabled_tool_names,
+                    "task_id": request.task_id,
                 },
                 config=config,
                 stream_mode=["messages", "values", "updates"]
@@ -2784,6 +2911,186 @@ async def download_scene_blend_file(thread_id: str, path: str, request: Request)
     return result
 
 
+def _normalize_image_role(role: str | None) -> str | None:
+    if role is None:
+        return None
+    normalized = role.strip().lower().replace("-", "_").replace(" ", "_")
+    if not normalized:
+        return None
+    if normalized not in VALID_IMAGE_ROLES:
+        valid = ", ".join(sorted(VALID_IMAGE_ROLES))
+        raise HTTPException(status_code=400, detail=f"Invalid role '{role}'. Valid roles: {valid}.")
+    return normalized
+
+
+def _normalize_image_task_id(task_id: str | None) -> str:
+    text = str(task_id or "").strip()
+    return text or GLOBAL_TASK_ID
+
+
+@app.post("/threads/{thread_id}/images", response_model=ImageAssetListResponse)
+async def upload_image_assets(
+    thread_id: str,
+    request: Request,
+    response: Response,
+    images: list[UploadFile] = File(...),
+    task_id: str | None = None,
+    role: str | None = None,
+    source: str = "upload",
+):
+    """
+    Upload image assets for a thread and optionally bind them to a task role.
+    """
+    resolution = await _claim_or_takeover_upload_request(request=request, thread_id=thread_id)
+    settings = get_settings()
+    if not images:
+        raise HTTPException(status_code=400, detail="No images provided.")
+    if len(images) > settings.reference_image_max_count:
+        raise HTTPException(status_code=400, detail="Too many images uploaded.")
+
+    normalized_role = _normalize_image_role(role)
+    normalized_task_id = _normalize_image_task_id(task_id) if normalized_role is not None else None
+
+    uploads: list[tuple[str, str, bytes]] = []
+    for image in images:
+        payload = await image.read()
+        uploads.append((image.filename or "image.png", image.content_type or "image/unknown", payload))
+
+    memory = get_image_asset_memory()
+    try:
+        stored = memory.add_assets(
+            thread_id=thread_id,
+            uploads=uploads,
+            source=source,
+            bind_task_id=normalized_task_id,
+            bind_role=normalized_role,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    payload = ImageAssetListResponse(
+        thread_id=thread_id,
+        images=[serialize_image_asset(image) for image in stored],
+    )
+    _set_owner_headers(response, resolution)
+    return payload
+
+
+@app.get("/threads/{thread_id}/images", response_model=ImageAssetListResponse)
+async def list_image_assets(
+    thread_id: str,
+    request: Request,
+    response: Response,
+    task_id: str | None = None,
+    role: str | None = None,
+    limit: int | None = None,
+):
+    """
+    List image assets; optionally resolve by task bindings and role.
+    """
+    resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
+    if proxied is not None:
+        return proxied
+
+    normalized_role = _normalize_image_role(role)
+    normalized_task_id = _normalize_image_task_id(task_id) if task_id is not None else None
+    normalized_limit = limit if isinstance(limit, int) and limit > 0 else None
+
+    memory = get_image_asset_memory()
+    images = memory.resolve_assets(
+        thread_id=thread_id,
+        task_id=normalized_task_id,
+        roles={normalized_role} if normalized_role else None,
+        limit=normalized_limit,
+    )
+    payload = ImageAssetListResponse(
+        thread_id=thread_id,
+        images=[serialize_image_asset(image) for image in images],
+    )
+    _set_owner_headers(response, resolution)
+    return payload
+
+
+@app.post(
+    "/threads/{thread_id}/tasks/{task_id}/image-bindings",
+    response_model=ImageBindingListResponse,
+)
+async def upsert_image_bindings(
+    thread_id: str,
+    task_id: str,
+    payload: ImageBindingUpsertRequest,
+    request: Request,
+    response: Response,
+):
+    """
+    Bind existing image assets to a task with explicit semantic roles.
+    """
+    resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
+    if proxied is not None:
+        return proxied
+
+    if not payload.bindings:
+        raise HTTPException(status_code=400, detail="No bindings provided.")
+
+    memory = get_image_asset_memory()
+    try:
+        bindings = memory.bind_images(
+            thread_id=thread_id,
+            task_id=_normalize_image_task_id(task_id),
+            bindings=[
+                (
+                    item.image_id,
+                    _normalize_image_role(item.role) or "verification_reference",
+                    item.weight,
+                )
+                for item in payload.bindings
+            ],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    result = ImageBindingListResponse(
+        thread_id=thread_id,
+        task_id=_normalize_image_task_id(task_id),
+        bindings=[serialize_image_binding(binding) for binding in bindings],
+    )
+    _set_owner_headers(response, resolution)
+    return result
+
+
+@app.get(
+    "/threads/{thread_id}/tasks/{task_id}/image-bindings",
+    response_model=ImageBindingListResponse,
+)
+async def list_image_bindings(
+    thread_id: str,
+    task_id: str,
+    request: Request,
+    response: Response,
+    role: str | None = None,
+):
+    """
+    List role bindings for one task.
+    """
+    resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
+    if proxied is not None:
+        return proxied
+
+    normalized_role = _normalize_image_role(role)
+    memory = get_image_asset_memory()
+    bindings = memory.list_bindings(thread_id, _normalize_image_task_id(task_id))
+    if normalized_role is not None:
+        bindings = [binding for binding in bindings if binding.role == normalized_role]
+
+    result = ImageBindingListResponse(
+        thread_id=thread_id,
+        task_id=_normalize_image_task_id(task_id),
+        bindings=[serialize_image_binding(binding) for binding in bindings],
+    )
+    _set_owner_headers(response, resolution)
+    return result
+
+
 @app.post("/threads/{thread_id}/reference-images", response_model=ReferenceImageListResponse)
 async def upload_reference_images(
     thread_id: str,
@@ -2792,11 +3099,9 @@ async def upload_reference_images(
     images: list[UploadFile] = File(...),
 ):
     """
-    Upload reference images for a thread.
+    Legacy endpoint: upload reference images for verification.
     """
-    resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
-    if proxied is not None:
-        return proxied
+    resolution = await _claim_or_takeover_upload_request(request=request, thread_id=thread_id)
     settings = get_settings()
     if not images:
         raise HTTPException(status_code=400, detail="No images provided.")
@@ -2825,7 +3130,7 @@ async def upload_reference_images(
 @app.get("/threads/{thread_id}/reference-images", response_model=ReferenceImageListResponse)
 async def list_reference_images(thread_id: str, request: Request, response: Response):
     """
-    List reference images for a thread.
+    Legacy endpoint: list verification reference images.
     """
     resolution, proxied = await _claim_or_proxy_request(request=request, thread_id=thread_id)
     if proxied is not None:
@@ -3302,6 +3607,21 @@ def _teardown_thread_session(thread_id: str) -> dict[str, Any]:
         if thread_id in _thread_vlm_configs:
             del _thread_vlm_configs[thread_id]
             result["cleaned"].append("vlm_config")
+
+    try:
+        get_image_asset_memory().clear_thread(thread_id)
+        result["cleaned"].append("image_assets")
+    except Exception:
+        pass
+
+    try:
+        checkpointer = get_graph_checkpointer()
+        delete_fn = getattr(checkpointer, "delete_thread", None)
+        if callable(delete_fn):
+            delete_fn(thread_id)
+            result["cleaned"].append("graph_checkpoints")
+    except Exception:
+        pass
 
     # Clean up Redis session metadata.
     coordinator.update_session_runtime_fields(thread_id, {"status": "closed"})

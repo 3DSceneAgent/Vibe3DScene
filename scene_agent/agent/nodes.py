@@ -17,7 +17,7 @@ from langchain_core.messages import ToolMessage, AIMessage, SystemMessage, Human
 from scene_agent.agent.state import AgentState, TaskMode, TodoItem, create_todo
 from scene_agent.config import get_settings
 from scene_agent.memory.scene_memory import SceneMemory
-from scene_agent.memory.reference_image_memory import get_reference_image_memory
+from scene_agent.memory.reference_image_memory import GLOBAL_TASK_ID, get_image_asset_memory
 from scene_agent.vlm.verification import verify_render_with_references
 
 TODO_CHECK_INTERVAL_ROUNDS = 3
@@ -140,6 +140,14 @@ def _request_budget(mode: TaskMode) -> dict[str, int]:
     return dict(REQUEST_BUDGET_DEFAULTS.get(mode, REQUEST_BUDGET_DEFAULTS[MODE_PLAN]))
 
 
+def _verification_roles_for_mode(mode: TaskMode) -> set[str]:
+    if mode == MODE_CONVERSATION:
+        return {"question_image", "verification_reference", "style_reference"}
+    if mode == MODE_SINGLE_ACTION:
+        return {"object_reference", "verification_reference", "style_reference"}
+    return {"scene_reference", "object_reference", "verification_reference", "style_reference"}
+
+
 def _unfinished_todo_count(state: AgentState) -> int:
     todos = _coerce_todos(state.get("todos"))
     latest = _latest_todos_by_description(todos)
@@ -168,6 +176,38 @@ def _classify_task_mode_from_text(text: str) -> tuple[TaskMode, str]:
     return MODE_SINGLE_ACTION, "single_scene_action"
 
 
+def _resolve_verification_assets(state: AgentState) -> list[Any]:
+    thread_id = state.get("thread_id", "default")
+    mode = _coerce_task_mode(state.get("task_mode"))
+    task_id = state.get("task_id")
+    normalized_task_id = task_id.strip() if isinstance(task_id, str) and task_id.strip() else None
+    role_filter = _verification_roles_for_mode(mode)
+    settings = get_settings()
+
+    memory = get_reference_image_memory()
+    if hasattr(memory, "resolve_assets"):
+        try:
+            return memory.resolve_assets(
+                thread_id=thread_id,
+                task_id=normalized_task_id or GLOBAL_TASK_ID,
+                roles=role_filter,
+                limit=settings.reference_image_max_count,
+            )
+        except Exception:
+            return []
+    if hasattr(memory, "list_images"):
+        try:
+            images = memory.list_images(thread_id)
+            return images[-settings.reference_image_max_count :]
+        except Exception:
+            return []
+    return []
+
+
+# Legacy alias kept for test monkeypatching and extension compatibility.
+get_reference_image_memory = get_image_asset_memory
+
+
 def route_mode_node(state: AgentState) -> Dict[str, Any]:
     """
     Route each request into one of three modes:
@@ -184,6 +224,17 @@ def route_mode_node(state: AgentState) -> Dict[str, Any]:
     else:
         mode, intent = _classify_task_mode_from_text(latest_user_request)
 
+    current_task_id = state.get("task_id")
+    if isinstance(current_task_id, str) and current_task_id.strip():
+        normalized_task_id = current_task_id.strip()[:128]
+    else:
+        if mode == MODE_CONVERSATION:
+            normalized_task_id = "conversation"
+        elif mode == MODE_SINGLE_ACTION:
+            normalized_task_id = "single_action"
+        else:
+            normalized_task_id = "plan"
+
     budget = _request_budget(mode)
     tool_policy = "allow_mutation"
     if mode == MODE_CONVERSATION:
@@ -194,6 +245,7 @@ def route_mode_node(state: AgentState) -> Dict[str, Any]:
     return {
         "task_mode": mode,
         "task_intent": intent,
+        "task_id": normalized_task_id,
         "tool_policy": tool_policy,
         "request_agent_turns": 0,
         "request_tool_batches": 0,
@@ -2347,12 +2399,8 @@ def verify_node(
     # object-level paths whenever todos exist.
     todo_context = _active_todo_context(state)
 
-    thread_id = state.get("thread_id", "default")
-    memory = get_reference_image_memory()
-    reference_images = memory.list_images(thread_id)
-    settings = get_settings()
-    reference_images = reference_images[-settings.reference_image_max_count :]
-    reference_paths = [image.stored_path for image in reference_images]
+    reference_images = _resolve_verification_assets(state)
+    reference_paths = [image.stored_path for image in reference_images if isinstance(image.stored_path, str)]
 
     try:
         verification = verify_render_with_references(
