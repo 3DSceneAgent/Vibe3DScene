@@ -25,15 +25,15 @@ def test_verify_node_emits_tool_message_with_internal_tool_call_id(monkeypatch):
         }
 
     monkeypatch.setattr(
-        "scene_agent.agent.nodes.get_reference_image_memory",
+        "scene_agent.agent.nodes.verification.get_reference_image_memory",
         lambda: _FakeReferenceMemory(),
     )
     monkeypatch.setattr(
-        "scene_agent.agent.nodes.get_settings",
+        "scene_agent.agent.nodes.verification.get_settings",
         lambda: SimpleNamespace(reference_image_max_count=5),
     )
     monkeypatch.setattr(
-        "scene_agent.agent.nodes.verify_render_with_references",
+        "scene_agent.agent.nodes.verification.verify_render_with_references",
         fake_verify_render_with_references,
     )
 
@@ -87,15 +87,15 @@ def test_verify_node_passes_todo_context_even_for_scene_observe(monkeypatch):
         }
 
     monkeypatch.setattr(
-        "scene_agent.agent.nodes.get_reference_image_memory",
+        "scene_agent.agent.nodes.verification.get_reference_image_memory",
         lambda: _FakeReferenceMemory(),
     )
     monkeypatch.setattr(
-        "scene_agent.agent.nodes.get_settings",
+        "scene_agent.agent.nodes.verification.get_settings",
         lambda: SimpleNamespace(reference_image_max_count=5),
     )
     monkeypatch.setattr(
-        "scene_agent.agent.nodes.verify_render_with_references",
+        "scene_agent.agent.nodes.verification.verify_render_with_references",
         fake_verify_render_with_references,
     )
 
@@ -139,15 +139,15 @@ def test_verify_node_passes_scene_context_to_verifier(monkeypatch):
         }
 
     monkeypatch.setattr(
-        "scene_agent.agent.nodes.get_reference_image_memory",
+        "scene_agent.agent.nodes.verification.get_reference_image_memory",
         lambda: _FakeReferenceMemory(),
     )
     monkeypatch.setattr(
-        "scene_agent.agent.nodes.get_settings",
+        "scene_agent.agent.nodes.verification.get_settings",
         lambda: SimpleNamespace(reference_image_max_count=5),
     )
     monkeypatch.setattr(
-        "scene_agent.agent.nodes.verify_render_with_references",
+        "scene_agent.agent.nodes.verification.verify_render_with_references",
         fake_verify_render_with_references,
     )
 
@@ -206,15 +206,15 @@ def test_verify_node_auto_completes_todo_from_verification_assessment(monkeypatc
         }
 
     monkeypatch.setattr(
-        "scene_agent.agent.nodes.get_reference_image_memory",
+        "scene_agent.agent.nodes.verification.get_reference_image_memory",
         lambda: _FakeReferenceMemory(),
     )
     monkeypatch.setattr(
-        "scene_agent.agent.nodes.get_settings",
+        "scene_agent.agent.nodes.verification.get_settings",
         lambda: SimpleNamespace(reference_image_max_count=5),
     )
     monkeypatch.setattr(
-        "scene_agent.agent.nodes.verify_render_with_references",
+        "scene_agent.agent.nodes.verification.verify_render_with_references",
         fake_verify_render_with_references,
     )
 
@@ -263,7 +263,7 @@ def test_verify_node_skips_when_render_already_verified(monkeypatch):
         raise AssertionError("verify_render_with_references should not be called")
 
     monkeypatch.setattr(
-        "scene_agent.agent.nodes.verify_render_with_references",
+        "scene_agent.agent.nodes.verification.verify_render_with_references",
         fail_verify_render_with_references,
     )
 
@@ -282,7 +282,7 @@ def test_verify_node_reports_catastrophic_without_forced_recovery(monkeypatch):
         raise AssertionError("verify_render_with_references should not be called for catastrophic precheck")
 
     monkeypatch.setattr(
-        "scene_agent.agent.nodes.verify_render_with_references",
+        "scene_agent.agent.nodes.verification.verify_render_with_references",
         fail_verify_render_with_references,
     )
 
@@ -315,7 +315,7 @@ def test_verify_node_catastrophic_ignores_prior_recovery_counters(monkeypatch):
         raise AssertionError("verify_render_with_references should not be called for catastrophic precheck")
 
     monkeypatch.setattr(
-        "scene_agent.agent.nodes.verify_render_with_references",
+        "scene_agent.agent.nodes.verification.verify_render_with_references",
         fail_verify_render_with_references,
     )
 

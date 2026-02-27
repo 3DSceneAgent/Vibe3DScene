@@ -15,18 +15,17 @@ from __future__ import annotations
 import base64
 import io
 import json
-import os
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from PIL import Image as PILImage
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 
 from scene_agent.agent.nodes import (
-    _RENDER_VISION_MESSAGE_ID,
-    _extract_render_path,
-    _resolve_render_message_to_data_url,
+    RENDER_VISION_MESSAGE_ID,
+    extract_render_path,
+    resolve_render_message_to_data_url,
     update_memory_node,
 )
 
@@ -68,12 +67,12 @@ def _make_base64_png(width: int = 4, height: int = 4, color: tuple = (255, 0, 0)
 class TestExtractRenderPath:
     def test_from_plain_path_string(self):
         msg = ToolMessage(name="render_from_camera", content="/tmp/render.png", tool_call_id="t1")
-        assert _extract_render_path(msg) == "/tmp/render.png"
+        assert extract_render_path(msg) == "/tmp/render.png"
 
     def test_from_markdown_string_returns_url(self):
         md = "![Render](https://example.com/render.jpg)"
         msg = ToolMessage(name="render_from_objects", content=md, tool_call_id="t1")
-        path = _extract_render_path(msg)
+        path = extract_render_path(msg)
         assert path == "https://example.com/render.jpg"
 
     def test_from_list_content_with_image_item(self):
@@ -82,17 +81,17 @@ class TestExtractRenderPath:
             content=[{"type": "image", "url": "file:///tmp/obs.png"}],
             tool_call_id="t1",
         )
-        assert _extract_render_path(msg) == "/tmp/obs.png"
+        assert extract_render_path(msg) == "/tmp/obs.png"
 
     def test_none_when_no_message(self):
-        assert _extract_render_path(None) is None
+        assert extract_render_path(None) is None
 
     def test_none_when_content_empty(self):
         msg = ToolMessage(name="render_from_camera", content="", tool_call_id="t1")
-        assert _extract_render_path(msg) is None
+        assert extract_render_path(msg) is None
 
 
-# ── Test: _resolve_render_message_to_data_url ────────────────────────────
+# ── Test: resolve_render_message_to_data_url ────────────────────────────
 
 
 class TestResolveRenderMessageToDataUrl:
@@ -101,14 +100,14 @@ class TestResolveRenderMessageToDataUrl:
         _save_test_image(img_path)
         md = f"![Render]({img_path})"
         msg = ToolMessage(name="render_from_objects", content=md, tool_call_id="t1")
-        result = _resolve_render_message_to_data_url(msg)
+        result = resolve_render_message_to_data_url(msg)
         assert result is not None
         assert result.startswith("data:image/png;base64,")
 
     def test_from_http_url_passed_through(self):
         md = "![Render](https://example.com/render.jpg)"
         msg = ToolMessage(name="render_from_objects", content=md, tool_call_id="t1")
-        result = _resolve_render_message_to_data_url(msg)
+        result = resolve_render_message_to_data_url(msg)
         assert result == "https://example.com/render.jpg"
 
     def test_from_localhost_renders_url_converted_to_data_url(self):
@@ -119,7 +118,7 @@ class TestResolveRenderMessageToDataUrl:
         _save_test_image(str(render_path), fmt="PNG", color=(40, 180, 80))
         md = f"![cam](http://localhost:8000/renders/{filename})"
         msg = ToolMessage(name="render_from_objects", content=md, tool_call_id="t1")
-        result = _resolve_render_message_to_data_url(msg)
+        result = resolve_render_message_to_data_url(msg)
         assert result is not None
         assert result.startswith("data:image/png;base64,")
         try:
@@ -135,7 +134,7 @@ class TestResolveRenderMessageToDataUrl:
         _save_test_image(str(render_path), fmt="PNG", color=(12, 230, 98))
         md = f"![obs](/renders/{filename})"
         msg = ToolMessage(name="camera_observe", content=md, tool_call_id="t1")
-        result = _resolve_render_message_to_data_url(msg)
+        result = resolve_render_message_to_data_url(msg)
         assert result is not None
         assert result.startswith("data:image/png;base64,")
         try:
@@ -150,13 +149,13 @@ class TestResolveRenderMessageToDataUrl:
             content=[{"type": "image", "base64": b64, "mime_type": "image/png"}],
             tool_call_id="t1",
         )
-        result = _resolve_render_message_to_data_url(msg)
+        result = resolve_render_message_to_data_url(msg)
         assert result is not None
         assert result.startswith("data:image/png;base64,")
 
     def test_returns_none_for_plain_text_tool_message(self):
         msg = ToolMessage(name="get_scene_info", content="scene data...", tool_call_id="t1")
-        assert _resolve_render_message_to_data_url(msg) is None
+        assert resolve_render_message_to_data_url(msg) is None
 
 
 # ── Test: update_memory_node end-to-end with render extraction ───────────
@@ -194,7 +193,7 @@ class TestUpdateMemoryNodeRenderExtraction:
         assert len(messages) == 1
         msg = messages[0]
         assert isinstance(msg, HumanMessage)
-        assert msg.id == _RENDER_VISION_MESSAGE_ID, "Fixed ID ensures at most one visual message in context"
+        assert msg.id == RENDER_VISION_MESSAGE_ID, "Fixed ID ensures at most one visual message in context"
         has_image = any(
             item.get("type") == "image_url"
             for item in msg.content

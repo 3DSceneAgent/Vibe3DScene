@@ -4,6 +4,7 @@ import uuid
 from scene_agent.blender.session_manager import get_session_manager
 from scene_agent.config import reload_settings
 from scene_agent.interfaces import api as api_module
+from scene_agent.interfaces.api import shared as api_shared
 
 
 class DummyProcess:
@@ -38,7 +39,7 @@ def test_get_agent_keeps_graph_and_restarts_runtime(monkeypatch):
         created.append((session_id, graph))
         return graph
 
-    monkeypatch.setattr(api_module, "create_agent_graph", fake_create_agent_graph)
+    monkeypatch.setattr(api_shared, "create_agent_graph", fake_create_agent_graph)
     async def fake_ensure_tools(session_id=None):
         ensured.append(session_id)
         return []
@@ -116,7 +117,7 @@ def test_get_agent_rebuilds_graph_and_migrates_state_on_vlm_switch(monkeypatch):
         created.append(graph)
         return graph
 
-    monkeypatch.setattr(api_module, "_create_agent_graph_for_runtime", fake_create_graph)
+    monkeypatch.setattr(api_shared, "_create_agent_graph_for_runtime", fake_create_graph)
 
     session = manager.ensure(thread_id, "headless")
     session.process = DummyProcess(running=True)
@@ -126,7 +127,7 @@ def test_get_agent_rebuilds_graph_and_migrates_state_on_vlm_switch(monkeypatch):
     assert len(created) == 1
     assert first_graph._state == initial_state
 
-    resolved = api_module._resolve_thread_vlm_for_chat(
+    resolved = api_module.resolve_thread_vlm_for_chat(
         thread_id,
         requested_provider="anthropic",
         requested_model="claude-3-5-sonnet-20241022",

@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 
 from scene_agent.blender.session_manager import SessionResourceError
 from scene_agent.interfaces import api as api_module
+from scene_agent.interfaces.api import routes_system as api_routes_system
+from scene_agent.interfaces.api import shared as api_shared
 
 
 class _CoordinatorStub:
@@ -88,11 +90,11 @@ def test_teardown_thread_session_releases_snapshot_ports(monkeypatch):
     coordinator = _CoordinatorStub()
     settings = SimpleNamespace(blender_host="localhost")
 
-    monkeypatch.setattr(api_module, "get_session_manager", lambda: manager)
-    monkeypatch.setattr(api_module, "get_session_coordinator", lambda: coordinator)
-    monkeypatch.setattr(api_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(api_shared, "get_session_manager", lambda: manager)
+    monkeypatch.setattr(api_shared, "get_session_coordinator", lambda: coordinator)
+    monkeypatch.setattr(api_shared, "get_settings", lambda: settings)
 
-    result = api_module._teardown_thread_session(thread_id)
+    result = api_module.teardown_thread_session(thread_id)
 
     assert ("127.0.0.1", "headless", 9876) in coordinator.release_calls
     assert ("127.0.0.1", "mcp", 9877) in coordinator.release_calls
@@ -113,11 +115,11 @@ def test_teardown_thread_session_releases_ports_from_meta_when_session_missing(m
     }
     settings = SimpleNamespace(blender_host="localhost")
 
-    monkeypatch.setattr(api_module, "get_session_manager", lambda: manager)
-    monkeypatch.setattr(api_module, "get_session_coordinator", lambda: coordinator)
-    monkeypatch.setattr(api_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(api_shared, "get_session_manager", lambda: manager)
+    monkeypatch.setattr(api_shared, "get_session_coordinator", lambda: coordinator)
+    monkeypatch.setattr(api_shared, "get_settings", lambda: settings)
 
-    result = api_module._teardown_thread_session(thread_id)
+    result = api_module.teardown_thread_session(thread_id)
 
     assert ("meta-headless-host", "headless", 9976) in coordinator.release_calls
     assert ("meta-mcp-host", "mcp", 9977) in coordinator.release_calls
@@ -155,9 +157,9 @@ def test_idle_sweeper_releases_snapshot_ports(monkeypatch):
     async def fake_to_thread(func, *args, **kwargs):  # type: ignore[no-untyped-def]
         return func(*args, **kwargs)
 
-    monkeypatch.setattr(api_module, "get_session_manager", lambda: manager)
-    monkeypatch.setattr(api_module, "get_session_coordinator", lambda: coordinator)
-    monkeypatch.setattr(api_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(api_shared, "get_session_manager", lambda: manager)
+    monkeypatch.setattr(api_shared, "get_session_coordinator", lambda: coordinator)
+    monkeypatch.setattr(api_shared, "get_settings", lambda: settings)
     monkeypatch.setattr(api_module.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(api_module.asyncio, "to_thread", fake_to_thread)
 
@@ -212,9 +214,9 @@ def test_idle_sweeper_still_cleans_local_idle_session_when_not_owner(monkeypatch
     async def fake_to_thread(func, *args, **kwargs):  # type: ignore[no-untyped-def]
         return func(*args, **kwargs)
 
-    monkeypatch.setattr(api_module, "get_session_manager", lambda: manager)
-    monkeypatch.setattr(api_module, "get_session_coordinator", lambda: coordinator)
-    monkeypatch.setattr(api_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(api_shared, "get_session_manager", lambda: manager)
+    monkeypatch.setattr(api_shared, "get_session_coordinator", lambda: coordinator)
+    monkeypatch.setattr(api_shared, "get_settings", lambda: settings)
     monkeypatch.setattr(api_module.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(api_module.asyncio, "to_thread", fake_to_thread)
 
@@ -242,8 +244,8 @@ def test_get_mcp_tools_returns_structured_503_for_capacity_errors(monkeypatch):
         _ = request, thread_id
         return SimpleNamespace(owner_worker_id="", lease_epoch=None), None
 
-    monkeypatch.setattr(api_module, "get_agent", fake_get_agent)
-    monkeypatch.setattr(api_module, "_claim_or_proxy_request", fake_claim_or_proxy_request)
+    monkeypatch.setattr(api_routes_system, "get_agent", fake_get_agent)
+    monkeypatch.setattr(api_routes_system, "claim_or_proxy_request", fake_claim_or_proxy_request)
 
     with TestClient(api_module.app) as client:
         response = client.get("/threads/thread-resource-error/mcp-tools")
@@ -269,13 +271,13 @@ def test_ensure_frontend_client_can_manage_thread_rejects_foreign_client(monkeyp
             _ = thread_id, fields
 
     coordinator = _Coordinator()
-    monkeypatch.setattr(api_module, "get_session_coordinator", lambda: coordinator)
+    monkeypatch.setattr(api_shared, "get_session_coordinator", lambda: coordinator)
 
     with api_module._thread_client_lock:
         api_module._thread_frontend_clients.clear()
 
     with pytest.raises(HTTPException) as exc_info:
-        api_module._ensure_frontend_client_can_manage_thread("thread-1", "client-b")
+        api_module.ensure_frontend_client_can_manage_thread("thread-1", "client-b")
     assert exc_info.value.status_code == 403
 
 
@@ -297,12 +299,12 @@ def test_ensure_frontend_client_can_manage_thread_binds_legacy_default(monkeypat
                 meta[str(key)] = str(value)
 
     coordinator = _Coordinator()
-    monkeypatch.setattr(api_module, "get_session_coordinator", lambda: coordinator)
+    monkeypatch.setattr(api_shared, "get_session_coordinator", lambda: coordinator)
 
     with api_module._thread_client_lock:
         api_module._thread_frontend_clients.clear()
 
-    api_module._ensure_frontend_client_can_manage_thread("thread-legacy", "client-new")
+    api_module.ensure_frontend_client_can_manage_thread("thread-legacy", "client-new")
 
     assert coordinator.runtime_updates
     assert coordinator.meta_by_thread["thread-legacy"]["frontend_client_id"] == "client-new"
@@ -342,14 +344,14 @@ def test_collect_headless_runtime_entries_adopts_legacy_default_frontend_owner(m
             return []
 
     coordinator = _Coordinator()
-    monkeypatch.setattr(api_module, "get_session_coordinator", lambda: coordinator)
-    monkeypatch.setattr(api_module, "get_session_manager", lambda: _Manager())
-    monkeypatch.setattr(api_module, "get_settings", lambda: SimpleNamespace(blender_mode="headless"))
+    monkeypatch.setattr(api_shared, "get_session_coordinator", lambda: coordinator)
+    monkeypatch.setattr(api_shared, "get_session_manager", lambda: _Manager())
+    monkeypatch.setattr(api_shared, "get_settings", lambda: SimpleNamespace(blender_mode="headless"))
 
     with api_module._thread_client_lock:
         api_module._thread_frontend_clients.clear()
 
-    entries = api_module._collect_headless_runtime_entries(frontend_client_id="client-z")
+    entries = api_module.collect_headless_runtime_entries(frontend_client_id="client-z")
 
     assert len(entries) == 1
     assert entries[0]["thread_id"] == "thread-legacy"
@@ -390,11 +392,11 @@ def test_collect_headless_runtime_entries_prefers_local_cleared_ports(monkeypatc
         def list_sessions():
             return [session]
 
-    monkeypatch.setattr(api_module, "get_session_coordinator", lambda: _Coordinator())
-    monkeypatch.setattr(api_module, "get_session_manager", lambda: _Manager())
-    monkeypatch.setattr(api_module, "get_settings", lambda: SimpleNamespace(blender_mode="headless"))
+    monkeypatch.setattr(api_shared, "get_session_coordinator", lambda: _Coordinator())
+    monkeypatch.setattr(api_shared, "get_session_manager", lambda: _Manager())
+    monkeypatch.setattr(api_shared, "get_settings", lambda: SimpleNamespace(blender_mode="headless"))
 
-    entries = api_module._collect_headless_runtime_entries(frontend_client_id="client-a")
+    entries = api_module.collect_headless_runtime_entries(frontend_client_id="client-a")
 
     assert len(entries) == 1
     entry = entries[0]
@@ -447,11 +449,11 @@ def test_headless_session_debug_reports_idle_countdown(monkeypatch):
         def list_sessions():
             return [session]
 
-    monkeypatch.setattr(api_module, "get_session_coordinator", lambda: _Coordinator())
-    monkeypatch.setattr(api_module, "get_session_manager", lambda: _Manager())
-    monkeypatch.setattr(api_module, "get_settings", lambda: SimpleNamespace(blender_mode="headless"))
+    monkeypatch.setattr(api_shared, "get_session_coordinator", lambda: _Coordinator())
+    monkeypatch.setattr(api_shared, "get_session_manager", lambda: _Manager())
+    monkeypatch.setattr(api_shared, "get_settings", lambda: SimpleNamespace(blender_mode="headless"))
 
-    now_ms, entries = api_module._collect_headless_runtime_debug_entries(
+    now_ms, entries = api_module.collect_headless_runtime_debug_entries(
         frontend_client_id="client-a",
         include_all_clients=False,
     )

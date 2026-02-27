@@ -3,6 +3,7 @@ from langchain_core.messages import AIMessage
 
 from scene_agent.config import reload_settings
 from scene_agent.interfaces import api as api_module
+from scene_agent.interfaces.api import routes_chat as api_routes_chat
 
 
 def _reset_vlm_runtime_state() -> None:
@@ -47,7 +48,7 @@ def test_chat_allows_model_change_after_session_starts(monkeypatch):
     async def fake_get_agent(_thread_id=None):
         return DummyAgent()
 
-    monkeypatch.setattr(api_module, "get_agent", fake_get_agent)
+    monkeypatch.setattr(api_routes_chat, "get_agent", fake_get_agent)
 
     with TestClient(api_module.app) as client:
         first = client.post(

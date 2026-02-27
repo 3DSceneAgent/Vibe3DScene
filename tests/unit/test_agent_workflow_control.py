@@ -11,9 +11,9 @@ from scene_agent.agent.graph import (
     _route_after_todo_check,
 )
 from scene_agent.agent.nodes import (
-    _RENDER_VISION_MESSAGE_ID,
-    _SCENE_OBSERVE_MESSAGE_ID,
-    _latest_human_message,
+    RENDER_VISION_MESSAGE_ID,
+    SCENE_OBSERVE_MESSAGE_ID,
+    latest_human_message,
     blocked_recovery_action_node,
     blocked_recovery_node,
     checkpoint_gate_node,
@@ -711,7 +711,7 @@ def test_latest_human_message_skips_internal_render_and_scene_observe_messages()
         "messages": [
             HumanMessage(content="Create a red chair beside a wooden table."),
             HumanMessage(
-                id=_RENDER_VISION_MESSAGE_ID,
+                id=RENDER_VISION_MESSAGE_ID,
                 content=[
                     {"type": "text", "text": "Latest render from tool call."},
                     {
@@ -721,7 +721,7 @@ def test_latest_human_message_skips_internal_render_and_scene_observe_messages()
                 ],
             ),
             HumanMessage(
-                id=_SCENE_OBSERVE_MESSAGE_ID,
+                id=SCENE_OBSERVE_MESSAGE_ID,
                 content=[
                     {
                         "type": "text",
@@ -735,7 +735,7 @@ def test_latest_human_message_skips_internal_render_and_scene_observe_messages()
             ),
         ]
     }
-    assert _latest_human_message(state) == "Create a red chair beside a wooden table."
+    assert latest_human_message(state) == "Create a red chair beside a wooden table."
 
 
 def test_post_builder_node_increments_stall_count_without_tool_calls():

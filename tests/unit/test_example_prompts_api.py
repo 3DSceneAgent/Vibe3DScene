@@ -4,6 +4,9 @@ from uuid import uuid4
 
 from scene_agent.config import reload_settings
 from scene_agent.interfaces import api as api_module
+from scene_agent.interfaces.api import routes_chat as api_routes_chat
+from scene_agent.interfaces.api import routes_system as api_routes_system
+from scene_agent.interfaces.api import shared as api_shared
 
 
 def test_parse_example_prompts_supports_numbered_markdown():
@@ -24,7 +27,7 @@ def test_parse_example_prompts_supports_numbered_markdown():
 def test_get_example_prompts_endpoint_reads_markdown(monkeypatch, tmp_path):
     prompts_file = tmp_path / "example_prompts.md"
     prompts_file.write_text("1. Build a wooden chair\n2. Add studio lighting\n", encoding="utf-8")
-    monkeypatch.setattr(api_module, "EXAMPLE_PROMPTS_PATH", prompts_file)
+    monkeypatch.setattr(api_shared, "EXAMPLE_PROMPTS_PATH", prompts_file)
     monkeypatch.setenv("BLENDER_MODE", "headless")
     reload_settings()
 
@@ -51,7 +54,7 @@ def test_get_mcp_tools_endpoint_returns_loaded_tools(monkeypatch):
         return DummyAgent()
 
     thread_id_expected = thread_id
-    monkeypatch.setattr(api_module, "get_agent", fake_get_agent)
+    monkeypatch.setattr(api_routes_system, "get_agent", fake_get_agent)
     monkeypatch.setenv("BLENDER_MODE", "headless")
     reload_settings()
 
@@ -98,7 +101,7 @@ def test_get_mcp_tools_endpoint_fills_default_hint_when_missing(monkeypatch):
         return DummyAgent()
 
     thread_id_expected = thread_id
-    monkeypatch.setattr(api_module, "get_agent", fake_get_agent)
+    monkeypatch.setattr(api_routes_system, "get_agent", fake_get_agent)
     monkeypatch.setenv("BLENDER_MODE", "headless")
     reload_settings()
 
@@ -138,10 +141,10 @@ def test_chat_endpoint_passes_enabled_tool_names(monkeypatch):
         return DummyAgent()
 
     thread_id_expected = thread_id
-    monkeypatch.setattr(api_module, "get_agent", fake_get_agent)
+    monkeypatch.setattr(api_routes_chat, "get_agent", fake_get_agent)
     monkeypatch.setattr(
-        api_module,
-        "_resolve_thread_vlm_for_chat",
+        api_routes_chat,
+        "resolve_thread_vlm_for_chat",
         lambda *_args, **_kwargs: {"provider": "openai", "model": "gpt-4o", "api_key": "test"},
     )
 
@@ -178,10 +181,10 @@ def test_chat_endpoint_serializes_list_content_to_string(monkeypatch):
         return DummyAgent()
 
     thread_id_expected = thread_id
-    monkeypatch.setattr(api_module, "get_agent", fake_get_agent)
+    monkeypatch.setattr(api_routes_chat, "get_agent", fake_get_agent)
     monkeypatch.setattr(
-        api_module,
-        "_resolve_thread_vlm_for_chat",
+        api_routes_chat,
+        "resolve_thread_vlm_for_chat",
         lambda *_args, **_kwargs: {"provider": "openai", "model": "gpt-4o", "api_key": "test"},
     )
 
@@ -215,10 +218,10 @@ def test_chat_stream_passes_enabled_tool_names(monkeypatch):
         return DummyAgent()
 
     thread_id_expected = thread_id
-    monkeypatch.setattr(api_module, "get_agent", fake_get_agent)
+    monkeypatch.setattr(api_routes_chat, "get_agent", fake_get_agent)
     monkeypatch.setattr(
-        api_module,
-        "_resolve_thread_vlm_for_chat",
+        api_routes_chat,
+        "resolve_thread_vlm_for_chat",
         lambda *_args, **_kwargs: {"provider": "openai", "model": "gpt-4o", "api_key": "test"},
     )
 

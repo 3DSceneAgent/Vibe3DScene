@@ -1,3 +1,4 @@
+# ruff: noqa: F401
 """
 LangGraph node implementations.
 Nodes follow best practices: return partial state updates only.
@@ -15,21 +16,14 @@ from typing import Any, Dict, Literal
 from urllib.parse import unquote, urlparse
 from langchain_core.messages import ToolMessage, AIMessage, SystemMessage, HumanMessage
 from pydantic import BaseModel, Field, ValidationError
-from scene_agent.agent.memory_scope import merge_role_private_memory, resolve_memory_profile
-from scene_agent.agent.state import AgentState, TaskMode, TodoItem, create_todo
+from scene_agent.agent.state import AgentState, TaskMode, TodoItem
 from scene_agent.agent.tool_policy import (
     READ_ONLY_TOOLS,
     coerce_request_tool_budgets,
     resolve_effective_tool_names,
 )
-from scene_agent.agent.workflow_profiles import (
-    normalize_workflow_topology_request,
-    resolve_workflow_topology,
-)
 from scene_agent.config import get_settings
-from scene_agent.memory.scene_memory import SceneMemory
 from scene_agent.memory.reference_image_memory import GLOBAL_TASK_ID, get_image_asset_memory
-from scene_agent.vlm.verification import verify_render_with_references
 
 TODO_CHECK_INTERVAL_ROUNDS = 3
 TODO_STAGNATION_LIMIT = 2
@@ -64,10 +58,10 @@ SCENE_MUTATING_TOOLS: frozenset[str] = frozenset({
 # Fixed message IDs for internal visual context messages.
 # add_messages replaces by ID, so these slots hold at most one message each —
 # no unbounded accumulation across turns.
-_RENDER_VISION_MESSAGE_ID = "render_vision_current"
-_SCENE_OBSERVE_MESSAGE_ID = "scene_observe_current"
-_TODO_BLOCKED_RECOVERY_MESSAGE_ID = "todo_blocked_recovery_current"
-_TODO_BLOCKED_RECOVERY_ACTION_MESSAGE_ID = "todo_blocked_recovery_action_current"
+RENDER_VISION_MESSAGE_ID = "render_vision_current"
+SCENE_OBSERVE_MESSAGE_ID = "scene_observe_current"
+TODO_BLOCKED_RECOVERY_MESSAGE_ID = "todo_blocked_recovery_current"
+TODO_BLOCKED_RECOVERY_ACTION_MESSAGE_ID = "todo_blocked_recovery_action_current"
 
 _CATASTROPHIC_SCENE_DIMENSION_THRESHOLD = 5000.0
 _CATASTROPHIC_OBJECT_COORD_THRESHOLD = 5000.0
@@ -131,7 +125,7 @@ _IMAGE_QA_MARKERS: tuple[str, ...] = (
     "what is in",
     "what's in",
 )
-_ROUTER_MIN_CONFIDENCE = 0.65
+ROUTER_MIN_CONFIDENCE = 0.65
 
 
 class RouterDecision(BaseModel):
@@ -151,13 +145,13 @@ class RouterDecision(BaseModel):
     requires_scene_mutation: bool = False
 
 
-def _coerce_task_mode(raw_mode: Any) -> TaskMode:
+def coerce_task_mode(raw_mode: Any) -> TaskMode:
     if raw_mode in {MODE_CONVERSATION, MODE_SINGLE_ACTION, MODE_PLAN}:
         return raw_mode
     return MODE_PLAN
 
 
-def _coerce_workflow_topology(raw_topology: Any) -> str:
+def coerce_workflow_topology(raw_topology: Any) -> str:
     if isinstance(raw_topology, str):
         normalized = raw_topology.strip()
         if normalized in {TOPOLOGY_SINGLE, TOPOLOGY_DUAL}:
@@ -173,7 +167,7 @@ def _coerce_role(raw_role: Any) -> str:
     return ROLE_GENERAL
 
 
-def _request_budget(mode: TaskMode) -> dict[str, int]:
+def request_budget(mode: TaskMode) -> dict[str, int]:
     return dict(REQUEST_BUDGET_DEFAULTS.get(mode, REQUEST_BUDGET_DEFAULTS[MODE_PLAN]))
 
 
@@ -193,9 +187,9 @@ def _auto_binding_role_for_mode(mode: TaskMode) -> str:
     return "scene_reference"
 
 
-def _unfinished_todo_count(state: AgentState) -> int:
-    todos = _coerce_todos(state.get("todos"))
-    latest = _latest_todos_by_description(todos)
+def unfinished_todo_count(state: AgentState) -> int:
+    todos = coerce_todos(state.get("todos"))
+    latest = latest_todos_by_description(todos)
     effective = list(latest.values()) if latest else todos
     return sum(1 for todo in effective if todo.get("status") in {"pending", "in_progress"})
 
@@ -221,7 +215,7 @@ def _classify_task_mode_from_text(text: str) -> tuple[TaskMode, str]:
     return MODE_SINGLE_ACTION, "single_scene_action"
 
 
-def _build_router_clarification_question(text: str) -> str:
+def build_router_clarification_question(text: str) -> str:
     mode_guess, _ = _classify_task_mode_from_text(text)
     if mode_guess == MODE_PLAN:
         return (
@@ -251,7 +245,7 @@ def _router_has_images(thread_id: str) -> bool:
     return False
 
 
-def _invoke_router_decision(
+def invoke_router_decision(
     *,
     state: AgentState,
     router_model: Any,
@@ -259,7 +253,7 @@ def _invoke_router_decision(
 ) -> RouterDecision:
     thread_id = state.get("thread_id", "default")
     has_images = _router_has_images(thread_id)
-    unfinished_todos = _unfinished_todo_count(state)
+    unfinished_todos = unfinished_todo_count(state)
     topology_hint = state.get("workflow_topology_request") or state.get("workflow_topology") or "auto"
 
     router_prompt = (
@@ -298,14 +292,14 @@ def _invoke_router_decision(
             mode="conversation_mode",
             confidence=0.0,
             need_clarification=True,
-            clarification_question=_build_router_clarification_question(latest_user_request),
+            clarification_question=build_router_clarification_question(latest_user_request),
             requires_scene_mutation=False,
         )
 
 
-def _resolve_verification_assets(state: AgentState) -> list[Any]:
+def resolve_verification_assets(state: AgentState) -> list[Any]:
     thread_id = state.get("thread_id", "default")
-    mode = _coerce_task_mode(state.get("task_mode"))
+    mode = coerce_task_mode(state.get("task_mode"))
     task_id = state.get("task_id")
     normalized_task_id = task_id.strip() if isinstance(task_id, str) and task_id.strip() else None
     role_filter = _verification_roles_for_mode(mode)
@@ -341,150 +335,10 @@ def _resolve_verification_assets(state: AgentState) -> list[Any]:
 get_reference_image_memory = get_image_asset_memory
 
 
-def route_mode_node(
-    state: AgentState,
-    *,
-    router_model: Any | None = None,
-) -> Dict[str, Any]:
-    """
-    LLM-based router for task mode / intent classification.
-    Low-confidence decisions require strict clarification before execution.
-    """
-    latest_user_request = _latest_human_message(state)
-    unfinished_todos = _unfinished_todo_count(state)
-
-    if unfinished_todos > 0:
-        decision = RouterDecision(
-            intent="continue_existing_plan",
-            mode=MODE_PLAN,
-            confidence=1.0,
-            need_clarification=False,
-            clarification_question="",
-            requires_scene_mutation=True,
-        )
-    elif router_model is None:
-        decision = RouterDecision(
-            intent="clarification_needed",
-            mode=MODE_CONVERSATION,
-            confidence=0.0,
-            need_clarification=True,
-            clarification_question=_build_router_clarification_question(latest_user_request),
-            requires_scene_mutation=False,
-        )
-    else:
-        decision = _invoke_router_decision(
-            state=state,
-            router_model=router_model,
-            latest_user_request=latest_user_request,
-        )
-
-    mode = _coerce_task_mode(decision.mode)
-    intent = decision.intent
-
-    raw_topology_request = state.get("workflow_topology_request")
-    if raw_topology_request is None:
-        raw_topology_request = state.get("workflow_topology")
-    requested_topology = normalize_workflow_topology_request(raw_topology_request)
-    workflow_topology = resolve_workflow_topology(
-        task_mode=mode,
-        requested_topology=requested_topology,
-    )
-
-    raw_memory_profile_request = state.get("memory_profile_request")
-    if raw_memory_profile_request is None:
-        raw_memory_profile_request = state.get("memory_profile")
-    memory_profile_request = "auto"
-    if isinstance(raw_memory_profile_request, str):
-        normalized_memory_request = raw_memory_profile_request.strip().lower().replace("-", "_")
-        if normalized_memory_request in {
-            "auto",
-            "thread_shared_only",
-            "shared_plus_role_private",
-        }:
-            memory_profile_request = normalized_memory_request
-    memory_profile = resolve_memory_profile(memory_profile_request)
-
-    current_task_id = state.get("task_id")
-    if isinstance(current_task_id, str) and current_task_id.strip():
-        normalized_task_id = current_task_id.strip()[:128]
-    else:
-        if mode == MODE_CONVERSATION:
-            normalized_task_id = "conversation"
-        elif mode == MODE_SINGLE_ACTION:
-            normalized_task_id = "single_action"
-        else:
-            normalized_task_id = "plan"
-
-    budget = _request_budget(mode)
-    tool_policy = "allow_mutation"
-    if mode == MODE_CONVERSATION:
-        tool_policy = "forbid_mutation"
-    elif mode == MODE_SINGLE_ACTION:
-        tool_policy = "allow_mutation_limited"
-
-    active_role = ROLE_GENERAL
-    if mode == MODE_PLAN and workflow_topology == TOPOLOGY_DUAL:
-        active_role = ROLE_BUILDER
-
-    clarification_question = decision.clarification_question.strip()
-    if not clarification_question:
-        clarification_question = _build_router_clarification_question(latest_user_request)
-    need_clarification = bool(decision.need_clarification) or decision.confidence < _ROUTER_MIN_CONFIDENCE
-
-    max_plan_replans = _coerce_non_negative_int(
-        state.get("max_plan_replans"),
-        default=DEFAULT_MAX_PLAN_REPLANS,
-    )
-
-    return {
-        "task_mode": mode,
-        "task_intent": intent,
-        "task_id": normalized_task_id,
-        "router_decision": decision.model_dump(mode="json"),
-        "router_confidence": float(decision.confidence),
-        "router_need_clarification": need_clarification,
-        "router_clarification_question": clarification_question,
-        "tool_policy": tool_policy,
-        "workflow_topology_request": requested_topology,
-        "memory_profile_request": memory_profile_request,
-        "workflow_topology": workflow_topology,
-        "memory_profile": memory_profile,
-        "active_role": active_role,
-        "request_agent_turns": 0,
-        "request_tool_batches": 0,
-        "builder_turn_count": 0,
-        "verifier_turn_count": 0,
-        "builder_stall_count": 0,
-        "verification_mismatch_streak": 0,
-        "quality_eval": {"status": "unknown", "reason": "not_evaluated"},
-        "progress_eval": {"status": "continue", "reason": "not_evaluated"},
-        "budget_eval": {"budget_ok": True, "stop_reason": None},
-        "plan_replan_count": 0,
-        "max_plan_replans": max_plan_replans,
-        "transition_next": None,
-        "transition_reason": "router_initialized",
-        "max_request_agent_turns": budget["max_request_agent_turns"],
-        "max_request_tool_batches": budget["max_request_tool_batches"],
-        "request_stop_reason": None,
-    }
 
 
-def route_mode_llm_node(state: AgentState, router_model: Any) -> Dict[str, Any]:
-    """Explicit LLM router entrypoint used by graph wiring."""
-    return route_mode_node(state, router_model=router_model)
 
 
-def clarification_node(state: AgentState) -> Dict[str, Any]:
-    question_raw = state.get("router_clarification_question")
-    question = question_raw.strip() if isinstance(question_raw, str) and question_raw.strip() else (
-        "我需要你补充更具体的目标：是问答解释、单步修改，还是多步场景重建？"
-    )
-    return {
-        "messages": [AIMessage(content=question)],
-        "request_stop_reason": "clarification_required",
-        "transition_next": "finalize",
-        "transition_reason": "router_low_confidence_clarification_required",
-    }
 
 
 def _effective_tool_names_for_state(
@@ -493,7 +347,7 @@ def _effective_tool_names_for_state(
     *,
     role: str = ROLE_GENERAL,
 ) -> tuple[list[str] | None, str | None]:
-    mode = _coerce_task_mode(state.get("task_mode"))
+    mode = coerce_task_mode(state.get("task_mode"))
     safe_role = _coerce_role(role)
     request_tool_batches, max_request_tool_batches = coerce_request_tool_budgets(
         request_tool_batches=state.get("request_tool_batches"),
@@ -509,31 +363,9 @@ def _effective_tool_names_for_state(
     )
 
 
-def agent_node(
-    state: AgentState,
-    llm_with_tools,
-    available_tool_names: list[str] | None = None,
-) -> Dict[str, Any]:
-    """
-    Agent node: VLM reasoning with all tools bound.
-    The agent decides when to perceive, render, and manipulate the scene.
-    
-    Args:
-        state: Current agent state
-        llm_with_tools: LLM with tools bound via bind_tools()
-        
-    Returns:
-        Partial state update with new messages
-    """
-    return _invoke_role_agent(
-        state=state,
-        llm_with_tools=llm_with_tools,
-        available_tool_names=available_tool_names,
-        role=ROLE_GENERAL,
-    )
 
 
-def _invoke_role_agent(
+def invoke_role_agent(
     *,
     state: AgentState,
     llm_with_tools: Any,
@@ -597,7 +429,7 @@ def _invoke_role_agent(
     response = llm_with_tools.invoke(messages)
     response, dropped_tools = _filter_unavailable_tool_calls(response, effective_tool_names)
     if dropped_tools:
-        content_text = _message_content_to_text(getattr(response, "content", ""))
+        content_text = message_content_to_text(getattr(response, "content", ""))
         if not content_text.strip():
             skipped = ", ".join(sorted(set(dropped_tools)))
             response.content = (
@@ -611,67 +443,13 @@ def _invoke_role_agent(
     return result
 
 
-def builder_agent_node(
-    state: AgentState,
-    llm_with_tools,
-    available_tool_names: list[str] | None = None,
-) -> Dict[str, Any]:
-    """
-    Builder agent node for dual-agent plan_mode execution.
-    """
-    return _invoke_role_agent(
-        state=state,
-        llm_with_tools=llm_with_tools,
-        available_tool_names=available_tool_names,
-        role=ROLE_BUILDER,
-    )
 
 
-def verifier_camera_agent_node(
-    state: AgentState,
-    llm_with_tools,
-    available_tool_names: list[str] | None = None,
-) -> Dict[str, Any]:
-    """
-    Tool-capable verifier agent.
-
-    This role can operate camera/render inspection tools (including camera
-    adjustments) but is blocked from scene asset mutation tools.
-    """
-    return _invoke_role_agent(
-        state=state,
-        llm_with_tools=llm_with_tools,
-        available_tool_names=available_tool_names,
-        role=ROLE_VERIFIER,
-    )
 
 
-def post_agent_node(state: AgentState) -> Dict[str, Any]:
-    """
-    Post-agent node: persist todo updates and per-request counters after each assistant turn.
-    """
-    last_messages = state["messages"][-10:]
-    latest_ai_message = _find_last_ai_message(last_messages)
-    result: Dict[str, Any] = {}
-
-    if latest_ai_message is not None:
-        todo_updates = extract_todo_updates([latest_ai_message])
-        aligned_todos = _align_todo_updates_with_existing(state.get("todos"), todo_updates)
-        if aligned_todos:
-            result["todos"] = aligned_todos
-
-    current_turns = _coerce_non_negative_int(state.get("request_agent_turns"))
-    next_turns = current_turns + 1
-    result["request_agent_turns"] = next_turns
-
-    max_turns = _coerce_non_negative_int(state.get("max_request_agent_turns"), default=-1)
-    if max_turns >= 0 and next_turns >= max_turns:
-        result["request_stop_reason"] = "agent_turn_budget_exhausted"
-
-    return result
 
 
-def _ai_message_has_tool_calls(message: AIMessage | None) -> bool:
+def ai_message_has_tool_calls(message: AIMessage | None) -> bool:
     if not isinstance(message, AIMessage):
         return False
     tool_calls = getattr(message, "tool_calls", None)
@@ -684,85 +462,11 @@ def _ai_message_has_tool_calls(message: AIMessage | None) -> bool:
     return False
 
 
-def post_builder_node(state: AgentState) -> Dict[str, Any]:
-    """
-    Post-builder node used in plan_mode dual-agent execution.
-    """
-    last_messages = state["messages"][-10:]
-    latest_ai_message = _find_last_ai_message(last_messages)
-    result: Dict[str, Any] = {"active_role": ROLE_BUILDER}
-
-    if latest_ai_message is not None:
-        todo_updates = extract_todo_updates([latest_ai_message])
-        aligned_todos = _align_todo_updates_with_existing(state.get("todos"), todo_updates)
-        if aligned_todos:
-            result["todos"] = aligned_todos
-
-    current_turns = _coerce_non_negative_int(state.get("request_agent_turns"))
-    next_turns = current_turns + 1
-    result["request_agent_turns"] = next_turns
-
-    current_builder_turns = _coerce_non_negative_int(state.get("builder_turn_count"))
-    result["builder_turn_count"] = current_builder_turns + 1
-
-    if _ai_message_has_tool_calls(latest_ai_message):
-        result["builder_stall_count"] = 0
-    else:
-        stall = _coerce_non_negative_int(state.get("builder_stall_count"))
-        result["builder_stall_count"] = stall + 1
-
-    max_turns = _coerce_non_negative_int(state.get("max_request_agent_turns"), default=-1)
-    if max_turns >= 0 and next_turns >= max_turns:
-        result["request_stop_reason"] = "agent_turn_budget_exhausted"
-
-    if latest_ai_message is not None:
-        builder_note = _message_content_to_text(latest_ai_message.content).strip()
-        if builder_note:
-            result["role_private_memory"] = merge_role_private_memory(
-                state.get("role_private_memory"),
-                role=ROLE_BUILDER,
-                patch={
-                    "last_action_summary": builder_note[:1200],
-                },
-            )
-
-    return result
 
 
-def post_verifier_node(state: AgentState) -> Dict[str, Any]:
-    """
-    Post-verifier node used in plan_mode dual-agent execution.
-    """
-    last_messages = state["messages"][-10:]
-    latest_ai_message = _find_last_ai_message(last_messages)
-    result: Dict[str, Any] = {"active_role": ROLE_VERIFIER}
-
-    current_turns = _coerce_non_negative_int(state.get("request_agent_turns"))
-    next_turns = current_turns + 1
-    result["request_agent_turns"] = next_turns
-
-    current_verifier_turns = _coerce_non_negative_int(state.get("verifier_turn_count"))
-    result["verifier_turn_count"] = current_verifier_turns + 1
-
-    max_turns = _coerce_non_negative_int(state.get("max_request_agent_turns"), default=-1)
-    if max_turns >= 0 and next_turns >= max_turns:
-        result["request_stop_reason"] = "agent_turn_budget_exhausted"
-
-    if latest_ai_message is not None:
-        verifier_note = _message_content_to_text(latest_ai_message.content).strip()
-        if verifier_note:
-            result["role_private_memory"] = merge_role_private_memory(
-                state.get("role_private_memory"),
-                role=ROLE_VERIFIER,
-                patch={
-                    "last_verifier_action_summary": verifier_note[:1200],
-                },
-            )
-
-    return result
 
 
-def _coerce_verification_dict(payload: Any) -> dict[str, Any]:
+def coerce_verification_dict(payload: Any) -> dict[str, Any]:
     if isinstance(payload, dict):
         return payload
     if isinstance(payload, str):
@@ -772,7 +476,7 @@ def _coerce_verification_dict(payload: Any) -> dict[str, Any]:
     return {}
 
 
-def _extract_verifier_fix_instructions(verification: dict[str, Any]) -> list[str]:
+def extract_verifier_fix_instructions(verification: dict[str, Any]) -> list[str]:
     instructions: list[str] = []
     seen: set[str] = set()
 
@@ -809,9 +513,9 @@ def _extract_verifier_fix_instructions(verification: dict[str, Any]) -> list[str
     return instructions[:8]
 
 
-def _replan_budget_remaining(state: AgentState) -> bool:
-    current_replans = _coerce_non_negative_int(state.get("plan_replan_count"))
-    max_replans = _coerce_non_negative_int(
+def replan_budget_remaining(state: AgentState) -> bool:
+    current_replans = coerce_non_negative_int(state.get("plan_replan_count"))
+    max_replans = coerce_non_negative_int(
         state.get("max_plan_replans"),
         default=DEFAULT_MAX_PLAN_REPLANS,
     )
@@ -820,336 +524,23 @@ def _replan_budget_remaining(state: AgentState) -> bool:
     return current_replans < max_replans
 
 
-def verifier_agent_node(state: AgentState) -> Dict[str, Any]:
-    """
-    Build compact structured verifier feedback from latest verification evidence.
-    """
-    verification_payload = _latest_verification_payload(state)
-    verification = _coerce_verification_dict(verification_payload)
-    raw_status = verification.get("status")
-    normalized_status = raw_status.strip().lower() if isinstance(raw_status, str) else ""
-    unfinished_todos = _unfinished_todo_count(state)
-
-    feedback_status = "needs_fix"
-    if normalized_status in {"match", "pass", "passed"}:
-        feedback_status = "pass"
-    elif normalized_status == "catastrophic":
-        feedback_status = "catastrophic"
-
-    fix_instructions = _extract_verifier_fix_instructions(verification)
-    should_replan = False
-    if feedback_status == "needs_fix":
-        stall_count = _coerce_non_negative_int(state.get("builder_stall_count"))
-        should_replan = _replan_budget_remaining(state) and (stall_count >= 2 or len(fix_instructions) == 0)
-
-    ready_to_finalize = feedback_status == "pass" and unfinished_todos == 0
-    confidence = 0.55
-    if feedback_status == "pass":
-        confidence = 0.9
-    elif feedback_status == "catastrophic":
-        confidence = 0.4
-
-    verifier_feedback = {
-        "status": feedback_status,
-        "source_verification_status": normalized_status or "unknown",
-        "ready_to_finalize": ready_to_finalize,
-        "should_replan": should_replan,
-        "focus_objects": [],
-        "fix_instructions": fix_instructions,
-        "confidence": confidence,
-    }
-
-    if isinstance(verification.get("reason"), str) and verification["reason"].strip():
-        verifier_feedback["reason"] = verification["reason"].strip()
-    elif fix_instructions:
-        verifier_feedback["reason"] = fix_instructions[0]
-    else:
-        verifier_feedback["reason"] = "No explicit verification guidance was available."
-
-    next_verifier_turns = _coerce_non_negative_int(state.get("verifier_turn_count"))
-    role_private_memory = merge_role_private_memory(
-        state.get("role_private_memory"),
-        role=ROLE_VERIFIER,
-        patch={
-            "last_feedback_status": verifier_feedback["status"],
-            "last_feedback_reason": verifier_feedback["reason"],
-            "last_feedback_confidence": verifier_feedback["confidence"],
-        },
-    )
-
-    return {
-        "verifier_feedback": verifier_feedback,
-        "verifier_turn_count": next_verifier_turns,
-        "active_role": ROLE_VERIFIER,
-        "role_private_memory": role_private_memory,
-    }
 
 
-def verifier_feedback_node(state: AgentState) -> Dict[str, Any]:
-    """Alias node for readability in graph composition."""
-    return verifier_agent_node(state)
 
 
-def quality_evaluator_node(state: AgentState) -> Dict[str, Any]:
-    verification_payload = _latest_verification_payload(state)
-    verification = _coerce_verification_dict(verification_payload)
-    raw_status = verification.get("status")
-    normalized_status = raw_status.strip().lower() if isinstance(raw_status, str) else ""
-
-    status = "skipped"
-    reason = "No fresh verification evidence."
-    if normalized_status in {"match", "pass", "passed"}:
-        status = "match"
-        reason = str(verification.get("reason") or "Verification passed.")
-    elif normalized_status in {"mismatch", "partial", "needs_fix", "fail", "failed"}:
-        status = "mismatch"
-        reason = str(verification.get("reason") or "Verification reported mismatches.")
-    elif normalized_status == "catastrophic":
-        status = "catastrophic"
-        reason = str(verification.get("reason") or "Catastrophic scene signal detected.")
-
-    streak = _coerce_non_negative_int(state.get("verification_mismatch_streak"))
-    if status in {"mismatch", "catastrophic"}:
-        streak += 1
-    else:
-        streak = 0
-
-    return {
-        "quality_eval": {
-            "status": status,
-            "reason": reason,
-            "source_verification_status": normalized_status or "none",
-        },
-        "verification_mismatch_streak": streak,
-    }
 
 
-def progress_evaluator_node(state: AgentState) -> Dict[str, Any]:
-    mode = _coerce_task_mode(state.get("task_mode"))
-    unfinished_todos = _unfinished_todo_count(state)
-    quality = state.get("quality_eval")
-    quality_status = ""
-    quality_reason = ""
-    if isinstance(quality, dict):
-        quality_status = str(quality.get("status", "")).strip().lower()
-        quality_reason = str(quality.get("reason", "")).strip()
-
-    should_replan = False
-    verifier_feedback = state.get("verifier_feedback")
-    if isinstance(verifier_feedback, dict) and bool(verifier_feedback.get("should_replan")):
-        should_replan = True
-    mismatch_streak = _coerce_non_negative_int(state.get("verification_mismatch_streak"))
-    builder_stall_count = _coerce_non_negative_int(state.get("builder_stall_count"))
-    if mode == MODE_PLAN and (mismatch_streak >= 2 or builder_stall_count >= 2):
-        should_replan = True
-
-    if mode == MODE_CONVERSATION:
-        status = "done"
-        reason = "conversation_mode_response_ready"
-    elif quality_status == "match" and unfinished_todos == 0:
-        status = "done"
-        reason = "verification_match_and_no_open_todos"
-    elif quality_status == "catastrophic" and mode == MODE_PLAN and unfinished_todos == 0:
-        status = "blocked"
-        reason = quality_reason or "catastrophic_without_open_todo"
-    elif unfinished_todos > 0:
-        status = "continue"
-        reason = "open_todos_remaining"
-    elif quality_status in {"mismatch", "catastrophic"}:
-        status = "continue"
-        reason = quality_reason or f"quality_{quality_status}"
-    else:
-        status = "done"
-        reason = "no_additional_progress_needed"
-
-    return {
-        "progress_eval": {
-            "status": status,
-            "reason": reason,
-            "unfinished_todos": unfinished_todos,
-            "should_replan": should_replan,
-        }
-    }
 
 
-def budget_evaluator_node(state: AgentState) -> Dict[str, Any]:
-    stop_reason_raw = state.get("request_stop_reason")
-    if isinstance(stop_reason_raw, str) and stop_reason_raw:
-        return {
-            "budget_eval": {
-                "budget_ok": False,
-                "stop_reason": stop_reason_raw,
-            }
-        }
-
-    turns = _coerce_non_negative_int(state.get("request_agent_turns"))
-    max_turns = _coerce_non_negative_int(state.get("max_request_agent_turns"), default=-1)
-    if max_turns >= 0 and turns >= max_turns:
-        return {
-            "budget_eval": {
-                "budget_ok": False,
-                "stop_reason": "agent_turn_budget_exhausted",
-            },
-            "request_stop_reason": "agent_turn_budget_exhausted",
-        }
-
-    tool_batches = _coerce_non_negative_int(state.get("request_tool_batches"))
-    max_tool_batches = _coerce_non_negative_int(state.get("max_request_tool_batches"), default=-1)
-    if max_tool_batches >= 0 and tool_batches >= max_tool_batches:
-        return {
-            "budget_eval": {
-                "budget_ok": False,
-                "stop_reason": "tool_batch_budget_exhausted",
-            },
-            "request_stop_reason": "tool_batch_budget_exhausted",
-        }
-
-    replans = _coerce_non_negative_int(state.get("plan_replan_count"))
-    max_replans = _coerce_non_negative_int(state.get("max_plan_replans"), default=-1)
-    if max_replans >= 0 and replans > max_replans:
-        return {
-            "budget_eval": {
-                "budget_ok": False,
-                "stop_reason": "plan_replan_budget_exhausted",
-            },
-            "request_stop_reason": "plan_replan_budget_exhausted",
-        }
-
-    return {"budget_eval": {"budget_ok": True, "stop_reason": None}}
 
 
-def transition_resolver_node(state: AgentState) -> Dict[str, Any]:
-    """
-    Deterministic transition resolver shared by single-agent and dual-agent paths.
-    """
-    mode = _coerce_task_mode(state.get("task_mode"))
-    topology = _coerce_workflow_topology(state.get("workflow_topology"))
-    is_dual_plan = mode == MODE_PLAN and topology == TOPOLOGY_DUAL
-
-    budget_eval = state.get("budget_eval")
-    if isinstance(budget_eval, dict) and not bool(budget_eval.get("budget_ok", True)):
-        reason = str(budget_eval.get("stop_reason") or "budget_exhausted")
-        return {
-            "transition_next": "checkpoint_finalize",
-            "transition_reason": reason,
-        }
-
-    progress_eval = state.get("progress_eval")
-    progress_status = ""
-    should_replan = False
-    if isinstance(progress_eval, dict):
-        progress_status = str(progress_eval.get("status", "")).strip().lower()
-        should_replan = bool(progress_eval.get("should_replan"))
-
-    if progress_status == "done":
-        return {
-            "transition_next": "checkpoint_finalize",
-            "transition_reason": "progress_done",
-        }
-
-    quality_eval = state.get("quality_eval")
-    quality_status = ""
-    if isinstance(quality_eval, dict):
-        quality_status = str(quality_eval.get("status", "")).strip().lower()
-
-    # Priority: budget_exhausted > done > catastrophic > replan > continue
-    if quality_status == "catastrophic":
-        return {
-            "transition_next": "builder_agent" if is_dual_plan else "agent",
-            "transition_reason": "catastrophic_manual_remediation",
-        }
-
-    if is_dual_plan and should_replan and _replan_budget_remaining(state):
-        return {
-            "transition_next": "planner_refresh",
-            "transition_reason": "replan_requested_by_evaluators",
-        }
-
-    if progress_status in {"continue", "blocked"}:
-        return {
-            "transition_next": "builder_agent" if is_dual_plan else "agent",
-            "transition_reason": "continue_execution",
-        }
-
-    return {
-        "transition_next": "checkpoint_finalize",
-        "transition_reason": "default_finalize",
-    }
 
 
-def planner_refresh_node(state: AgentState) -> Dict[str, Any]:
-    """
-    Lightweight plan refresh from verifier feedback.
-    """
-    current_replans = _coerce_non_negative_int(state.get("plan_replan_count"))
-    max_replans = _coerce_non_negative_int(
-        state.get("max_plan_replans"),
-        default=DEFAULT_MAX_PLAN_REPLANS,
-    )
-    next_replans = current_replans + 1
-
-    result: Dict[str, Any] = {
-        "plan_replan_count": next_replans,
-        "active_role": ROLE_BUILDER,
-        "builder_stall_count": 0,
-    }
-    if max_replans >= 0 and next_replans > max_replans:
-        result["request_stop_reason"] = "plan_replan_budget_exhausted"
-        return result
-
-    feedback = state.get("verifier_feedback")
-    reason = ""
-    instructions: list[str] = []
-    if isinstance(feedback, dict):
-        reason_value = feedback.get("reason")
-        if isinstance(reason_value, str):
-            reason = reason_value.strip()
-        raw_instructions = feedback.get("fix_instructions")
-        if isinstance(raw_instructions, list):
-            for item in raw_instructions:
-                if isinstance(item, str):
-                    text = " ".join(item.strip().split())
-                    if text:
-                        instructions.append(text)
-
-    new_todos: list[TodoItem] = []
-    for instruction in instructions[:2]:
-        new_todos.append(create_todo(description=f"Replan fix: {instruction}", status="pending"))
-
-    if not new_todos:
-        fallback_description = reason or "Re-evaluate scene plan and continue fixing unresolved mismatches"
-        new_todos.append(create_todo(description=f"Replan: {fallback_description}", status="pending"))
-
-    result["todos"] = new_todos
-    result["role_private_memory"] = merge_role_private_memory(
-        state.get("role_private_memory"),
-        role=ROLE_BUILDER,
-        patch={
-            "last_replan_reason": reason or "verifier_requested_replan",
-            "replan_count": next_replans,
-        },
-    )
-    return result
 
 
-def finalize_node(
-    state: AgentState,
-    *,
-    finalizer_model: Any | None = None,
-) -> Dict[str, Any]:
-    """
-    Finalize node: mark workflow-level finish metadata before END.
-    """
-    workflow = _build_workflow_metadata(state)
-    summary = _compose_finalize_summary(
-        state,
-        workflow,
-        finalizer_model=finalizer_model,
-    )
-    return {"workflow": workflow, "messages": [AIMessage(content=summary)]}
 
 
-def _compose_finalize_summary(
+def compose_finalize_summary(
     state: AgentState,
     workflow: dict[str, Any],
     *,
@@ -1165,8 +556,8 @@ def _compose_finalize_summary(
     return _build_finalize_summary(state, workflow)
 
 
-def _build_workflow_metadata(state: AgentState) -> dict[str, Any]:
-    task_mode = _coerce_task_mode(state.get("task_mode"))
+def build_workflow_metadata(state: AgentState) -> dict[str, Any]:
+    task_mode = coerce_task_mode(state.get("task_mode"))
     finish_reason = "no_tool_calls"
 
     stop_reason = state.get("request_stop_reason")
@@ -1189,10 +580,10 @@ def _build_workflow_metadata(state: AgentState) -> dict[str, Any]:
         "finish_reason": finish_reason,
         "task_mode": task_mode,
         "task_intent": state.get("task_intent"),
-        "workflow_topology": _coerce_workflow_topology(state.get("workflow_topology")),
+        "workflow_topology": coerce_workflow_topology(state.get("workflow_topology")),
         "memory_profile": state.get("memory_profile"),
-        "request_agent_turns": _coerce_non_negative_int(state.get("request_agent_turns")),
-        "request_tool_batches": _coerce_non_negative_int(state.get("request_tool_batches")),
+        "request_agent_turns": coerce_non_negative_int(state.get("request_agent_turns")),
+        "request_tool_batches": coerce_non_negative_int(state.get("request_tool_batches")),
     }
 
 
@@ -1272,8 +663,8 @@ def _collect_current_todo_counts(state: AgentState) -> dict[str, int]:
                 "failed": failed,
             }
 
-    todos = _coerce_todos(state.get("todos"))
-    latest_by_description = _latest_todos_by_description(todos)
+    todos = coerce_todos(state.get("todos"))
+    latest_by_description = latest_todos_by_description(todos)
     effective_todos = list(latest_by_description.values()) if latest_by_description else todos
     return {
         "total": len(effective_todos),
@@ -1293,7 +684,7 @@ def _build_finalize_next_action(
     if pending_count == 0 and in_progress_count == 0:
         return "If the result looks correct, export the scene artifacts (render/GLB/BLEND)."
 
-    focus = _active_todo_context(state)
+    focus = active_todo_context(state)
     if focus:
         return (
             "Continue from the next unfinished todo: "
@@ -1352,7 +743,7 @@ def _build_finalize_summary_with_model(
     except Exception:
         return None
 
-    content_text = _message_content_to_text(getattr(response, "content", response))
+    content_text = message_content_to_text(getattr(response, "content", response))
     if not isinstance(content_text, str):
         return None
     normalized = re.sub(r"<agent_decision>.*?</agent_decision>", "", content_text, flags=re.DOTALL).strip()
@@ -1387,14 +778,14 @@ def _build_finalize_summary_context(
         "memory_profile": workflow.get("memory_profile"),
         "request_agent_turns": workflow.get("request_agent_turns"),
         "request_tool_batches": workflow.get("request_tool_batches"),
-        "builder_turn_count": _coerce_non_negative_int(state.get("builder_turn_count")),
-        "verifier_turn_count": _coerce_non_negative_int(state.get("verifier_turn_count")),
-        "plan_replan_count": _coerce_non_negative_int(state.get("plan_replan_count")),
+        "builder_turn_count": coerce_non_negative_int(state.get("builder_turn_count")),
+        "verifier_turn_count": coerce_non_negative_int(state.get("verifier_turn_count")),
+        "plan_replan_count": coerce_non_negative_int(state.get("plan_replan_count")),
         "verifier_feedback": state.get("verifier_feedback") if isinstance(state.get("verifier_feedback"), dict) else {},
-        "latest_user_request": _latest_human_message(state),
+        "latest_user_request": latest_human_message(state),
         "todo_check": todo_summary,
-        "active_todos": _active_todo_context(state),
-        "latest_verification": _sanitize_verification_payload(_latest_verification_payload(state)),
+        "active_todos": active_todo_context(state),
+        "latest_verification": _sanitize_verification_payload(latest_verification_payload(state)),
     }
 
 
@@ -1435,7 +826,7 @@ def _sanitize_verification_payload(payload: Any) -> Any:
     return sanitized
 
 
-def _latest_verification_payload(state: AgentState) -> dict[str, Any] | str | None:
+def latest_verification_payload(state: AgentState) -> dict[str, Any] | str | None:
     messages = state.get("messages")
     if not isinstance(messages, list):
         return None
@@ -1455,7 +846,7 @@ def _latest_verification_payload(state: AgentState) -> dict[str, Any] | str | No
 
 
 def _latest_verification_feedback(state: AgentState) -> tuple[str | None, str | None]:
-    payload = _latest_verification_payload(state)
+    payload = latest_verification_payload(state)
     if isinstance(payload, dict):
         status = payload.get("status")
         reason = payload.get("reason")
@@ -1606,202 +997,11 @@ def _filter_unavailable_tool_calls(
     return response, dropped_calls
 
 
-def update_memory_node(state: AgentState) -> Dict[str, Any]:
-    """
-    Update memory node: parse tool results and update scene state.
-
-    Extracts scene objects from get_scene_info and injects a single
-    VLM-ready visual message (fixed ID) for the latest render.
-    Using a fixed ID means add_messages replaces the previous visual
-    message rather than appending, keeping context lean.
-    """
-    last_messages = state["messages"][-10:]
-
-    result: Dict[str, Any] = {}
-    latest_tool_batch_names = _collect_latest_tool_batch_names(last_messages)
-    if latest_tool_batch_names:
-        result["last_tool_batch_names"] = latest_tool_batch_names
-        result["tool_round_count"] = _coerce_non_negative_int(state.get("tool_round_count")) + 1
-        next_request_batches = _coerce_non_negative_int(state.get("request_tool_batches")) + 1
-        result["request_tool_batches"] = next_request_batches
-        max_request_batches = _coerce_non_negative_int(state.get("max_request_tool_batches"), default=-1)
-        if max_request_batches >= 0 and next_request_batches >= max_request_batches:
-            result["request_stop_reason"] = "tool_batch_budget_exhausted"
-
-    for msg in last_messages:
-        if isinstance(msg, ToolMessage) and "get_scene_info" in str(msg.name):
-            scene_updates = SceneMemory.parse_scene_info(msg.content)
-            if scene_updates:
-                result["scene_objects"] = scene_updates
-                break
-
-    render_message = _find_last_render_message(last_messages)
-    if render_message is not None:
-        render_path = _extract_render_path(render_message)
-        if render_path:
-            result["last_render_path"] = render_path
-            result["last_render_source"] = _infer_render_source(render_message)
-
-        data_url = _resolve_render_message_to_data_url(render_message)
-        if data_url:
-            result["messages"] = [
-                HumanMessage(
-                    id=_RENDER_VISION_MESSAGE_ID,
-                    content=[
-                        {"type": "text", "text": "Latest render from tool call."},
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                    ],
-                )
-            ]
-
-    return result
 
 
-def scene_observe_node(state: AgentState) -> Dict[str, Any]:
-    """Auto-render 3 scene-level cameras after scene-mutating tool calls.
-
-    This node fires only when the latest tool batch contains a scene-mutating
-    tool (import, generate, execute_blender_code, etc.).  For object-level
-    camera work the node is a no-op so that the agent's own render flows
-    directly to verify.
-    """
-    latest_tools = state.get("last_tool_batch_names")
-    if not isinstance(latest_tools, list):
-        return {}
-
-    has_scene_mutation = any(name in SCENE_MUTATING_TOOLS for name in latest_tools)
-    if not has_scene_mutation:
-        return {}
-
-    thread_id = state.get("thread_id", "default")
-    send_blender_command = None
-
-    # In headless deployments, agent graph execution runs in the API process.
-    # Use API-side per-thread command routing so scene_observe does not depend
-    # on MCP runtime globals from another process.
-    try:
-        from scene_agent.interfaces.api import send_blender_command_sync
-
-        def _send_blender_command(
-            command_type: str,
-            params: dict[str, Any] | None = None,
-        ) -> dict[str, Any]:
-            return send_blender_command_sync(command_type, params, thread_id=thread_id)
-
-        send_blender_command = _send_blender_command
-    except Exception as exc:
-        logger = _get_logger()
-        logger.debug(
-            "scene_observe_node: API command sender unavailable, "
-            "falling back to MCP runtime connection: %s",
-            exc,
-        )
-
-    if _should_use_viewport_scene_observe(state):
-        return _run_viewport_scene_observe(
-            state=state,
-            thread_id=thread_id,
-            send_blender_command=send_blender_command,
-        )
-
-    try:
-        from mcp_server.tools.multimodal.camera_tools import update_scene_cameras
-
-        try:
-            result = update_scene_cameras(
-                thread_id=thread_id,
-                send_blender_command=send_blender_command,
-                use_direct_pose=True,
-            )
-        except TypeError as exc:
-            if "use_direct_pose" not in str(exc):
-                raise
-            # Backward-compatible fallback for older test doubles.
-            result = update_scene_cameras(
-                thread_id=thread_id,
-                send_blender_command=send_blender_command,
-            )
-    except Exception as exc:
-        logger = _get_logger()
-        logger.warning("scene_observe_node: update_scene_cameras failed: %s", exc)
-        # Scene mutated but render failed — invalidate stale render path
-        return {"last_render_path": None}
-
-    if not result.get("success"):
-        # Scene mutated but render failed — invalidate stale render path
-        return {"last_render_path": None}
-
-    cameras = result.get("cameras", [])
-    image_urls = result.get("image_urls", [])
-    scene_bbox = result.get("scene_bbox", {})
-
-    if not image_urls:
-        # Scene mutated but render failed — invalidate stale render path
-        return {"last_render_path": None}
-
-    content: list[dict] = [
-        {
-            "type": "text",
-            "text": (
-                "Auto scene observation — 3-view render after scene mutation (2 diagonal views + top-down bird view). "
-                "Review these views to assess overall composition, scale, and layout."
-            ),
-        },
-    ]
-    for cam_info in cameras:
-        url = cam_info.get("image_url", "")
-        if url:
-            vlm_ready_url = _payload_to_data_url({"url": url})
-            if not vlm_ready_url:
-                normalized_url = _normalize_render_reference(url)
-                if (
-                    isinstance(normalized_url, str)
-                    and (
-                        normalized_url.startswith("http://")
-                        or normalized_url.startswith("https://")
-                        or normalized_url.startswith("data:")
-                    )
-                ):
-                    vlm_ready_url = normalized_url
-            if not vlm_ready_url:
-                continue
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": vlm_ready_url},
-                }
-            )
-
-    camera_params: dict = {}
-    camera_names: list[str] = []
-    for cam_info in cameras:
-        name = cam_info.get("camera_name", "")
-        camera_params[name] = {
-            "location": cam_info.get("location"),
-            "focal_mm": cam_info.get("focal_mm"),
-            "azimuth": cam_info.get("azimuth"),
-            "elevation": cam_info.get("elevation"),
-        }
-        camera_names.append(name)
-
-    first_url = image_urls[0] if image_urls else None
-
-    return {
-        "messages": [
-            HumanMessage(
-                id=_SCENE_OBSERVE_MESSAGE_ID,
-                content=content,
-            )
-        ],
-        "last_render_path": first_url,
-        "last_render_source": "scene_observe",
-        "scene_camera_params": camera_params,
-        "persistent_cameras": camera_names,
-        "scene_bbox": scene_bbox,
-    }
 
 
-def _should_use_viewport_scene_observe(state: AgentState) -> bool:
+def should_use_viewport_scene_observe(state: AgentState) -> bool:
     enabled_tool_set = _resolve_enabled_tool_set(state)
     if enabled_tool_set:
         return "get_viewport_screenshot" in enabled_tool_set
@@ -1812,13 +1012,13 @@ def _should_use_viewport_scene_observe(state: AgentState) -> bool:
         return False
 
 
-def _run_viewport_scene_observe(
+def run_viewport_scene_observe(
     *,
     state: AgentState,
     thread_id: str,
     send_blender_command,
 ) -> Dict[str, Any]:
-    logger = _get_logger()
+    logger = get_logger()
     command_sender = send_blender_command
     if command_sender is None:
         try:
@@ -1881,7 +1081,7 @@ def _run_viewport_scene_observe(
             "SceneObserveViewport",
             logger=logger,
         )
-        vlm_ready_url = _payload_to_data_url({"url": render_url})
+        vlm_ready_url = payload_to_data_url({"url": render_url})
         if not vlm_ready_url:
             vlm_ready_url = _path_to_data_url(screenshot_path)
 
@@ -1905,7 +1105,7 @@ def _run_viewport_scene_observe(
         return {
             "messages": [
                 HumanMessage(
-                    id=_SCENE_OBSERVE_MESSAGE_ID,
+                    id=SCENE_OBSERVE_MESSAGE_ID,
                     content=content,
                 )
             ],
@@ -1924,315 +1124,20 @@ def _run_viewport_scene_observe(
                 pass
 
 
-def _get_logger():
+def get_logger():
     import logging
     return logging.getLogger("scene_agent.nodes")
 
 
-def checkpoint_gate_node(
-    state: AgentState,
-    *,
-    stage: Literal["loop", "finalize"],
-) -> Dict[str, Any]:
-    """
-    Decide whether todo_check should run at the current checkpoint.
-
-    Strategy:
-    - Run only when todos exist.
-    - In loop stage, run sparsely (interval or milestone tool batch).
-    - In finalize stage, run once as a pre-final guard.
-    """
-    todos = _coerce_todos(state.get("todos"))
-    has_todos = len(todos) > 0
-    tool_round_count = _coerce_non_negative_int(state.get("tool_round_count"))
-    last_check_round = _coerce_non_negative_int(state.get("last_todo_check_round"), default=-1)
-    latest_tool_batch_names = state.get("last_tool_batch_names")
-    milestone_hit = _is_milestone_tool_batch(latest_tool_batch_names)
-
-    should_run = False
-    reason = "no_todos"
-
-    if has_todos:
-        if stage == "finalize":
-            should_run = True
-            reason = "pre_finalize_guard"
-        elif milestone_hit:
-            should_run = True
-            reason = "milestone_tool_batch"
-        elif last_check_round < 0:
-            should_run = True
-            reason = "first_check"
-        elif tool_round_count - last_check_round >= TODO_CHECK_INTERVAL_ROUNDS:
-            should_run = True
-            reason = "interval_reached"
-        else:
-            should_run = False
-            reason = "interval_not_reached"
-
-    return {
-        "todo_check_gate": {
-            "stage": stage,
-            "should_run": should_run,
-            "reason": reason,
-            "has_todos": has_todos,
-            "tool_round_count": tool_round_count,
-            "last_todo_check_round": last_check_round,
-        }
-    }
 
 
-def todo_check_node(state: AgentState) -> Dict[str, Any]:
-    """
-    Check todo progress and detect stagnation.
-    """
-    gate = state.get("todo_check_gate")
-    stage = "loop"
-    if isinstance(gate, dict):
-        stage_value = gate.get("stage")
-        if stage_value in {"loop", "finalize"}:
-            stage = stage_value
-
-    todos = _coerce_todos(state.get("todos"))
-    tool_round_count = _coerce_non_negative_int(state.get("tool_round_count"))
-    current_verified_path = state.get("last_verified_path")
-    if not isinstance(current_verified_path, str):
-        current_verified_path = None
-
-    if not todos:
-        return {
-            "todo_check": {
-                "status": "not_applicable",
-                "reason": "no_todos",
-                "stage": stage,
-                "pending_count": 0,
-                "in_progress_count": 0,
-                "completed_count": 0,
-                "failed_count": 0,
-                "tool_round_count": tool_round_count,
-                "stagnation_count": 0,
-            },
-            "last_todo_check_round": tool_round_count,
-            "last_todo_check_verified_path": current_verified_path,
-            "last_todo_snapshot": {},
-            "stagnation_count": 0,
-        }
-
-    latest_by_description = _latest_todos_by_description(todos)
-    effective_todos = list(latest_by_description.values())
-    pending_count = sum(1 for todo in effective_todos if todo.get("status") == "pending")
-    in_progress_count = sum(1 for todo in effective_todos if todo.get("status") == "in_progress")
-    completed_count = sum(1 for todo in effective_todos if todo.get("status") == "completed")
-    failed_count = sum(1 for todo in effective_todos if todo.get("status") == "failed")
-
-    snapshot = {
-        key: str(todo.get("status", "pending"))
-        for key, todo in latest_by_description.items()
-    }
-    previous_snapshot = state.get("last_todo_snapshot")
-    previous_verified_path = state.get("last_todo_check_verified_path")
-    if not isinstance(previous_verified_path, str):
-        previous_verified_path = None
-    previous_stagnation = _coerce_non_negative_int(state.get("stagnation_count"))
-    stagnation_count = 0
-
-    status = "continue"
-    reason = "pending_todos"
-    if pending_count == 0 and in_progress_count == 0:
-        status = "completed"
-        reason = "all_todos_terminal"
-    elif isinstance(previous_snapshot, dict) and previous_snapshot == snapshot:
-        has_new_visual_evidence = (
-            isinstance(current_verified_path, str)
-            and current_verified_path
-            and current_verified_path != previous_verified_path
-        )
-        if has_new_visual_evidence:
-            stagnation_count = 0
-            reason = "pending_todos_with_new_visual_evidence"
-        else:
-            stagnation_count = previous_stagnation + 1
-            if stagnation_count >= TODO_STAGNATION_LIMIT:
-                status = "blocked"
-                reason = "todo_progress_stagnant"
-    else:
-        stagnation_count = 0
-
-    return {
-        "todo_check": {
-            "status": status,
-            "reason": reason,
-            "stage": stage,
-            "pending_count": pending_count,
-            "in_progress_count": in_progress_count,
-            "completed_count": completed_count,
-            "failed_count": failed_count,
-            "tool_round_count": tool_round_count,
-            "stagnation_count": stagnation_count,
-        },
-        "last_todo_check_round": tool_round_count,
-        "last_todo_check_verified_path": current_verified_path,
-        "last_todo_snapshot": snapshot,
-        "stagnation_count": stagnation_count,
-    }
 
 
-def blocked_recovery_node(state: AgentState) -> Dict[str, Any]:
-    """
-    Inject a one-shot internal recovery instruction when finalize-stage todo_check is blocked.
-    """
-    todo_check = state.get("todo_check")
-    if not isinstance(todo_check, dict):
-        return {}
-    if todo_check.get("status") != "blocked":
-        return {}
-
-    stagnation_count = _coerce_non_negative_int(todo_check.get("stagnation_count"))
-    recovery_attempt = max(1, stagnation_count - TODO_STAGNATION_LIMIT + 1)
-
-    enabled_tool_names = state.get("enabled_tool_names")
-    enabled_tool_set: set[str] = set()
-    if isinstance(enabled_tool_names, list):
-        enabled_tool_set = {
-            name.strip()
-            for name in enabled_tool_names
-            if isinstance(name, str) and name.strip()
-        }
-
-    undo_known_available = not enabled_tool_set or "undo_last_snapshot" in enabled_tool_set
-    clear_scene_known_available = not enabled_tool_set or "clear_scene" in enabled_tool_set
-    if clear_scene_known_available:
-        reset_line = (
-            "- Full reset flow: call `clear_scene()`, then call `get_scene_info()` and "
-            "`observe_scene_global()` to confirm an empty baseline before rebuilding from the first pending todo."
-        )
-    else:
-        reset_line = (
-            "- Full reset flow: call `get_scene_info()`, collect all current object names, then call "
-            "`delete_objects(object_names=[...], mode=\"cascade\", strict=False, ignore_missing=True)` "
-            "to clear the scene before rebuilding from the first pending todo."
-        )
-
-    if undo_known_available and recovery_attempt <= 1:
-        recovery_lines = [
-            "- First recovery action: call `undo_last_snapshot()` once.",
-            "- Validate rollback with `get_scene_info()` and `observe_scene_global()`.",
-            "- If undo fails or the scene is still broken, immediately run full reset:",
-            reset_line,
-        ]
-    elif undo_known_available:
-        recovery_lines = [
-            "- Previous recovery did not restore progress. Skip undo and run full reset now.",
-            reset_line,
-        ]
-    else:
-        recovery_lines = [
-            "- `undo_last_snapshot` is unavailable. Run full reset now.",
-            reset_line,
-        ]
-
-    guidance = "\n".join(
-        [
-            "Recovery mode: todo progress was flagged as blocked in finalize checkpoint.",
-            f"Recovery attempt {recovery_attempt}/{TODO_BLOCKED_RECOVERY_ATTEMPTS}.",
-            "Do not finalize now. You must call tools in this turn.",
-            "- Do NOT use `execute_blender_code` for scene deletion/reset; addon enforces hierarchy-safe deletion via `delete_objects`.",
-            *recovery_lines,
-            "- After recovery edits, call a render tool so verification receives fresh visual evidence.",
-        ]
-    )
-
-    return {
-        "messages": [
-            SystemMessage(
-                id=_TODO_BLOCKED_RECOVERY_MESSAGE_ID,
-                content=guidance,
-            )
-        ]
-    }
 
 
-def blocked_recovery_action_node(state: AgentState) -> Dict[str, Any]:
-    """
-    Dispatch deterministic recovery tool calls to reduce LLM hesitation.
-    """
-    todo_check = state.get("todo_check")
-    if not isinstance(todo_check, dict):
-        return {}
-    if todo_check.get("status") != "blocked":
-        return {}
-
-    stagnation_count = _coerce_non_negative_int(todo_check.get("stagnation_count"))
-    recovery_attempt = max(1, stagnation_count - TODO_STAGNATION_LIMIT + 1)
-
-    enabled_tool_names = state.get("enabled_tool_names")
-    enabled_tool_set: set[str] = set()
-    if isinstance(enabled_tool_names, list):
-        enabled_tool_set = {
-            name.strip()
-            for name in enabled_tool_names
-            if isinstance(name, str) and name.strip()
-        }
-
-    def _tool_available(name: str) -> bool:
-        if not enabled_tool_set:
-            return True
-        return name in enabled_tool_set
-
-    tool_calls: list[dict[str, Any]] = []
-    if recovery_attempt <= 1 and _tool_available("undo_last_snapshot"):
-        tool_calls.append(
-            {
-                "name": "undo_last_snapshot",
-                "args": {},
-                "id": "recovery-undo-1",
-                "type": "tool_call",
-            }
-        )
-    elif _tool_available("clear_scene"):
-        tool_calls.append(
-            {
-                "name": "clear_scene",
-                "args": {},
-                "id": "recovery-clear-1",
-                "type": "tool_call",
-            }
-        )
-
-    # Always request fresh grounding evidence when available.
-    if _tool_available("get_scene_info"):
-        tool_calls.append(
-            {
-                "name": "get_scene_info",
-                "args": {},
-                "id": "recovery-scene-info-1",
-                "type": "tool_call",
-            }
-        )
-    if _tool_available("observe_scene_global"):
-        tool_calls.append(
-            {
-                "name": "observe_scene_global",
-                "args": {},
-                "id": "recovery-observe-1",
-                "type": "tool_call",
-            }
-        )
-
-    if not tool_calls:
-        return {}
-
-    return {
-        "messages": [
-            AIMessage(
-                id=_TODO_BLOCKED_RECOVERY_ACTION_MESSAGE_ID,
-                content="",
-                tool_calls=tool_calls,
-            )
-        ]
-    }
 
 
-def _message_content_to_text(content: Any) -> str:
+def message_content_to_text(content: Any) -> str:
     if content is None:
         return ""
     if isinstance(content, str):
@@ -2252,7 +1157,7 @@ def _message_content_to_text(content: Any) -> str:
     return str(content)
 
 
-def _collect_latest_tool_batch_names(messages: list) -> list[str]:
+def collect_latest_tool_batch_names(messages: list) -> list[str]:
     names_reversed: list[str] = []
     for msg in reversed(messages):
         if isinstance(msg, ToolMessage):
@@ -2274,18 +1179,18 @@ def _collect_latest_tool_batch_names(messages: list) -> list[str]:
     return deduped
 
 
-def _align_todo_updates_with_existing(
+def align_todo_updates_with_existing(
     existing_todos_raw: Any,
     todo_updates: list[TodoItem],
 ) -> list[TodoItem]:
     if not todo_updates:
         return []
 
-    existing_todos = _coerce_todos(existing_todos_raw)
+    existing_todos = coerce_todos(existing_todos_raw)
     if not existing_todos:
         return todo_updates
 
-    existing_by_description: dict[str, TodoItem] = _latest_todos_by_description(existing_todos)
+    existing_by_description: dict[str, TodoItem] = latest_todos_by_description(existing_todos)
     aligned: list[TodoItem] = []
     for todo in todo_updates:
         description = str(todo.get("description", ""))
@@ -2343,7 +1248,7 @@ def _normalize_todo_description(description: str) -> str:
     return " ".join(tokens)
 
 
-def _latest_todos_by_description(todos: list[TodoItem]) -> dict[str, TodoItem]:
+def latest_todos_by_description(todos: list[TodoItem]) -> dict[str, TodoItem]:
     latest: dict[str, TodoItem] = {}
     for todo in todos:
         description = str(todo.get("description", ""))
@@ -2354,7 +1259,7 @@ def _latest_todos_by_description(todos: list[TodoItem]) -> dict[str, TodoItem]:
     return latest
 
 
-def _coerce_todos(raw: Any) -> list[TodoItem]:
+def coerce_todos(raw: Any) -> list[TodoItem]:
     if not isinstance(raw, list):
         return []
     todos: list[TodoItem] = []
@@ -2389,13 +1294,13 @@ def _coerce_todos(raw: Any) -> list[TodoItem]:
     return todos
 
 
-def _coerce_non_negative_int(value: Any, *, default: int = 0) -> int:
+def coerce_non_negative_int(value: Any, *, default: int = 0) -> int:
     if isinstance(value, int) and value >= 0:
         return value
     return default
 
 
-def _is_milestone_tool_batch(names: Any) -> bool:
+def is_milestone_tool_batch(names: Any) -> bool:
     if not isinstance(names, list):
         return False
     for raw_name in names:
@@ -2410,7 +1315,7 @@ def _is_milestone_tool_batch(names: Any) -> bool:
     return False
 
 
-def _extract_render_path(message: ToolMessage | None) -> str | None:
+def extract_render_path(message: ToolMessage | None) -> str | None:
     if message is None:
         return None
     artifact = getattr(message, "artifact", None)
@@ -2434,14 +1339,14 @@ def _extract_render_path(message: ToolMessage | None) -> str | None:
                 if isinstance(url, str) and url.startswith("file://"):
                     return url.replace("file://", "", 1)
     if isinstance(content, str):
-        normalized = _normalize_render_reference(content)
+        normalized = normalize_render_reference(content)
         if normalized and _is_probable_render_reference(normalized):
             return normalized
         return None
     return None
 
 
-def _find_last_render_message(messages: list) -> ToolMessage | None:
+def find_last_render_message(messages: list) -> ToolMessage | None:
     for msg in reversed(messages):
         if isinstance(msg, ToolMessage) and msg.name:
             name = msg.name
@@ -2456,7 +1361,7 @@ def _find_last_render_message(messages: list) -> ToolMessage | None:
     return None
 
 
-def _infer_render_source(message: ToolMessage | None) -> str:
+def infer_render_source(message: ToolMessage | None) -> str:
     if message is None:
         return "agent_camera"
     name = str(getattr(message, "name", "") or "")
@@ -2465,21 +1370,21 @@ def _infer_render_source(message: ToolMessage | None) -> str:
     return "agent_camera"
 
 
-def _find_last_ai_message(messages: list) -> AIMessage | None:
+def find_last_ai_message(messages: list) -> AIMessage | None:
     for msg in reversed(messages):
         if isinstance(msg, AIMessage):
             return msg
     return None
 
 
-def _resolve_render_message_to_data_url(message: ToolMessage) -> str | None:
+def resolve_render_message_to_data_url(message: ToolMessage) -> str | None:
     """Convert a render tool message's image reference to a VLM-ready data URL.
 
-    Uses _extract_render_path for URL/path extraction (handles all content
+    Uses extract_render_path for URL/path extraction (handles all content
     formats including markdown), then converts to data: via _path_to_data_url.
     Legacy base64 image blocks are handled as a fallback.
     """
-    render_path = _extract_render_path(message)
+    render_path = extract_render_path(message)
     if render_path:
         return _path_to_data_url(render_path)
 
@@ -2495,7 +1400,7 @@ def _resolve_render_message_to_data_url(message: ToolMessage) -> str | None:
     return None
 
 
-def _payload_to_data_url(payload: dict[str, str] | None) -> str | None:
+def payload_to_data_url(payload: dict[str, str] | None) -> str | None:
     if not payload:
         return None
     
@@ -2505,7 +1410,7 @@ def _payload_to_data_url(payload: dict[str, str] | None) -> str | None:
         return f"data:{mime_type};base64,{base64_data}"
     url = payload.get("url")
     if isinstance(url, str):
-        normalized = _normalize_render_reference(url)
+        normalized = normalize_render_reference(url)
         if not normalized:
             return None
         # Data URL - return as-is
@@ -2525,7 +1430,7 @@ def _payload_to_data_url(payload: dict[str, str] | None) -> str | None:
 
 
 def _path_to_data_url(path: str) -> str | None:
-    normalized = _normalize_render_reference(path)
+    normalized = normalize_render_reference(path)
     if not normalized:
         return None
     resolved_renders_path = _resolve_renders_url_to_path(normalized)
@@ -2564,7 +1469,7 @@ def _extract_markdown_image_url(text: str) -> str | None:
     return url if url else None
 
 
-def _normalize_render_reference(raw_value: str | None) -> str | None:
+def normalize_render_reference(raw_value: str | None) -> str | None:
     if not isinstance(raw_value, str):
         return None
     normalized = raw_value.strip()
@@ -2614,22 +1519,22 @@ def _resolve_renders_url_to_path(url: str) -> str | None:
     return candidate if os.path.exists(candidate) else None
 
 
-def _latest_human_message(state: AgentState) -> str:
+def latest_human_message(state: AgentState) -> str:
     _skip_ids = {
-        _RENDER_VISION_MESSAGE_ID,
-        _SCENE_OBSERVE_MESSAGE_ID,
+        RENDER_VISION_MESSAGE_ID,
+        SCENE_OBSERVE_MESSAGE_ID,
     }
     for msg in reversed(state["messages"]):
         if isinstance(msg, HumanMessage) and getattr(msg, "id", None) not in _skip_ids:
-            return _message_content_to_text(msg.content)
+            return message_content_to_text(msg.content)
     return ""
 
 
-def _active_todo_context(state: AgentState) -> list[str]:
-    todos = _coerce_todos(state.get("todos"))
+def active_todo_context(state: AgentState) -> list[str]:
+    todos = coerce_todos(state.get("todos"))
     if not todos:
         return []
-    latest = _latest_todos_by_description(todos)
+    latest = latest_todos_by_description(todos)
     in_progress: list[str] = []
     pending: list[str] = []
     for todo in latest.values():
@@ -2734,15 +1639,15 @@ def _extract_verification_todo_assessments(
     return assessments
 
 
-def _build_todo_updates_from_verification(
+def build_todo_updates_from_verification(
     state: AgentState,
     verification: dict[str, Any],
 ) -> tuple[list[TodoItem], list[dict[str, str]]]:
-    todos = _coerce_todos(state.get("todos"))
+    todos = coerce_todos(state.get("todos"))
     if not todos:
         return [], []
 
-    latest_todos = _latest_todos_by_description(todos)
+    latest_todos = latest_todos_by_description(todos)
     if not latest_todos:
         return [], []
 
@@ -2780,7 +1685,7 @@ def _build_todo_updates_from_verification(
     return list(updates_by_id.values()), update_records
 
 
-def _build_verification_scene_context(state: AgentState) -> dict[str, Any] | None:
+def build_verification_scene_context(state: AgentState) -> dict[str, Any] | None:
     context: dict[str, Any] = {}
 
     scene_objects = state.get("scene_objects")
@@ -2916,7 +1821,7 @@ def _analyze_render_flatness(render_reference: Any) -> dict[str, Any] | None:
     }
 
 
-def _detect_catastrophic_scene_state(
+def detect_catastrophic_scene_state(
     state: AgentState,
     *,
     render_reference: Any,
@@ -2998,142 +1903,9 @@ def _resolve_enabled_tool_set(state: AgentState) -> set[str]:
     }
 
 
-def verify_node(
-    state: AgentState,
-    *,
-    provider_name: str | None = None,
-    api_key: str | None = None,
-    model: str | None = None,
-) -> Dict[str, Any]:
-    """Verify the latest render against references and current todo focus.
-
-    As a fixed sequential node (scene_observe -> verify -> checkpoint_loop),
-    this skips silently when there is no new unverified render.
-    """
-    render_path = state.get("last_render_path")
-    if not render_path:
-        return {"verify_forced_recovery": False}
-
-    # Already verified this exact render — skip
-    if state.get("last_verified_path") == render_path:
-        return {"verify_forced_recovery": False}
-
-    render_source = state.get("last_render_source", "agent_camera")
-    scene_context = _build_verification_scene_context(state)
-
-    # Phase 1: catastrophic scene-state gate (hard recovery before todo/consistency checks).
-    catastrophic_report = _detect_catastrophic_scene_state(
-        state,
-        render_reference=render_path,
-    )
-    if catastrophic_report.get("is_catastrophic"):
-        verification = {
-            "status": "catastrophic",
-            "reason": (
-                "Catastrophic scene-state signal detected. "
-                "Automatic hard-recovery tool injection is disabled; use verifier-guided remediation."
-            ),
-            "render_path": render_path,
-            "render_source": render_source,
-            "catastrophic_signals": catastrophic_report.get("signals", []),
-            "catastrophic_metrics": catastrophic_report.get("metrics", {}),
-            "hard_recovery": {
-                "forced": False,
-                "action": "disabled",
-                "tool_calls": [],
-            },
-        }
-
-        guidance_text = _build_verification_guidance_message(state, verification)
-        if guidance_text:
-            verification["guidance"] = guidance_text
-
-        verification_tool_call_id = (
-            "verification_"
-            + hashlib.sha1(str(render_path).encode("utf-8")).hexdigest()[:12]
-        )
-        result: Dict[str, Any] = {
-            "messages": [
-                ToolMessage(
-                    name="verification",
-                    content=verification,
-                    tool_call_id=verification_tool_call_id,
-                )
-            ],
-            "last_verified_path": render_path,
-            "verify_forced_recovery": False,
-            "catastrophic_recovery_attempts": 0,
-        }
-        return result
-
-    # Phase 2: normal verification against active todos and user request.
-    # Verify should follow active todo objectives in both scene-level and
-    # object-level paths whenever todos exist.
-    todo_context = _active_todo_context(state)
-
-    reference_images = _resolve_verification_assets(state)
-    reference_paths = [image.stored_path for image in reference_images if isinstance(image.stored_path, str)]
-
-    try:
-        verification = verify_render_with_references(
-            render_path=render_path,
-            reference_paths=reference_paths,
-            user_request=_latest_human_message(state),
-            render_source=render_source,
-            todo_context=todo_context,
-            scene_context=scene_context,
-            provider_name=provider_name,
-            api_key=api_key,
-            model=model,
-        )
-    except Exception as exc:
-        verification = {
-            "status": "mismatch",
-            "reason": f"Verification skipped due to render access error: {exc}",
-        }
-    verification.update(
-        {
-            "reference_count": len(reference_paths),
-            "reference_ids": [image.id for image in reference_images],
-            "render_path": render_path,
-            "render_source": render_source,
-            "todo_context": todo_context,
-        }
-    )
-    verification_tool_call_id = (
-        "verification_"
-        + hashlib.sha1(str(render_path).encode("utf-8")).hexdigest()[:12]
-    )
-    guidance_text = _build_verification_guidance_message(state, verification)
-    if guidance_text:
-        verification["guidance"] = guidance_text
-
-    todo_updates, todo_update_records = _build_todo_updates_from_verification(
-        state,
-        verification,
-    )
-    if todo_update_records:
-        verification["todo_status_updates"] = todo_update_records
-
-    result: Dict[str, Any] = {
-        "messages": [
-            ToolMessage(
-                name="verification",
-                content=verification,
-                tool_call_id=verification_tool_call_id,
-            )
-        ],
-        "last_verified_path": render_path,
-        "verify_forced_recovery": False,
-        "catastrophic_recovery_attempts": 0,
-    }
-    if todo_updates:
-        result["todos"] = todo_updates
-
-    return result
 
 
-def _build_verification_guidance_message(
+def build_verification_guidance_message(
     state: AgentState,
     verification: dict[str, Any],
 ) -> str:
@@ -3168,7 +1940,7 @@ def _build_verification_guidance_message(
     is_scene_level = isinstance(render_source, str) and render_source == "scene_observe"
     focus_candidates: list[str] = []
 
-    for line in _active_todo_context(state):
+    for line in active_todo_context(state):
         if line not in focus_candidates:
             focus_candidates.append(line)
         if len(focus_candidates) >= 4:
@@ -3194,67 +1966,7 @@ def _build_verification_guidance_message(
     )
 
 
-def extract_todo_updates(messages: list) -> list[TodoItem]:
-    """
-    Extract todo items from messages that contain <todos> tags.
-    
-    Args:
-        messages: List of recent messages
-        
-    Returns:
-        List of TodoItem objects parsed from messages
-    """
-    todos = []
-    
-    for msg in messages:
-        if isinstance(msg, AIMessage):
-            content = msg.content
-            if not isinstance(content, str):
-                if isinstance(content, list):
-                    parts = []
-                    for item in content:
-                        if isinstance(item, dict):
-                            if "text" in item and isinstance(item["text"], str):
-                                parts.append(item["text"])
-                            elif "content" in item and isinstance(item["content"], str):
-                                parts.append(item["content"])
-                        elif isinstance(item, str):
-                            parts.append(item)
-                    content = "\n".join(parts) if parts else json.dumps(content, ensure_ascii=False)
-                else:
-                    content = str(content)
-            
-            # Look for <todos> blocks in the message
-            todo_pattern = r'<todos>(.*?)</todos>'
-            matches = re.findall(todo_pattern, content, re.DOTALL)
-            
-            for match in matches:
-                # Parse each line in the todos block
-                lines = match.strip().split('\n')
-                for line in lines:
-                    line = line.strip()
-                    if not line or line.startswith('-'):
-                        # Parse format: - [status] description
-                        status_match = re.match(r'-?\s*\[(.*?)\]\s*(.*)', line)
-                        if status_match:
-                            status = status_match.group(1).strip()
-                            description = status_match.group(2).strip()
-                            
-                            # Map status variations
-                            status_map = {
-                                'pending': 'pending',
-                                'in_progress': 'in_progress',
-                                'in progress': 'in_progress',
-                                'completed': 'completed',
-                                'done': 'completed',
-                                'failed': 'failed',
-                                'error': 'failed'
-                            }
-                            
-                            status = status_map.get(status.lower(), 'pending')
-                            
-                            if description:
-                                todo = create_todo(description, status)
-                                todos.append(todo)
-    
-    return todos
+# Export all non-dunder names for package-level compatibility.
+
+
+__all__ = [name for name in globals() if not (name.startswith("__") and name.endswith("__"))]
