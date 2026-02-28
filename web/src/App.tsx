@@ -451,6 +451,11 @@ function App() {
         cancelled = true
       }
     }
+    if (backendStatus !== 'online') {
+      return () => {
+        cancelled = true
+      }
+    }
     const fetchPrompts = async () => {
       try {
         const prompts = await getExamplePrompts(settings.backendUrl)
@@ -467,7 +472,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [settings.backendUrl, MAX_EXAMPLE_PROMPTS])
+  }, [backendStatus, settings.backendUrl, MAX_EXAMPLE_PROMPTS])
 
   useEffect(() => {
     let cancelled = false
@@ -1473,6 +1478,28 @@ function App() {
     }
   }, [activeThread?.id, requireHeadlessRuntimeForAction, settings.backendUrl, setSceneActionError, setThreadLoading, updateThread])
 
+  const uploadDebugGltf = useCallback(
+    (file: File) => {
+      if (!activeThread) return
+      const targetId = activeThread.id
+      const filename = file.name.trim().toLowerCase()
+      if (!(filename.endsWith('.glb') || filename.endsWith('.gltf'))) {
+        setSceneActionError(targetId, 'Debug upload only supports .glb / .gltf files.')
+        return
+      }
+
+      const nextUrl = URL.createObjectURL(file)
+      setSceneActionError(targetId, null)
+      updateThread(targetId, (thread) => {
+        if (thread.gltfUrl) {
+          URL.revokeObjectURL(thread.gltfUrl)
+        }
+        return { ...thread, gltfUrl: nextUrl }
+      })
+    },
+    [activeThread, setSceneActionError, updateThread]
+  )
+
   const triggerAutoFetch = useCallback(
     (threadId: string, force: boolean = false) => {
       if (!settingsRef.current.autoRefreshScene || backendStatus !== 'online') return false
@@ -1594,6 +1621,10 @@ function App() {
   const runtimeClaimHint =
     backendMode === 'headless' && activeThread && !activeThread.occupyingResources
       ? 'Runtime and mcp tools will be claimed when you send the next message'
+      : null
+  const idleSceneActionHint =
+    backendMode === 'headless' && activeThread && !activeThread.occupyingResources
+      ? 'Send a message first to claim runtime, then fetch scene/renders.'
       : null
   const quotaHint =
     backendStatus === 'online' && backendMode === 'headless' && headlessQuotaInfo
@@ -1753,6 +1784,7 @@ function App() {
                   onEnvironmentChange={setEnvironment}
                   onFetchRenders={(includeLocalWork) => void fetchRenders(undefined, includeLocalWork ?? false)}
                   onFetchGltf={() => void fetchGltf()}
+                  onDebugUploadGltf={uploadDebugGltf}
                   onDownloadGltf={() => void downloadGltf()}
                   onDownloadBlend={() => void downloadBlend()}
                   onDownloadBlendFile={(relativePath, filename) => void downloadBlendFile(relativePath, filename)}
@@ -1762,6 +1794,7 @@ function App() {
                   onHierarchyChange={handleSceneHierarchyChange}
                   loading={activeThreadLoading}
                   canRunActions={canRunSceneActions}
+                  idleActionHint={idleSceneActionHint}
                 />
               </section>
             </>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react'
 import type { BlendFileEntry, RenderImage } from '../api/types'
 import type { SceneHierarchyNode } from '../state/types'
 import { GltfViewer } from './GltfViewer'
@@ -23,6 +23,7 @@ type SceneTabProps = {
   onEnvironmentChange: (preset: EnvironmentPreset) => void
   onFetchRenders: (includeLocalWork?: boolean) => void
   onFetchGltf: () => void
+  onDebugUploadGltf: (file: File) => void
   onDownloadGltf: () => void
   onDownloadBlend: () => void
   onDownloadBlendFile: (relativePath: string, filename: string) => void
@@ -37,6 +38,7 @@ type SceneTabProps = {
     download: boolean
   }
   canRunActions: boolean
+  idleActionHint?: string | null
 }
 
 type DownloadDropdownProps = {
@@ -182,6 +184,7 @@ export function SceneTab({
   onEnvironmentChange,
   onFetchRenders,
   onFetchGltf,
+  onDebugUploadGltf,
   onDownloadGltf,
   onDownloadBlend,
   onDownloadBlendFile,
@@ -190,13 +193,16 @@ export function SceneTab({
   onClearActionError,
   onHierarchyChange,
   loading,
-  canRunActions
+  canRunActions,
+  idleActionHint = null
 }: SceneTabProps) {
   const [objectsCollapsed, setObjectsCollapsed] = useState(true)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [alwaysAutoFrameCamera, setAlwaysAutoFrameCamera] = useState(false)
   const [includeLocalWorkRenders, setIncludeLocalWorkRenders] = useState(false)
+  const debugFileInputRef = useRef<HTMLInputElement | null>(null)
   const isSceneActionBusy = loading.scene || loading.renders || loading.gltf
+  const fetchActionHint = !canRunActions ? idleActionHint : null
   const handleHierarchyChange = useCallback(
     (hierarchy: SceneHierarchyNode[]) => onHierarchyChange(threadId, hierarchy),
     [onHierarchyChange, threadId]
@@ -214,6 +220,22 @@ export function SceneTab({
       window.removeEventListener('keydown', handleEscape)
     }
   }, [isFullscreen])
+
+  const handleDebugUploadClick = useCallback(() => {
+    debugFileInputRef.current?.click()
+  }, [])
+
+  const handleDebugFileChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0]
+      if (file) {
+        onDebugUploadGltf(file)
+      }
+      // Allow selecting the same file again in subsequent debug attempts.
+      event.currentTarget.value = ''
+    },
+    [onDebugUploadGltf]
+  )
 
   const coreLayout = (fullscreen: boolean) => (
     <div className={`scene-core ${objectsCollapsed ? 'objects-collapsed' : ''}`}>
@@ -257,6 +279,21 @@ export function SceneTab({
                   <option value="cool">Cool</option>
                 </select>
               </label>
+              <input
+                ref={debugFileInputRef}
+                className="viewer-debug-file-input"
+                type="file"
+                accept=".glb,.gltf,model/gltf-binary,model/gltf+json"
+                onChange={handleDebugFileChange}
+              />
+              <button
+                className="ghost-btn viewer-debug-upload-btn"
+                type="button"
+                onClick={handleDebugUploadClick}
+                title="Upload local GLTF/GLB for viewport debug"
+              >
+                Debug Upload
+              </button>
               {fullscreen && (
                 <DownloadDropdown
                   onDownloadGltf={onDownloadGltf}
@@ -286,16 +323,20 @@ export function SceneTab({
     <div className="scene-tab scene-pane">
       <div className="scene-action-bar">
         <div className="scene-actions-left">
-          <button
-            className="primary-btn"
-            onClick={() => onFetchRenders(includeLocalWorkRenders)}
-            disabled={isSceneActionBusy || !canRunActions}
-          >
-            Fetch Renders
-          </button>
-          <button className="primary-btn" onClick={onFetchGltf} disabled={isSceneActionBusy || !canRunActions}>
-            Fetch Scene
-          </button>
+          <span className="scene-action-with-hint" data-hint={fetchActionHint ?? undefined}>
+            <button
+              className="primary-btn"
+              onClick={() => onFetchRenders(includeLocalWorkRenders)}
+              disabled={isSceneActionBusy || !canRunActions}
+            >
+              Fetch Renders
+            </button>
+          </span>
+          <span className="scene-action-with-hint" data-hint={fetchActionHint ?? undefined}>
+            <button className="primary-btn" onClick={onFetchGltf} disabled={isSceneActionBusy || !canRunActions}>
+              Fetch Scene
+            </button>
+          </span>
           <DownloadDropdown
             onDownloadGltf={onDownloadGltf}
             onDownloadBlend={onDownloadBlend}

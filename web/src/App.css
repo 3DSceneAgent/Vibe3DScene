@@ -637,11 +637,17 @@ a.sidebar-icon-btn {
   height: 100%;
 }
 
+.chat-status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .chat-stream-status {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  align-self: flex-start;
   min-height: 32px;
   padding: 6px 10px;
   border-radius: 10px;
@@ -676,6 +682,19 @@ a.sidebar-icon-btn {
 }
 
 .chat-stream-status-text {
+  font-weight: 500;
+}
+
+.chat-workflow-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
+  color: var(--color-muted);
+  font-size: 12px;
   font-weight: 500;
 }
 
@@ -1514,6 +1533,39 @@ a.sidebar-icon-btn {
   flex-wrap: wrap;
 }
 
+.scene-action-with-hint {
+  position: relative;
+  display: inline-flex;
+}
+
+.scene-action-with-hint[data-hint]:hover::after {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.scene-action-with-hint[data-hint]::after {
+  content: attr(data-hint);
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 8px);
+  transform: translate(-50%, -4px);
+  min-width: 200px;
+  max-width: 280px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid rgba(147, 197, 253, 0.38);
+  background: rgba(11, 20, 34, 0.95);
+  color: #dbeafe;
+  font-size: 11px;
+  line-height: 1.35;
+  text-align: center;
+  box-shadow: 0 12px 26px rgba(6, 9, 15, 0.45);
+  pointer-events: none;
+  opacity: 0;
+  z-index: 20;
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+
 .scene-action-error {
   border: 1px solid rgba(248, 113, 113, 0.5);
   background: rgba(248, 113, 113, 0.12);
@@ -1809,6 +1861,18 @@ a.sidebar-icon-btn {
 
 .viewer-fullscreen-btn {
   padding: 7px 10px;
+}
+
+.viewer-debug-file-input {
+  display: none;
+}
+
+.viewer-debug-upload-btn {
+  min-height: 30px;
+  padding: 6px 9px;
+  font-size: 11px;
+  border-style: dashed;
+  opacity: 0.92;
 }
 
 .viewer-show-hier-btn {

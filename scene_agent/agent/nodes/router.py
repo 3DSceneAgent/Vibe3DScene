@@ -122,10 +122,13 @@ def route_mode_node(
         clarification_question = build_router_clarification_question(latest_user_request)
     need_clarification = bool(decision.need_clarification) or decision.confidence < ROUTER_MIN_CONFIDENCE
 
-    max_plan_replans = coerce_non_negative_int(
-        state.get("max_plan_replans"),
-        default=DEFAULT_MAX_PLAN_REPLANS,
-    )
+    if mode == MODE_PLAN:
+        max_plan_replans = -1
+    else:
+        max_plan_replans = coerce_non_negative_int(
+            state.get("max_plan_replans"),
+            default=DEFAULT_MAX_PLAN_REPLANS,
+        )
 
     return {
         "task_mode": mode,

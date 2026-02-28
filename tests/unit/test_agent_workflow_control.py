@@ -2,6 +2,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from scene_agent.agent.graph import (
     _route_after_blocked_recovery_action,
+    _route_after_finalize_checkpoint,
     _route_after_loop_checkpoint,
     _route_after_post_agent,
     _route_after_post_builder,
@@ -181,6 +182,9 @@ def test_route_mode_node_forces_plan_mode_when_unfinished_todos_exist():
     )
     assert result["task_mode"] == "plan_mode"
     assert result["task_intent"] == "continue_existing_plan"
+    assert result["max_request_agent_turns"] == -1
+    assert result["max_request_tool_batches"] == -1
+    assert result["max_plan_replans"] == -1
 
 
 def test_route_mode_node_sets_dual_topology_for_plan_mode_when_requested():
@@ -287,6 +291,37 @@ def test_route_after_todo_check_finalizes_when_finalize_stage_terminal():
         }
     )
     assert next_node == "finalize"
+
+
+def test_route_after_finalize_checkpoint_ends_non_plan_modes():
+    next_node = _route_after_finalize_checkpoint(
+        {
+            "task_mode": "conversation_mode",
+            "todo_check_gate": {"should_run": True},
+        }
+    )
+    assert next_node == "__end__"
+
+
+def test_route_after_finalize_checkpoint_keeps_plan_finalize_flow():
+    next_node = _route_after_finalize_checkpoint(
+        {
+            "task_mode": "plan_mode",
+            "todo_check_gate": {"should_run": True},
+        }
+    )
+    assert next_node == "todo_check"
+
+
+def test_route_after_todo_check_ends_non_plan_modes_as_defensive_fallback():
+    next_node = _route_after_todo_check(
+        {
+            "task_mode": "single_action_mode",
+            "todo_check_gate": {"stage": "finalize"},
+            "todo_check": {"status": "blocked", "stagnation_count": 2},
+        }
+    )
+    assert next_node == "__end__"
 
 
 def test_blocked_recovery_node_prioritizes_undo_when_available():

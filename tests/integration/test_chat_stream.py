@@ -83,6 +83,26 @@ async def fake_get_verify_message_agent(_thread_id=None):
     return VerifyNodeMessageAgent()
 
 
+class RouteModeInternalMessageAgent:
+    async def astream(self, *_args, **_kwargs):
+        yield (
+            AIMessage(
+                content=(
+                    '{"intent":"multi_step_scene_action","mode":"plan_mode","confidence":1.0}'
+                )
+            ),
+            {"langgraph_node": "route_mode"},
+        )
+        yield (
+            AIMessage(content="Visible assistant response"),
+            {"langgraph_node": "agent"},
+        )
+
+
+async def fake_get_route_mode_internal_agent(_thread_id=None):
+    return RouteModeInternalMessageAgent()
+
+
 class DuplicateAssistantFromUpdatesAgent:
     async def astream(self, *_args, **_kwargs):
         yield (
@@ -167,6 +187,26 @@ def test_chat_stream_filters_verify_internal_message_stream(monkeypatch):
     ]
     assert tool_payloads
     assert tool_payloads[0]["messages"][0].get("name") == "verification"
+
+
+def test_chat_stream_filters_route_mode_internal_message_stream(monkeypatch):
+    monkeypatch.setattr(api_module, "get_agent", fake_get_route_mode_internal_agent)
+    client = TestClient(api_module.app)
+
+    with client.stream("POST", "/chat/stream", json={"message": "hi", "thread_id": "t-route-mode-filter"}) as response:
+        assert response.status_code == 200
+        payloads = collect_sse_payloads(response.iter_lines())
+
+    deltas = [payload["delta"] for payload in payloads if "delta" in payload]
+    assert deltas == ["Visible assistant response"]
+    assert all("multi_step_scene_action" not in delta for delta in deltas)
+
+    assistant_messages = [
+        payload
+        for payload in payloads
+        if "messages" in payload and payload["messages"][0].get("type") == "ai"
+    ]
+    assert not assistant_messages
 
 
 def test_chat_stream_skips_non_tool_update_messages_after_message_stream(monkeypatch):

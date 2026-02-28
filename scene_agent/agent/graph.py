@@ -8,6 +8,7 @@ import re
 import time
 from typing import Any, Literal
 from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.graph import END
 from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt import ToolNode
 from langgraph.prebuilt.tool_node import ToolCallRequest
@@ -375,7 +376,9 @@ def _route_after_loop_checkpoint(
     return "agent"
 
 
-def _route_after_finalize_checkpoint(state: AgentState) -> Literal["todo_check", "finalize"]:
+def _route_after_finalize_checkpoint(state: AgentState) -> str:
+    if _task_mode(state) != "plan_mode":
+        return END
     if _should_run_todo_check(state):
         return "todo_check"
     return "finalize"
@@ -383,7 +386,9 @@ def _route_after_finalize_checkpoint(state: AgentState) -> Literal["todo_check",
 
 def _route_after_todo_check(
     state: AgentState,
-) -> Literal["finalize", "agent", "builder_agent"]:
+) -> str:
+    if _task_mode(state) != "plan_mode":
+        return END
     if _agent_turn_budget_exhausted(state):
         return "finalize"
     gate = state.get("todo_check_gate")

@@ -67,7 +67,14 @@ app.add_middleware(
 # Image storage configuration
 # Mount static files for renders
 app.mount("/renders", StaticFiles(directory=str(RENDERS_DIR)), name="renders")
-EXAMPLE_PROMPTS_PATH = Path(__file__).resolve().parents[2] / "assets" / "example_prompts.md"
+_MODULE_PATH = Path(__file__).resolve()
+_ROOT_EXAMPLE_PROMPTS_PATH = _MODULE_PATH.parents[3] / "assets" / "example_prompts.md"
+_PACKAGE_EXAMPLE_PROMPTS_PATH = _MODULE_PATH.parents[2] / "assets" / "example_prompts.md"
+EXAMPLE_PROMPTS_PATH = (
+    _ROOT_EXAMPLE_PROMPTS_PATH
+    if _ROOT_EXAMPLE_PROMPTS_PATH.exists()
+    else _PACKAGE_EXAMPLE_PROMPTS_PATH
+)
 
 # Global agent instance
 _agent_graph = None

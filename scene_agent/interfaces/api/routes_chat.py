@@ -39,6 +39,9 @@ async def get_agent(thread_id: str | None = None):
 
 
 router = APIRouter()
+_INTERNAL_NON_USER_MESSAGE_NODES = frozenset({"verify", "route_mode"})
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, request_http: Request, response: Response):
     """
@@ -289,11 +292,11 @@ async def chat_stream(request: ChatRequest, request_http: Request):
                         is_tool_message = message_is_tool(serialized)
                         if (
                             is_message_stream
-                            and stream_source_node == "verify"
+                            and stream_source_node in _INTERNAL_NON_USER_MESSAGE_NODES
                             and not is_tool_message
                         ):
-                            # verify node is internal; user-facing output comes from
-                            # ToolMessage(name="verification") only.
+                            # Internal nodes may produce model tokens (e.g. router JSON);
+                            # user-facing output should come from external assistant/tool messages only.
                             continue
                         serialized_stream = sanitize_message_for_stream(serialized)
                         message_type = serialized_stream.get("type")

@@ -89,6 +89,22 @@ def test_budget_evaluator_detects_agent_turn_exhaustion():
     assert result["budget_eval"]["stop_reason"] == "agent_turn_budget_exhausted"
 
 
+def test_budget_evaluator_accepts_unlimited_budgets():
+    result = budget_evaluator_node(
+        {
+            "task_mode": "plan_mode",
+            "request_agent_turns": 999,
+            "max_request_agent_turns": -1,
+            "request_tool_batches": 999,
+            "max_request_tool_batches": -1,
+            "plan_replan_count": 999,
+            "max_plan_replans": -1,
+        }
+    )
+    assert result["budget_eval"]["budget_ok"] is True
+    assert result["budget_eval"]["stop_reason"] is None
+
+
 def test_transition_resolver_routes_to_agent_for_single_continue():
     result = transition_resolver_node(
         {

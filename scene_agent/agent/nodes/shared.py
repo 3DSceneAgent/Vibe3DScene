@@ -5,6 +5,7 @@ Nodes follow best practices: return partial state updates only.
 """
 import base64
 import ast
+import copy
 import hashlib
 import json
 import mimetypes
@@ -84,7 +85,7 @@ DEFAULT_MAX_PLAN_REPLANS = 2
 REQUEST_BUDGET_DEFAULTS: dict[TaskMode, dict[str, int]] = {
     MODE_CONVERSATION: {"max_request_agent_turns": 2, "max_request_tool_batches": 0},
     MODE_SINGLE_ACTION: {"max_request_agent_turns": 3, "max_request_tool_batches": 1},
-    MODE_PLAN: {"max_request_agent_turns": 8, "max_request_tool_batches": 6},
+    MODE_PLAN: {"max_request_agent_turns": -1, "max_request_tool_batches": -1},
 }
 
 CONVERSATION_READ_ONLY_TOOLS: frozenset[str] = READ_ONLY_TOOLS
@@ -424,6 +425,11 @@ def invoke_role_agent(
             )
         )
     messages.extend(state["messages"])
+    if role in {ROLE_GENERAL, ROLE_BUILDER}:
+        messages = _inject_reference_images_into_latest_human_message(
+            messages,
+            state=state,
+        )
     
     # Invoke the LLM
     response = llm_with_tools.invoke(messages)
@@ -1517,6 +1523,112 @@ def _resolve_renders_url_to_path(url: str) -> str | None:
         return None
     candidate = os.path.join(str(RENDERS_DIR), filename)
     return candidate if os.path.exists(candidate) else None
+
+
+def _prompt_reference_image_urls(state: AgentState) -> list[str]:
+    thread_id_raw = state.get("thread_id")
+    if not isinstance(thread_id_raw, str):
+        return []
+    thread_id = thread_id_raw.strip()
+    if not thread_id:
+        return []
+
+    settings = get_settings()
+    max_images = max(0, int(getattr(settings, "reference_image_max_count", 0)))
+    if max_images == 0:
+        return []
+
+    task_id_raw = state.get("task_id")
+    normalized_task_id = (
+        task_id_raw.strip()
+        if isinstance(task_id_raw, str) and task_id_raw.strip()
+        else GLOBAL_TASK_ID
+    )
+
+    try:
+        memory = get_reference_image_memory()
+    except Exception:
+        return []
+
+    assets: list[Any] = []
+    if hasattr(memory, "resolve_assets"):
+        try:
+            assets = memory.resolve_assets(
+                thread_id=thread_id,
+                task_id=normalized_task_id,
+                limit=max_images,
+            )
+        except Exception:
+            assets = []
+    elif hasattr(memory, "list_assets"):
+        try:
+            assets = memory.list_assets(thread_id)[-max_images:]
+        except Exception:
+            assets = []
+    elif hasattr(memory, "list_images"):
+        try:
+            assets = memory.list_images(thread_id)[-max_images:]
+        except Exception:
+            assets = []
+
+    if not isinstance(assets, list):
+        return []
+
+    urls: list[str] = []
+    seen: set[str] = set()
+    for asset in assets:
+        stored_path = getattr(asset, "stored_path", None)
+        if not isinstance(stored_path, str) or not stored_path.strip():
+            continue
+        data_url = _path_to_data_url(stored_path)
+        if not isinstance(data_url, str) or not data_url.startswith("data:image/"):
+            continue
+        if data_url in seen:
+            continue
+        seen.add(data_url)
+        urls.append(data_url)
+        if len(urls) >= max_images:
+            break
+    return urls
+
+
+def _inject_reference_images_into_latest_human_message(
+    messages: list[Any],
+    *,
+    state: AgentState,
+) -> list[Any]:
+    image_urls = _prompt_reference_image_urls(state)
+    if not image_urls:
+        return messages
+
+    skip_ids = {RENDER_VISION_MESSAGE_ID, SCENE_OBSERVE_MESSAGE_ID}
+    target_index: int | None = None
+    for idx in range(len(messages) - 1, -1, -1):
+        message = messages[idx]
+        if not isinstance(message, HumanMessage):
+            continue
+        if getattr(message, "id", None) in skip_ids:
+            continue
+        target_index = idx
+        break
+    if target_index is None:
+        return messages
+
+    original = messages[target_index]
+    text = message_content_to_text(getattr(original, "content", "")).strip()
+    multimodal_content: list[dict[str, Any]] = []
+    if text:
+        multimodal_content.append({"type": "text", "text": text})
+    else:
+        multimodal_content.append({"type": "text", "text": "User request with reference images."})
+    for url in image_urls:
+        multimodal_content.append({"type": "image_url", "image_url": {"url": url}})
+
+    updated = list(messages)
+    updated_human = copy.deepcopy(original)
+    updated_human.content = multimodal_content
+    updated[target_index] = updated_human
+    return updated
 
 
 def latest_human_message(state: AgentState) -> str:

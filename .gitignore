@@ -33,3 +33,11 @@ legacy
 AGENTS.md
 
 reference 
+
+# remove all legacy vibe coding files 
+.cursor 
+.specify 
+specs 
+docs/cursor_created 
+docs/codex_created
+docs/issues

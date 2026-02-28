@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 // @ts-expect-error project does not include three type declarations in this workspace.
 import * as THREE from 'three'
 // @ts-expect-error project does not include three example type declarations in this workspace.
@@ -132,23 +132,115 @@ function buildHierarchy(object: THREE.Object3D): SceneHierarchyNode {
   }
 }
 
-function setMaterialDoubleSided(material: THREE.Material | THREE.Material[]): void {
-  if (Array.isArray(material)) {
-    material.forEach((entry) => setMaterialDoubleSided(entry))
-    return
-  }
-  if (material.side !== THREE.DoubleSide) {
-    material.side = THREE.DoubleSide
-    material.needsUpdate = true
-  }
+function sceneContainsLights(object: THREE.Object3D): boolean {
+  let hasLights = false
+  object.traverse((entry: THREE.Object3D) => {
+    if (hasLights) return
+    if ((entry as { isLight?: boolean }).isLight) {
+      hasLights = true
+    }
+  })
+  return hasLights
 }
 
-function applyModelMaterialDefaults(object: THREE.Object3D): void {
+function collectSceneCameras(object: THREE.Object3D): THREE.Camera[] {
+  const cameras: THREE.Camera[] = []
   object.traverse((entry: THREE.Object3D) => {
-    const material = (entry as { material?: THREE.Material | THREE.Material[] }).material
-    if (material) {
-      setMaterialDoubleSided(material)
+    if ((entry as { isCamera?: boolean }).isCamera) {
+      cameras.push(entry as THREE.Camera)
     }
+  })
+  return cameras
+}
+
+function pickPreferredSceneCamera(cameras: THREE.Camera[]): THREE.Camera | null {
+  if (cameras.length === 0) {
+    return null
+  }
+  const normalized = cameras
+    .map((camera) => ({
+      camera,
+      name: (camera.name || '').trim().toLowerCase()
+    }))
+    .filter((entry) => entry.name.length > 0)
+
+  const exact = normalized.find((entry) => entry.name === 'scenecamera_ne')
+  if (exact) return exact.camera
+
+  const sceneNamed = normalized.find((entry) => entry.name.startsWith('scenecamera_'))
+  if (sceneNamed) return sceneNamed.camera
+
+  return cameras[0]
+}
+
+function applyExportedCameraView(
+  sourceCamera: THREE.Camera,
+  targetCamera: THREE.PerspectiveCamera,
+  controls: OrbitControls,
+  boxCenter: THREE.Vector3,
+  boxSize: THREE.Vector3
+): void {
+  sourceCamera.updateMatrixWorld(true)
+
+  const worldPosition = new THREE.Vector3()
+  const worldQuaternion = new THREE.Quaternion()
+  sourceCamera.getWorldPosition(worldPosition)
+  sourceCamera.getWorldQuaternion(worldQuaternion)
+
+  targetCamera.position.copy(worldPosition)
+  targetCamera.quaternion.copy(worldQuaternion)
+
+  if ((sourceCamera as { isPerspectiveCamera?: boolean }).isPerspectiveCamera) {
+    const perspective = sourceCamera as THREE.PerspectiveCamera
+    targetCamera.fov = perspective.fov
+    targetCamera.near = Math.max(perspective.near, 0.01)
+    targetCamera.far = Math.max(perspective.far, targetCamera.near + 1)
+  } else {
+    targetCamera.near = Math.max(targetCamera.near, 0.01)
+    targetCamera.far = Math.max(targetCamera.far, targetCamera.near + 1)
+  }
+  targetCamera.updateProjectionMatrix()
+
+  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(worldQuaternion).normalize()
+  const toCenter = boxCenter.clone().sub(worldPosition)
+  const centerDistance = toCenter.length()
+  const fallbackDistance = Math.max(boxSize.length() * 0.35, 1)
+  const lookDistance = Math.max(centerDistance, fallbackDistance)
+  const lookTarget = worldPosition.clone().addScaledVector(forward, lookDistance)
+
+  if (centerDistance > 0.001) {
+    const towardCenter = toCenter.normalize()
+    if (forward.dot(towardCenter) > 0.15) {
+      lookTarget.copy(boxCenter)
+    }
+  }
+
+  controls.target.copy(lookTarget)
+  controls.update()
+}
+
+function normalizeEmbeddedLightIntensities(object: THREE.Object3D): void {
+  const lights: THREE.Light[] = []
+  object.traverse((entry: THREE.Object3D) => {
+    if ((entry as { isLight?: boolean }).isLight) {
+      lights.push(entry as THREE.Light)
+    }
+  })
+  if (lights.length === 0) return
+
+  const intensities = lights
+    .map((light) => (Number.isFinite(light.intensity) ? light.intensity : 0))
+    .filter((intensity) => intensity > 0)
+  if (intensities.length === 0) return
+
+  const maxIntensity = Math.max(...intensities)
+  const targetMaxIntensity = 40
+  if (maxIntensity <= targetMaxIntensity) return
+
+  const scale = targetMaxIntensity / maxIntensity
+  lights.forEach((light) => {
+    if (!Number.isFinite(light.intensity) || light.intensity <= 0) return
+    light.intensity *= scale
   })
 }
 
@@ -212,6 +304,7 @@ export function GltfViewer({
   const cameraViewRef = useRef<{ position: THREE.Vector3; target: THREE.Vector3 } | null>(null)
   const hasUserCameraOverrideRef = useRef(false)
   const resizeRendererRef = useRef<(() => void) | null>(null)
+  const [useFallbackLighting, setUseFallbackLighting] = useState(true)
 
   const preset = useMemo(() => environmentPresets[environment], [environment])
   const resolvedViewportTheme: UiTheme =
@@ -377,19 +470,32 @@ export function GltfViewer({
   useEffect(() => {
     if (!lightRef.current) return
     const { ambient, directional } = lightRef.current
-    ambient.color = new THREE.Color(preset.color)
-    directional.color = new THREE.Color(preset.color)
-    ambient.intensity = preset.ambient
-    directional.intensity = preset.directional
-    if (rendererRef.current) {
-      rendererRef.current.toneMappingExposure = preset.exposure
+
+    if (useFallbackLighting) {
+      ambient.color = new THREE.Color(preset.color)
+      directional.color = new THREE.Color(preset.color)
+      ambient.intensity = preset.ambient
+      directional.intensity = preset.directional
+    } else {
+      ambient.color = new THREE.Color('#ffffff')
+      directional.color = new THREE.Color('#ffffff')
+      ambient.intensity = 0.08
+      directional.intensity = 0.2
     }
-  }, [preset.ambient, preset.color, preset.directional, preset.exposure])
+
+    if (rendererRef.current) {
+      rendererRef.current.toneMappingExposure = useFallbackLighting ? preset.exposure : 0.82
+    }
+  }, [preset.ambient, preset.color, preset.directional, preset.exposure, useFallbackLighting])
 
   useEffect(() => {
     const scene = sceneRef.current
     const pmremGenerator = pmremGeneratorRef.current
     if (!scene || !pmremGenerator) return
+
+    ;(scene as THREE.Scene & { environmentIntensity?: number }).environmentIntensity = useFallbackLighting
+      ? 1.0
+      : 0.35
 
     const loadToken = environmentLoadTokenRef.current + 1
     environmentLoadTokenRef.current = loadToken
@@ -415,6 +521,9 @@ export function GltfViewer({
         }
         environmentRenderTargetRef.current = renderTarget
         scene.environment = renderTarget.texture
+        ;(scene as THREE.Scene & { environmentIntensity?: number }).environmentIntensity = useFallbackLighting
+          ? 1.0
+          : 0.35
       },
       undefined,
       (error: unknown) => {
@@ -422,7 +531,7 @@ export function GltfViewer({
         console.warn('Failed to load HDR environment map', error)
       }
     )
-  }, [preset.hdriUrl])
+  }, [preset.hdriUrl, useFallbackLighting])
 
   useEffect(() => {
     const scene = sceneRef.current
@@ -498,6 +607,7 @@ export function GltfViewer({
       controls.update()
       hasLoadedModelRef.current = false
       hasUserCameraOverrideRef.current = false
+      setUseFallbackLighting(true)
       cameraViewRef.current = {
         position: camera.position.clone(),
         target: controls.target.clone()
@@ -529,7 +639,12 @@ export function GltfViewer({
           disposeObject3D(modelRef.current)
           scene.remove(modelRef.current)
         }
-        applyModelMaterialDefaults(gltf.scene)
+
+        const hasEmbeddedLights = sceneContainsLights(gltf.scene)
+        if (hasEmbeddedLights) {
+          normalizeEmbeddedLightIntensities(gltf.scene)
+        }
+        setUseFallbackLighting(!hasEmbeddedLights)
         modelRef.current = gltf.scene
         scene.add(gltf.scene)
 
@@ -566,7 +681,12 @@ export function GltfViewer({
           camera.updateProjectionMatrix()
           controls.update()
         } else {
-          frameCameraToBox(camera, controls, box, size, center)
+          const preferredCamera = pickPreferredSceneCamera(collectSceneCameras(gltf.scene))
+          if (preferredCamera) {
+            applyExportedCameraView(preferredCamera, camera, controls, center, size)
+          } else {
+            frameCameraToBox(camera, controls, box, size, center)
+          }
           hasUserCameraOverrideRef.current = false
         }
         hasLoadedModelRef.current = true

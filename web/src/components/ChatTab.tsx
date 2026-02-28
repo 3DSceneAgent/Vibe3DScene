@@ -41,6 +41,12 @@ function toSelectionValue(provider: string, model: string): string {
   return `${encodeURIComponent(provider)}::${encodeURIComponent(model)}`
 }
 
+function normalizeWorkflowValue(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim()
+  return normalized || null
+}
+
 export function ChatTab({
   thread,
   isStreaming,
@@ -65,10 +71,6 @@ export function ChatTab({
   graphEvents = [],
   runtimeClaimHint = null
 }: ChatTabProps) {
-  if (!thread) {
-    return <div className="empty-state">Create a conversation to begin.</div>
-  }
-
   const selectionOptions: VlmSelectionOption[] = vlmProviders
     .filter((provider) => provider.configured)
     .flatMap((provider) => {
@@ -86,19 +88,54 @@ export function ChatTab({
       (option) => option.provider === vlmProvider && option.model === vlmModel
     ) ?? selectionOptions[0] ?? null
   const selectorDisabled = vlmLocked
-  const availablePrompts = thread.messages.length === 0 ? examplePrompts : []
+  const availablePrompts = thread?.messages.length === 0 ? examplePrompts : []
+  const workflowBadgeLabel = (() => {
+    let taskMode: string | null = null
+    let topology: string | null = null
+
+    for (let index = graphEvents.length - 1; index >= 0; index -= 1) {
+      const patchRaw = graphEvents[index]?.state_patch
+      if (!patchRaw || typeof patchRaw !== 'object' || Array.isArray(patchRaw)) {
+        continue
+      }
+      const patch = patchRaw as Record<string, unknown>
+      if (!taskMode) {
+        taskMode = normalizeWorkflowValue(patch.task_mode)
+      }
+      if (!topology) {
+        topology = normalizeWorkflowValue(patch.workflow_topology)
+      }
+      if (taskMode && topology) {
+        break
+      }
+    }
+
+    if (!taskMode && !topology) {
+      return 'Workflow: pending'
+    }
+    return `Workflow: ${taskMode ?? 'unknown'} / ${topology ?? 'unknown'}`
+  })()
+
+  if (!thread) {
+    return <div className="empty-state">Create a conversation to begin.</div>
+  }
 
   return (
     <div className="chat-tab chat-pane">
-      <div
-        className={`chat-stream-status ${streamStatus === 'streaming' ? 'streaming' : 'complete'}`}
-        role="status"
-        aria-live="polite"
-      >
-        <span className="chat-stream-status-dot" />
-        <span className="chat-stream-status-text">
-          {streamStatus === 'streaming' ? 'Agent is building the scene' : 'Agent ready'}
-        </span>
+      <div className="chat-status-row">
+        <div
+          className={`chat-stream-status ${streamStatus === 'streaming' ? 'streaming' : 'complete'}`}
+          role="status"
+          aria-live="polite"
+        >
+          <span className="chat-stream-status-dot" />
+          <span className="chat-stream-status-text">
+            {streamStatus === 'streaming' ? 'Agent is building the scene' : 'Agent ready'}
+          </span>
+        </div>
+        <div className="chat-workflow-badge" aria-live="polite">
+          {workflowBadgeLabel}
+        </div>
       </div>
       <GraphTimeline events={graphEvents} isStreaming={streamStatus === 'streaming'} />
       <div className="chat-scroll-area">
