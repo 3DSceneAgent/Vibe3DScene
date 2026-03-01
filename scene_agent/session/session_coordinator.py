@@ -160,6 +160,17 @@ class SessionCoordinator:
         except RedisError:
             return False
 
+    def refresh_lease_if_owned(self, thread_id: str, lease_token: str | None) -> bool:
+        if self._registry is None:
+            return True
+        if not lease_token:
+            return False
+        return self._registry.refresh_lease_if_owned(
+            thread_id=thread_id,
+            lease_token=lease_token,
+            ttl_seconds=self.lease_ttl_seconds,
+        )
+
     def touch_activity(self, thread_id: str, lease_epoch: int | None = None) -> None:
         if self._registry is None:
             return

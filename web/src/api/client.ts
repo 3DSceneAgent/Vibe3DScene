@@ -15,6 +15,7 @@ import type {
 
 const FRONTEND_CLIENT_HEADER = 'X-Frontend-Client-Id'
 const FRONTEND_CLIENT_STORAGE_KEY = 'sceneAgentFrontendClientId'
+const STREAM_REQUEST_HEADER = 'X-Stream-Request-Id'
 let frontendClientIdCache: string | null = null
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -199,6 +200,36 @@ function parseBlendFiles(payload: unknown): BlendFileEntry[] {
   })
 }
 
+function parseSseChunk(
+  chunk: string
+): { data: string; eventId: string | null } | null {
+  const lines = chunk.split('\n')
+  const dataLines: string[] = []
+  let eventId: string | null = null
+
+  for (const line of lines) {
+    if (line.startsWith('id:')) {
+      const nextId = line.replace(/^id:\s?/, '').trim()
+      if (nextId) {
+        eventId = nextId
+      }
+      continue
+    }
+    if (line.startsWith('data:')) {
+      dataLines.push(line.replace(/^data:\s?/, ''))
+    }
+  }
+
+  if (dataLines.length === 0) {
+    return null
+  }
+
+  return {
+    data: dataLines.join('\n'),
+    eventId
+  }
+}
+
 export async function streamChat({
   baseUrl,
   message,
@@ -223,39 +254,63 @@ export async function streamChat({
   if (vlmModel) {
     payload.vlm_model = vlmModel
   }
-  const response = await apiFetch(`${baseUrl}/chat/stream`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    signal
-  })
-
-  if (!response.ok) {
-    throw await buildHttpError(response, `Stream failed (${response.status})`)
-  }
-  if (!response.body) {
-    throw new Error('Stream response body is empty')
-  }
-
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
   let sawTerminalEvent = false
+  let resumeStreamId: string | null = null
+  let lastEventId: string | null = null
+  let resumeAttempts = 0
+  const maxResumeAttempts = 2
 
-  while (true) {
-    const { value, done } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const parts = buffer.split('\n\n')
-    buffer = parts.pop() ?? ''
+  while (!sawTerminalEvent && !signal?.aborted) {
+    const requestHeaders: Record<string, string> = {
+      'Content-Type': 'application/json'
+    }
+    if (resumeStreamId) {
+      requestHeaders[STREAM_REQUEST_HEADER] = resumeStreamId
+    }
+    if (lastEventId) {
+      requestHeaders['Last-Event-ID'] = lastEventId
+    }
 
-    for (const part of parts) {
-      const lines = part.split('\n').filter((line) => line.startsWith('data:'))
-      if (lines.length === 0) continue
-      const data = lines.map((line) => line.replace(/^data:\s?/, '')).join('\n')
-      if (!data) continue
+    const response = await apiFetch(`${baseUrl}/chat/stream`, {
+      method: 'POST',
+      headers: requestHeaders,
+      body: JSON.stringify(payload),
+      signal
+    })
+
+    if (!response.ok) {
+      throw await buildHttpError(response, `Stream failed (${response.status})`)
+    }
+    if (!response.body) {
+      throw new Error('Stream response body is empty')
+    }
+
+    const serverStreamId = response.headers.get(STREAM_REQUEST_HEADER)
+    if (serverStreamId) {
+      resumeStreamId = serverStreamId
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let streamEndedUnexpectedly = false
+
+    const handleChunk = (chunk: string) => {
+      const parsedChunk = parseSseChunk(chunk)
+      if (!parsedChunk || !parsedChunk.data) {
+        return
+      }
+      if (parsedChunk.eventId) {
+        lastEventId = parsedChunk.eventId
+      }
       try {
-        const parsed = JSON.parse(data) as StreamEvent
+        const parsed = JSON.parse(parsedChunk.data) as StreamEvent
+        if (!parsedChunk.eventId && typeof parsed.seq === 'number') {
+          lastEventId = String(parsed.seq)
+        }
+        if (parsed.stream_request_id && !resumeStreamId) {
+          resumeStreamId = parsed.stream_request_id
+        }
         if (parsed.event === 'done' || parsed.error) {
           sawTerminalEvent = true
         }
@@ -264,32 +319,41 @@ export async function streamChat({
         console.error('Failed to parse stream event', error)
       }
     }
-    if (sawTerminalEvent) {
-      try {
-        await reader.cancel()
-      } catch {
-        // Ignore cancellation errors from already-closing streams.
+
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) {
+        streamEndedUnexpectedly = !sawTerminalEvent && !signal?.aborted
+        break
       }
+      buffer += decoder.decode(value, { stream: true })
+      const parts = buffer.split('\n\n')
+      buffer = parts.pop() ?? ''
+
+      for (const part of parts) {
+        handleChunk(part)
+      }
+      if (sawTerminalEvent) {
+        try {
+          await reader.cancel()
+        } catch {
+          // Ignore cancellation errors from already-closing streams.
+        }
+        break
+      }
+    }
+
+    if (buffer.trim()) {
+      handleChunk(buffer)
+    }
+
+    if (!streamEndedUnexpectedly) {
       break
     }
-  }
-
-  if (buffer.trim()) {
-    const lines = buffer.split('\n').filter((line) => line.startsWith('data:'))
-    if (lines.length > 0) {
-      const data = lines.map((line) => line.replace(/^data:\s?/, '')).join('\n')
-      if (data) {
-        try {
-          const parsed = JSON.parse(data) as StreamEvent
-          if (parsed.event === 'done' || parsed.error) {
-            sawTerminalEvent = true
-          }
-          onEvent(parsed)
-        } catch (error) {
-          console.error('Failed to parse stream event', error)
-        }
-      }
+    if (!resumeStreamId || resumeAttempts >= maxResumeAttempts) {
+      break
     }
+    resumeAttempts += 1
   }
 
   if (!sawTerminalEvent && !signal?.aborted) {

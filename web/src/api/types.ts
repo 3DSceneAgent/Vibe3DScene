@@ -57,16 +57,35 @@ export type GraphNodeStream = {
   message_count?: number
 }
 
+export type StreamProgress = {
+  request_id?: string
+  stream_request_id?: string
+  task_mode?: string
+  graph_steps?: number
+  last_node?: string | null
+  tool_events?: number
+  assistant_chunks?: number
+  todo_total?: number
+  todo_completed?: number
+  latest_seq?: number
+  scene_has_change?: boolean
+  done?: boolean
+}
+
 export type StreamEvent = {
   messages?: unknown[]
   todos?: TodoItem[]
   error?: string
+  reason?: string
   status_code?: number
   delta?: string
   message_id?: string | null
-  event?: 'done' | 'graph_node'
+  event?: 'done' | 'graph_node' | 'heartbeat'
   graph_node?: GraphNodeStream
   scene_has_change?: boolean
+  seq?: number
+  stream_request_id?: string
+  progress?: StreamProgress
 }
 
 export type McpToolsInfo = {

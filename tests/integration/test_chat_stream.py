@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 
@@ -6,6 +7,8 @@ import requests
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 from scene_agent.interfaces import api as api_module
+from scene_agent.interfaces.api import routes_chat
+from scene_agent.session.session_coordinator import OwnerResolution
 from .streaming_helpers import collect_sse_payloads, find_payload
 
 
@@ -125,12 +128,34 @@ async def fake_get_duplicate_assistant_agent(_thread_id=None):
     return DuplicateAssistantFromUpdatesAgent()
 
 
+class ResumableAgent:
+    async def astream(self, *_args, **_kwargs):
+        yield ("messages", [{"type": "ai", "content": "hello"}])
+        await asyncio.sleep(0.2)
+        yield ("messages", [{"type": "ai", "content": " world"}])
+
+
+async def fake_get_resumable_agent(_thread_id=None):
+    return ResumableAgent()
+
+
+class OwnershipLossAgent:
+    async def astream(self, *_args, **_kwargs):
+        await asyncio.sleep(0.5)
+        yield ("messages", [{"type": "ai", "content": "should not arrive"}])
+
+
+async def fake_get_ownership_loss_agent(_thread_id=None):
+    return OwnershipLossAgent()
+
+
 def test_chat_stream_sse(monkeypatch):
     monkeypatch.setattr(api_module, "get_agent", fake_get_agent)
     client = TestClient(api_module.app)
 
     with client.stream("POST", "/chat/stream", json={"message": "hi", "thread_id": "t1"}) as response:
         assert response.status_code == 200
+        assert response.headers.get("X-Stream-Request-Id")
         payloads = []
         for line in response.iter_lines():
             if not line:
@@ -145,6 +170,7 @@ def test_chat_stream_sse(monkeypatch):
     tool_payloads = [
         payload for payload in payloads if "messages" in payload and payload["messages"][0].get("type") == "tool"
     ]
+    assert all("seq" in payload for payload in payloads)
     assert deltas[:2] == ["hello", " world"]
     assert tool_payloads
     assert tool_payloads[0].get("scene_has_change") is True
@@ -239,6 +265,7 @@ def test_chat_stream_emits_done(monkeypatch):
     done_payload = find_payload(payloads, "event")
     assert done_payload is not None
     assert done_payload["event"] == "done"
+    assert isinstance(done_payload.get("seq"), int)
 
 
 def test_chat_stream_emits_error(monkeypatch):
@@ -252,6 +279,206 @@ def test_chat_stream_emits_error(monkeypatch):
     error_payload = find_payload(payloads, "error")
     assert error_payload is not None
     assert "stream failed" in error_payload["error"]
+    assert isinstance(error_payload.get("seq"), int)
+
+
+def test_chat_stream_can_resume_with_last_event_id(monkeypatch):
+    monkeypatch.setattr(api_module, "get_agent", fake_get_resumable_agent)
+    client = TestClient(api_module.app)
+
+    first_payload: dict[str, object] | None = None
+    stream_request_id: str | None = None
+    with client.stream(
+        "POST",
+        "/chat/stream",
+        json={"message": "hi", "thread_id": "t-resume"},
+    ) as response:
+        assert response.status_code == 200
+        stream_request_id = response.headers.get("X-Stream-Request-Id")
+        assert stream_request_id
+        for line in response.iter_lines():
+            if not line or not line.startswith("data:"):
+                continue
+            data = line.replace("data:", "", 1).strip()
+            payload = json.loads(data)
+            if "delta" in payload:
+                first_payload = payload
+                break
+
+    assert first_payload is not None
+    first_seq = first_payload.get("seq")
+    assert isinstance(first_seq, int)
+    assert first_payload.get("delta") == "hello"
+
+    with client.stream(
+        "POST",
+        "/chat/stream",
+        json={"message": "hi", "thread_id": "t-resume"},
+        headers={
+            "X-Stream-Request-Id": stream_request_id,
+            "Last-Event-ID": str(first_seq),
+        },
+    ) as response:
+        assert response.status_code == 200
+        payloads = collect_sse_payloads(response.iter_lines())
+
+    deltas = [payload["delta"] for payload in payloads if "delta" in payload]
+    assert deltas == [" world"]
+    done_payload = find_payload(payloads, "event")
+    assert done_payload is not None
+    assert done_payload["event"] == "done"
+
+
+def test_chat_stream_resume_does_not_restart_heartbeat_tasks(monkeypatch):
+    runtime_starts: list[str] = []
+    lease_starts: list[str] = []
+
+    class Settings:
+        api_stream_timeout_seconds = 120
+        api_plan_stream_timeout_seconds = 1800
+        blender_mode = "headless"
+        session_idle_timeout_seconds = 600
+        session_heartbeat_interval_seconds = 5
+        session_lease_ttl_seconds = 20
+
+    class Coordinator:
+        def touch_activity(self, *_args, **_kwargs) -> None:
+            return None
+
+        def refresh_lease_if_owned(self, *_args, **_kwargs) -> bool:
+            return True
+
+    async def fake_claim_or_proxy_request(*, request, thread_id):  # noqa: ARG001
+        return (
+            OwnerResolution(
+                thread_id=thread_id,
+                mode="owner",
+                owner_worker_id="worker-1",
+                owner_url="http://127.0.0.1:8000",
+                lease_epoch=3,
+                lease_token="lease-token",
+                lease_ttl_ms=20_000,
+            ),
+            None,
+        )
+
+    async def fake_runtime_heartbeat(*, session, interval_seconds):
+        runtime_starts.append(f"{session.stream_request_id}:{interval_seconds}")
+        while not session.is_done() and not session.should_stop():
+            await asyncio.sleep(0.01)
+
+    async def fake_lease_heartbeat(*, session, interval_seconds):
+        lease_starts.append(f"{session.stream_request_id}:{interval_seconds}")
+        while not session.is_done() and not session.should_stop():
+            await asyncio.sleep(0.01)
+
+    monkeypatch.setattr(routes_chat, "get_settings", lambda: Settings())
+    monkeypatch.setattr(routes_chat, "get_session_coordinator", lambda: Coordinator())
+    monkeypatch.setattr(routes_chat, "claim_or_proxy_request", fake_claim_or_proxy_request)
+    monkeypatch.setattr(routes_chat, "get_agent", fake_get_resumable_agent)
+    monkeypatch.setattr(routes_chat, "_run_stream_runtime_heartbeat", fake_runtime_heartbeat)
+    monkeypatch.setattr(routes_chat, "_run_stream_lease_heartbeat", fake_lease_heartbeat)
+
+    client = TestClient(api_module.app)
+
+    first_payload: dict[str, object] | None = None
+    stream_request_id: str | None = None
+    with client.stream(
+        "POST",
+        "/chat/stream",
+        json={"message": "hi", "thread_id": "t-heartbeat-resume"},
+    ) as response:
+        assert response.status_code == 200
+        stream_request_id = response.headers.get("X-Stream-Request-Id")
+        assert stream_request_id
+        for line in response.iter_lines():
+            if not line or not line.startswith("data:"):
+                continue
+            payload = json.loads(line.replace("data:", "", 1).strip())
+            if "delta" in payload:
+                first_payload = payload
+                break
+
+    assert first_payload is not None
+
+    with client.stream(
+        "POST",
+        "/chat/stream",
+        json={"message": "hi", "thread_id": "t-heartbeat-resume"},
+        headers={
+            "X-Stream-Request-Id": stream_request_id,
+            "Last-Event-ID": str(first_payload["seq"]),
+        },
+    ) as response:
+        assert response.status_code == 200
+        payloads = collect_sse_payloads(response.iter_lines())
+
+    deltas = [payload["delta"] for payload in payloads if "delta" in payload]
+    assert deltas == [" world"]
+    assert len(runtime_starts) == 1
+    assert len(lease_starts) == 1
+
+
+def test_chat_stream_ownership_lost_emits_terminal_error(monkeypatch):
+    class Settings:
+        api_stream_timeout_seconds = 120
+        api_plan_stream_timeout_seconds = 1800
+        blender_mode = "local-client"
+        session_idle_timeout_seconds = 600
+        session_heartbeat_interval_seconds = 5
+        session_lease_ttl_seconds = 20
+
+    class Coordinator:
+        def touch_activity(self, *_args, **_kwargs) -> None:
+            return None
+
+    async def fake_claim_or_proxy_request(*, request, thread_id):  # noqa: ARG001
+        return (
+            OwnerResolution(
+                thread_id=thread_id,
+                mode="owner",
+                owner_worker_id="worker-1",
+                owner_url="http://127.0.0.1:8000",
+                lease_epoch=4,
+                lease_token="lease-token",
+                lease_ttl_ms=20_000,
+            ),
+            None,
+        )
+
+    async def fake_lease_heartbeat(*, session, interval_seconds):  # noqa: ARG001
+        await asyncio.sleep(0)
+        if session.request_stop(reason="ownership_lost"):
+            session.publish(
+                {
+                    "error": "Stream ownership was lost during execution. Please retry.",
+                    "reason": "ownership_lost",
+                }
+            )
+
+    monkeypatch.setattr(routes_chat, "get_settings", lambda: Settings())
+    monkeypatch.setattr(routes_chat, "get_session_coordinator", lambda: Coordinator())
+    monkeypatch.setattr(routes_chat, "claim_or_proxy_request", fake_claim_or_proxy_request)
+    monkeypatch.setattr(routes_chat, "get_agent", fake_get_ownership_loss_agent)
+    monkeypatch.setattr(routes_chat, "_run_stream_lease_heartbeat", fake_lease_heartbeat)
+
+    client = TestClient(api_module.app)
+
+    with client.stream(
+        "POST",
+        "/chat/stream",
+        json={"message": "hi", "thread_id": "t-ownership-loss"},
+    ) as response:
+        assert response.status_code == 200
+        payloads = collect_sse_payloads(response.iter_lines())
+
+    error_payload = find_payload(payloads, "error")
+    done_payload = find_payload(payloads, "event")
+    assert error_payload is not None
+    assert error_payload["reason"] == "ownership_lost"
+    assert "ownership was lost" in error_payload["error"]
+    assert done_payload is not None
+    assert done_payload["event"] == "done"
 
 
 

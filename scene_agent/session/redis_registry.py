@@ -157,6 +157,22 @@ redis.call('HSET', KEYS[2], 'status', 'closed', 'updated_at_ms', ARGV[2])
 return 1
 """
 
+_REFRESH_LEASE_IF_OWNED_LUA = """
+local lease = redis.call('GET', KEYS[1])
+if not lease then
+    return 0
+end
+if lease ~= ARGV[1] then
+    return 0
+end
+local ttl_ms = tonumber(ARGV[2])
+if ttl_ms <= 0 then
+    return 0
+end
+redis.call('PEXPIRE', KEYS[1], ttl_ms)
+return 1
+"""
+
 _RESERVE_PORT_LUA = """
 local primary_key = KEYS[1]
 local secondary_key = KEYS[2]
@@ -388,6 +404,23 @@ class RedisSessionRegistry:
             self.session_meta_key(thread_id),
             lease_token,
             str(self._now_ms()),
+        )
+        return bool(int(result))
+
+    def refresh_lease_if_owned(
+        self,
+        *,
+        thread_id: str,
+        lease_token: str,
+        ttl_seconds: int,
+    ) -> bool:
+        ttl_ms = max(1, int(ttl_seconds)) * 1000
+        result = self._client.eval(
+            _REFRESH_LEASE_IF_OWNED_LUA,
+            1,
+            self.session_lease_key(thread_id),
+            lease_token,
+            str(ttl_ms),
         )
         return bool(int(result))
 

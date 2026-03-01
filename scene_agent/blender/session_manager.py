@@ -176,6 +176,14 @@ class SessionManager:
                     idle_sessions.append(session)
         return idle_sessions
 
+    def touch_session(self, session_id: str) -> bool:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return False
+            session.mark_active()
+            return True
+
     def ensure_session_storage(self, session_id: str) -> Optional[str]:
         with self._lock:
             session = self._sessions.get(session_id)
