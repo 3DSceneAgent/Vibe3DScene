@@ -4,6 +4,7 @@ Creates the agent graph following LangGraph best practices.
 """
 import asyncio
 import json
+import os
 import re
 import time
 from typing import Any, Literal
@@ -17,11 +18,13 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from scene_agent.agent.graph_factory import build_agent_state_graph
 from scene_agent.agent.state import AgentState
 from scene_agent.agent.redis_checkpointer import get_graph_checkpointer
+from scene_agent.memory.reference_image_memory import get_image_asset_memory
 from scene_agent.agent.nodes import (
     agent_node,
     builder_agent_node,
     budget_evaluator_node,
     clarification_node,
+    prepare_reference_context_node,
     quality_evaluator_node,
     finalize_node,
     planner_refresh_node,
@@ -30,6 +33,7 @@ from scene_agent.agent.nodes import (
     post_builder_node,
     post_verifier_node,
     route_mode_llm_node,
+    sync_reference_catalog_node,
     scene_observe_node,
     todo_check_node,
     transition_resolver_node,
@@ -129,9 +133,19 @@ def _agent_turn_budget_exhausted(state: AgentState) -> bool:
     return max_turns >= 0 and turns >= max_turns
 
 
-def _route_after_mode(state: AgentState) -> Literal["clarification", "agent", "builder_agent"]:
+def _route_after_mode(_state: AgentState) -> Literal["sync_reference_catalog"]:
+    return "sync_reference_catalog"
+
+
+def _route_after_sync_reference_catalog(
+    state: AgentState,
+) -> Literal["clarification", "prepare_reference_context"]:
     if bool(state.get("router_need_clarification")):
         return "clarification"
+    return "prepare_reference_context"
+
+
+def _route_after_prepare_reference_context(state: AgentState) -> Literal["agent", "builder_agent"]:
     if _is_dual_plan_mode(state):
         return "builder_agent"
     return "agent"
@@ -236,10 +250,103 @@ def _normalize_tool_call_args(tool_call: dict[str, Any]) -> dict[str, Any]:
     return {**tool_call, "args": updated_args}
 
 
-def _normalize_tool_request(request: ToolCallRequest) -> ToolCallRequest:
+def _tool_validation_message(tool_call: dict[str, Any], message: str) -> ToolMessage:
+    tool_name = tool_call.get("name") if isinstance(tool_call.get("name"), str) else "unknown_tool"
+    return ToolMessage(
+        content=message,
+        name=tool_name,
+        tool_call_id=_safe_tool_call_id(tool_call),
+        status="error",
+    )
+
+
+def _coerce_attached_image_ids_from_state(state: AgentState | Any) -> list[str]:
+    if not isinstance(state, dict):
+        return []
+    raw_value = state.get("attached_image_ids")
+    if not isinstance(raw_value, list):
+        return []
+    attached_ids: list[str] = []
+    seen: set[str] = set()
+    for item in raw_value:
+        if not isinstance(item, str):
+            continue
+        value = item.strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        attached_ids.append(value)
+    return attached_ids
+
+
+def _resolve_current_request_image_path(state: AgentState | Any) -> tuple[str | None, str | None]:
+    attached_image_ids = _coerce_attached_image_ids_from_state(state)
+    if len(attached_image_ids) != 1:
+        return None, (
+            "reconstruct_full_scene requires exactly one image attached to the current request. "
+            "It cannot use remembered or historical images."
+        )
+
+    thread_id = "default"
+    if isinstance(state, dict):
+        raw_thread_id = state.get("thread_id")
+        if isinstance(raw_thread_id, str) and raw_thread_id.strip():
+            thread_id = raw_thread_id
+
+    try:
+        assets = get_image_asset_memory().get_assets_by_ids(thread_id, attached_image_ids)
+    except Exception as exc:
+        return None, (
+            "reconstruct_full_scene could not resolve the attached request image: "
+            f"{str(exc)}"
+        )
+
+    if len(assets) != 1:
+        return None, (
+            "reconstruct_full_scene could not resolve exactly one attached request image."
+        )
+
+    stored_path = str(getattr(assets[0], "stored_path", "")).strip()
+    if not stored_path:
+        return None, "reconstruct_full_scene found no stored path for the attached request image."
+    if not os.path.isfile(stored_path):
+        return None, (
+            "reconstruct_full_scene resolved an attached request image, but the file is missing: "
+            f"{stored_path}"
+        )
+    return stored_path, None
+
+
+def _normalize_reconstruct_full_scene_request(
+    request: ToolCallRequest,
+) -> ToolCallRequest | ToolMessage:
     tool_call = request.tool_call
     if not isinstance(tool_call, dict):
         return request
+    if tool_call.get("name") != "reconstruct_full_scene":
+        return request
+
+    input_image_path, error_message = _resolve_current_request_image_path(request.state)
+    if error_message:
+        return _tool_validation_message(tool_call, error_message)
+
+    raw_args = tool_call.get("args")
+    updated_args = dict(raw_args) if isinstance(raw_args, dict) else {}
+    updated_args["input_image_path"] = input_image_path
+    normalized_call = {**tool_call, "args": updated_args}
+    return request.override(tool_call=normalized_call)
+
+
+def _normalize_tool_request(request: ToolCallRequest) -> ToolCallRequest | ToolMessage:
+    tool_call = request.tool_call
+    if not isinstance(tool_call, dict):
+        return request
+
+    reconstruct_request = _normalize_reconstruct_full_scene_request(request)
+    if isinstance(reconstruct_request, ToolMessage):
+        return reconstruct_request
+    request = reconstruct_request
+    tool_call = request.tool_call if isinstance(request.tool_call, dict) else tool_call
 
     normalized_call = _normalize_tool_call_args(tool_call)
     if normalized_call == tool_call:
@@ -273,6 +380,8 @@ async def _awrap_tool_call_with_retry(
     execute,
 ):
     working_request = _normalize_tool_request(request)
+    if isinstance(working_request, ToolMessage):
+        return working_request
     for attempt in range(1, _TOOL_RETRY_MAX_ATTEMPTS + 1):
         try:
             return await execute(working_request)
@@ -319,6 +428,8 @@ def _wrap_tool_call_with_retry(
     import time as _time
 
     working_request = _normalize_tool_request(request)
+    if isinstance(working_request, ToolMessage):
+        return working_request
     for attempt in range(1, _TOOL_RETRY_MAX_ATTEMPTS + 1):
         try:
             return execute(working_request)
@@ -517,10 +628,26 @@ async def create_agent_graph(
 
     def call_route_mode(state: AgentState) -> dict:
         return route_mode_llm_node(state, router_model=model)
+
+    def call_prepare_reference_context(state: AgentState) -> dict:
+        return prepare_reference_context_node(
+            state,
+            provider_name=selected_provider,
+            api_key=selected_api_key,
+        )
+
+    def call_sync_reference_catalog(state: AgentState) -> dict:
+        return sync_reference_catalog_node(
+            state,
+            provider_name=selected_provider,
+            api_key=selected_api_key,
+        )
     
     builder = build_agent_state_graph(
         route_mode_node=call_route_mode,
+        sync_reference_catalog_node=call_sync_reference_catalog,
         clarification_node=clarification_node,
+        prepare_reference_context_node=call_prepare_reference_context,
         agent_node=call_model,
         post_agent_node=post_agent_node,
         builder_agent_node=call_builder_model,
@@ -551,6 +678,8 @@ async def create_agent_graph(
         planner_refresh_node=planner_refresh_node,
         finalize_node=lambda state: finalize_node(state, finalizer_model=model),
         route_after_mode=_route_after_mode,
+        route_after_sync_reference_catalog=_route_after_sync_reference_catalog,
+        route_after_prepare_reference_context=_route_after_prepare_reference_context,
         route_after_post_agent=_route_after_post_agent,
         route_after_post_builder=_route_after_post_builder,
         route_after_post_verifier=_route_after_post_verifier,

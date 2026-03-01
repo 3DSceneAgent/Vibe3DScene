@@ -13,7 +13,9 @@ from scene_agent.agent.state import AgentState
 def build_agent_state_graph(
     *,
     route_mode_node: Callable[..., Any],
+    sync_reference_catalog_node: Callable[..., Any],
     clarification_node: Callable[..., Any],
+    prepare_reference_context_node: Callable[..., Any],
     agent_node: Callable[..., Any],
     post_agent_node: Callable[..., Any],
     builder_agent_node: Callable[..., Any],
@@ -34,6 +36,8 @@ def build_agent_state_graph(
     planner_refresh_node: Callable[..., Any],
     finalize_node: Callable[..., Any],
     route_after_mode: Callable[..., Any],
+    route_after_sync_reference_catalog: Callable[..., Any],
+    route_after_prepare_reference_context: Callable[..., Any],
     route_after_post_agent: Callable[..., Any],
     route_after_post_builder: Callable[..., Any],
     route_after_post_verifier: Callable[..., Any],
@@ -45,7 +49,9 @@ def build_agent_state_graph(
     builder = StateGraph(AgentState)
 
     builder.add_node("route_mode", route_mode_node)
+    builder.add_node("sync_reference_catalog", sync_reference_catalog_node)
     builder.add_node("clarification", clarification_node)
+    builder.add_node("prepare_reference_context", prepare_reference_context_node)
     builder.add_node("agent", agent_node)
     builder.add_node("post_agent", post_agent_node)
     builder.add_node("builder_agent", builder_agent_node)
@@ -68,7 +74,9 @@ def build_agent_state_graph(
 
     builder.add_edge(START, "route_mode")
     builder.add_conditional_edges("route_mode", route_after_mode)
+    builder.add_conditional_edges("sync_reference_catalog", route_after_sync_reference_catalog)
     builder.add_edge("clarification", END)
+    builder.add_conditional_edges("prepare_reference_context", route_after_prepare_reference_context)
 
     builder.add_edge("agent", "post_agent")
     builder.add_conditional_edges("post_agent", route_after_post_agent)

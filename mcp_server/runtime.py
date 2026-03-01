@@ -109,6 +109,10 @@ def is_infinigen_tool_enabled() -> bool:
     return parse_env_bool("ENABLE_INFINIGEN", False)
 
 
+def is_sam_reconstruct_tool_enabled() -> bool:
+    return parse_env_bool("ENABLE_SAM_RECONSTRUCT", False)
+
+
 def is_sketchfab_tool_enabled() -> bool:
     return parse_env_bool("ENABLE_SKETCHFAB", False)
 
@@ -269,7 +273,7 @@ def probe_conditional_services(logger) -> dict[str, bool]:
         host_override=os.getenv("MCP_TOOL_HEALTH_HOST"),
         timeout=timeout,
     )
-    service_names = ["trellis2", "retrieval", "pcg_integrator"]
+    service_names = ["trellis2", "retrieval", "pcg_integrator", "sam_reconstruct"]
 
     try:
         check_results = checker.check_services(service_names)

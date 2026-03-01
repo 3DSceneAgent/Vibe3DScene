@@ -72,3 +72,46 @@ def test_agent_node_respects_runtime_enabled_tool_names():
     message = result["messages"][0]
 
     assert [call["name"] for call in message.tool_calls] == ["camera_observe"]
+
+
+def test_agent_node_soft_disables_sam_reconstruct_without_current_request_image():
+    llm = FakeLLM(
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "reconstruct_full_scene", "args": {}, "id": "tc-6", "type": "tool_call"},
+            ],
+        )
+    )
+
+    result = agent_node({"messages": []}, llm, ["reconstruct_full_scene"])
+    message = result["messages"][0]
+
+    assert message.tool_calls == []
+    runtime_constraints = [
+        str(msg.content)
+        for msg in llm.invocations[0]
+        if isinstance(msg, SystemMessage) and "CURRENT_AVAILABLE_TOOLS" in str(msg.content)
+    ]
+    assert runtime_constraints
+    assert "reconstruct_full_scene" not in runtime_constraints[0]
+
+
+def test_agent_node_keeps_sam_reconstruct_when_exactly_one_image_is_attached():
+    llm = FakeLLM(
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "reconstruct_full_scene", "args": {}, "id": "tc-7", "type": "tool_call"},
+            ],
+        )
+    )
+
+    result = agent_node(
+        {"messages": [], "attached_image_ids": ["asset-1"]},
+        llm,
+        ["reconstruct_full_scene"],
+    )
+    message = result["messages"][0]
+
+    assert [call["name"] for call in message.tool_calls] == ["reconstruct_full_scene"]

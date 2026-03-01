@@ -10,3 +10,6 @@
 [submodule "tool_servers/TRELLIS.2"]
 	path = tool_servers/TRELLIS.2
 	url = https://github.com/FishWoWater/TRELLIS.2
+[submodule "tool_servers/SAMServer"]
+	path = tool_servers/SAMServer
+	url = git@github.com:3DSceneAgent/SAMServer.git

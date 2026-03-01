@@ -20,3 +20,15 @@ def test_rodin_gate_disabled_outside_supported_modes(monkeypatch):
     monkeypatch.setenv("ENABLE_RODIN", "true")
 
     assert runtime.is_rodin_tool_enabled() is False
+
+
+def test_sam_reconstruct_gate_enabled(monkeypatch):
+    monkeypatch.setenv("ENABLE_SAM_RECONSTRUCT", "true")
+
+    assert runtime.is_sam_reconstruct_tool_enabled() is True
+
+
+def test_sam_reconstruct_gate_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("ENABLE_SAM_RECONSTRUCT", raising=False)
+
+    assert runtime.is_sam_reconstruct_tool_enabled() is False

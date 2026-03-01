@@ -18,6 +18,17 @@ class TodoItem(TypedDict):
     completed_at: str | None
 
 
+class ReferenceImageCatalogEntry(TypedDict):
+    """Compact request-scoped reference image catalog entry."""
+    asset_id: str
+    stored_path: str
+    caption: str
+    source_turn_at: str
+    created_at: str
+    last_used_at: str | None
+    use_count: int
+
+
 TaskMode = Literal["conversation_mode", "single_action_mode", "plan_mode"]
 WorkflowTopology = Literal["single_agent", "dual_agent"]
 MemoryProfile = Literal["thread_shared_only", "shared_plus_role_private"]
@@ -90,6 +101,7 @@ class AgentState(TypedDict):
         max_request_agent_turns: Request-level agent turn budget
         request_stop_reason: Budget/control stop reason for this request
         last_tool_batch_names: Tool names observed in latest tool batch
+        attached_image_ids: Optional uploaded image IDs explicitly attached to this user request
         task_mode: Routed workflow mode for this request
         task_intent: Routed intent label for this request
         router_decision: Latest structured routing decision payload from LLM router
@@ -106,6 +118,10 @@ class AgentState(TypedDict):
         builder_stall_count: Consecutive builder turns without tool calls
         verifier_feedback: Latest structured verifier feedback
         role_private_memory: Compact role-scoped private memory buckets
+        reference_image_catalog: Compact named reference-image catalog for this thread state
+        request_reference_image_keys: Active reference-image keys for the current request
+        request_reference_image_source: Source label for the current request reference-image set
+        request_reference_image_reason: Human-readable reason for the current request reference-image set
         plan_replan_count: Number of plan refreshes in this request run
         max_plan_replans: Max allowed plan refresh attempts in this request run
         verification_mismatch_streak: Consecutive mismatch/catastrophic verification count
@@ -130,6 +146,7 @@ class AgentState(TypedDict):
     thread_id: str
     enabled_tool_names: NotRequired[list[str] | None]
     task_id: NotRequired[str | None]
+    attached_image_ids: NotRequired[list[str] | None]
     task_mode: NotRequired[TaskMode]
     task_intent: NotRequired[str]
     router_decision: NotRequired[dict[str, Any]]
@@ -159,6 +176,10 @@ class AgentState(TypedDict):
     builder_stall_count: NotRequired[int]
     verifier_feedback: NotRequired[dict[str, Any]]
     role_private_memory: NotRequired[dict[str, dict[str, Any]]]
+    reference_image_catalog: NotRequired[Annotated[dict[str, ReferenceImageCatalogEntry], replace_mapping]]
+    request_reference_image_keys: NotRequired[list[str]]
+    request_reference_image_source: NotRequired[str]
+    request_reference_image_reason: NotRequired[str | None]
     plan_replan_count: NotRequired[int]
     max_plan_replans: NotRequired[int]
     verification_mismatch_streak: NotRequired[int]

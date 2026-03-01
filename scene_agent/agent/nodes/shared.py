@@ -17,7 +17,7 @@ from typing import Any, Dict, Literal
 from urllib.parse import unquote, urlparse
 from langchain_core.messages import ToolMessage, AIMessage, SystemMessage, HumanMessage
 from pydantic import BaseModel, Field, ValidationError
-from scene_agent.agent.state import AgentState, TaskMode, TodoItem
+from scene_agent.agent.state import AgentState, ReferenceImageCatalogEntry, TaskMode, TodoItem
 from scene_agent.agent.tool_policy import (
     READ_ONLY_TOOLS,
     coerce_request_tool_budgets,
@@ -146,6 +146,17 @@ class RouterDecision(BaseModel):
     requires_scene_mutation: bool = False
 
 
+class ReferenceImageNameSuggestion(BaseModel):
+    name: str = ""
+    caption: str = ""
+
+
+class ReferenceImageSelectionDecision(BaseModel):
+    should_attach: bool = False
+    selected_name: str | None = None
+    reason: str = ""
+
+
 def coerce_task_mode(raw_mode: Any) -> TaskMode:
     if raw_mode in {MODE_CONVERSATION, MODE_SINGLE_ACTION, MODE_PLAN}:
         return raw_mode
@@ -234,16 +245,555 @@ def build_router_clarification_question(text: str) -> str:
     )
 
 
-def _router_has_images(thread_id: str) -> bool:
+def _normalize_reference_image_key(raw_value: Any) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", str(raw_value or "").strip().lower())
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized[:48].rstrip("_")
+
+
+def _coerce_attached_image_ids(raw_value: Any) -> list[str]:
+    if not isinstance(raw_value, list):
+        return []
+    attached_ids: list[str] = []
+    seen: set[str] = set()
+    for item in raw_value:
+        if not isinstance(item, str):
+            continue
+        value = item.strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        attached_ids.append(value)
+    return attached_ids
+
+
+def _coerce_reference_image_catalog(
+    raw_value: Any,
+) -> dict[str, ReferenceImageCatalogEntry]:
+    if not isinstance(raw_value, dict):
+        return {}
+    catalog: dict[str, ReferenceImageCatalogEntry] = {}
+    for raw_key, raw_entry in raw_value.items():
+        key = _normalize_reference_image_key(raw_key)
+        if not key or not isinstance(raw_entry, dict):
+            continue
+        asset_id = str(raw_entry.get("asset_id", "")).strip()
+        stored_path = str(raw_entry.get("stored_path", "")).strip()
+        if not asset_id or not stored_path:
+            continue
+        caption = raw_entry.get("caption", "")
+        source_turn_at = raw_entry.get("source_turn_at", "")
+        created_at = raw_entry.get("created_at", "")
+        last_used_at = raw_entry.get("last_used_at")
+        use_count_raw = raw_entry.get("use_count", 0)
+        use_count = use_count_raw if isinstance(use_count_raw, int) and use_count_raw >= 0 else 0
+        catalog[key] = ReferenceImageCatalogEntry(
+            asset_id=asset_id,
+            stored_path=stored_path,
+            caption=caption.strip() if isinstance(caption, str) else "",
+            source_turn_at=source_turn_at.strip() if isinstance(source_turn_at, str) else "",
+            created_at=created_at.strip() if isinstance(created_at, str) else "",
+            last_used_at=last_used_at.strip() if isinstance(last_used_at, str) and last_used_at.strip() else None,
+            use_count=use_count,
+        )
+    return catalog
+
+
+def _coerce_request_reference_image_keys(raw_value: Any) -> list[str]:
+    if not isinstance(raw_value, list):
+        return []
+    keys: list[str] = []
+    seen: set[str] = set()
+    for item in raw_value:
+        key = _normalize_reference_image_key(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+    return keys
+
+
+def _current_turn_has_images(state: AgentState) -> bool:
+    return len(_coerce_attached_image_ids(state.get("attached_image_ids"))) > 0
+
+
+def _catalog_has_images(state: AgentState) -> bool:
+    return len(_coerce_reference_image_catalog(state.get("reference_image_catalog"))) > 0
+
+
+def _resolve_reference_image_helper_model(
+    *,
+    provider_name: str | None,
+    api_key: str | None,
+    run_name: str,
+) -> Any | None:
+    settings = get_settings()
+    resolved_provider = (provider_name or settings.vlm_provider).strip().lower()
+    if not resolved_provider:
+        return None
+    resolved_api_key = api_key or settings.get_vlm_api_key(resolved_provider)
+    if not resolved_api_key:
+        return None
+    try:
+        from scene_agent.vlm import get_vlm_provider
+
+        helper_model_name = settings.get_reference_image_helper_model(resolved_provider)
+        helper_provider = get_vlm_provider(
+            provider_name=resolved_provider,
+            api_key=resolved_api_key,
+            model=helper_model_name,
+        )
+        helper_model = helper_provider.get_chat_model()
+        if hasattr(helper_model, "with_config"):
+            try:
+                return helper_model.with_config(tags=["nostream"], run_name=run_name)
+            except Exception:
+                return helper_model
+        return helper_model
+    except Exception:
+        return None
+
+
+def _fallback_reference_image_name(asset: Any) -> str:
+    filename = getattr(asset, "filename", "")
+    if isinstance(filename, str):
+        stem, _ext = os.path.splitext(filename)
+        normalized = _normalize_reference_image_key(stem)
+        if normalized:
+            return normalized
+    asset_id = str(getattr(asset, "id", "")).strip()
+    if asset_id:
+        return f"image_{asset_id[:8]}"
+    return "image_asset"
+
+
+def _existing_reference_image_key_for_asset(
+    catalog: dict[str, ReferenceImageCatalogEntry],
+    asset_id: str,
+) -> str | None:
+    for key, entry in catalog.items():
+        if entry["asset_id"] == asset_id:
+            return key
+    return None
+
+
+def _ensure_unique_reference_image_key(
+    desired_key: str,
+    *,
+    catalog: dict[str, ReferenceImageCatalogEntry],
+    asset_id: str,
+) -> str:
+    existing_key = _existing_reference_image_key_for_asset(catalog, asset_id)
+    if existing_key:
+        return existing_key
+    base_key = _normalize_reference_image_key(desired_key)
+    if not base_key:
+        base_key = f"image_{asset_id[:8]}" if asset_id else "image_asset"
+    if base_key not in catalog:
+        return base_key
+    if catalog[base_key]["asset_id"] == asset_id:
+        return base_key
+
+    suffix = 2
+    while True:
+        suffix_token = f"_{suffix}"
+        candidate = f"{base_key[: max(1, 48 - len(suffix_token))]}{suffix_token}"
+        if candidate not in catalog or catalog[candidate]["asset_id"] == asset_id:
+            return candidate
+        suffix += 1
+
+
+def _build_reference_image_catalog_entry(
+    *,
+    asset: Any,
+    caption: str,
+    now_iso: str,
+    existing: ReferenceImageCatalogEntry | None = None,
+) -> ReferenceImageCatalogEntry:
+    stored_path = str(getattr(asset, "stored_path", "")).strip()
+    asset_id = str(getattr(asset, "id", "")).strip()
+    if existing is not None:
+        created_at = existing["created_at"]
+        source_turn_at = existing["source_turn_at"]
+        effective_caption = existing["caption"] or caption
+        use_count = existing["use_count"] + 1
+    else:
+        created_at = now_iso
+        source_turn_at = now_iso
+        effective_caption = caption
+        use_count = 1
+    return ReferenceImageCatalogEntry(
+        asset_id=asset_id,
+        stored_path=stored_path,
+        caption=effective_caption[:240],
+        source_turn_at=source_turn_at,
+        created_at=created_at,
+        last_used_at=now_iso,
+        use_count=max(1, use_count),
+    )
+
+
+def _merge_reference_assets_into_catalog(
+    *,
+    catalog: dict[str, ReferenceImageCatalogEntry],
+    assets: list[Any],
+    now_iso: str,
+    provider_name: str | None,
+    api_key: str | None,
+) -> list[str]:
+    synced_keys: list[str] = []
+    for asset in assets:
+        asset_id = str(getattr(asset, "id", "")).strip()
+        if not asset_id:
+            continue
+        existing_key = _existing_reference_image_key_for_asset(catalog, asset_id)
+        existing_entry = catalog.get(existing_key) if existing_key else None
+        if existing_key is None:
+            suggested_name, caption = _describe_reference_image_with_helper(
+                asset=asset,
+                provider_name=provider_name,
+                api_key=api_key,
+            )
+            entry_key = _ensure_unique_reference_image_key(
+                suggested_name,
+                catalog=catalog,
+                asset_id=asset_id,
+            )
+        else:
+            entry_key = existing_key
+            caption = existing_entry["caption"] if existing_entry else ""
+        catalog[entry_key] = _build_reference_image_catalog_entry(
+            asset=asset,
+            caption=caption,
+            now_iso=now_iso,
+            existing=existing_entry,
+        )
+        synced_keys.append(entry_key)
+    return synced_keys
+
+
+def _resolve_reference_assets_for_catalog_sync(
+    state: AgentState,
+    *,
+    catalog: dict[str, ReferenceImageCatalogEntry],
+    attached_image_ids: list[str],
+) -> list[Any]:
     try:
         memory = get_reference_image_memory()
-        if hasattr(memory, "list_assets"):
-            return len(memory.list_assets(thread_id)) > 0
-        if hasattr(memory, "list_images"):
-            return len(memory.list_images(thread_id)) > 0
     except Exception:
-        return False
-    return False
+        return []
+
+    thread_id = state.get("thread_id", "default")
+    if attached_image_ids:
+        if hasattr(memory, "get_assets_by_ids"):
+            try:
+                return memory.get_assets_by_ids(thread_id, attached_image_ids)
+            except Exception:
+                return []
+        return []
+
+    if catalog:
+        return []
+
+    task_id = state.get("task_id")
+    if hasattr(memory, "resolve_assets"):
+        try:
+            return memory.resolve_assets(thread_id=thread_id, task_id=task_id)
+        except TypeError:
+            try:
+                return memory.resolve_assets(thread_id, task_id)
+            except Exception:
+                pass
+        except Exception:
+            pass
+    if hasattr(memory, "list_assets"):
+        try:
+            return memory.list_assets(thread_id)
+        except TypeError:
+            try:
+                return memory.list_assets(thread_id=thread_id)
+            except Exception:
+                pass
+        except Exception:
+            pass
+    return []
+
+
+def _describe_reference_image_with_helper(
+    *,
+    asset: Any,
+    provider_name: str | None,
+    api_key: str | None,
+) -> tuple[str, str]:
+    fallback_name = _fallback_reference_image_name(asset)
+    stored_path = str(getattr(asset, "stored_path", "")).strip()
+    data_url = _path_to_data_url(stored_path)
+    if not data_url:
+        return fallback_name, ""
+
+    helper_model = _resolve_reference_image_helper_model(
+        provider_name=provider_name,
+        api_key=api_key,
+        run_name="reference_image_name_helper",
+    )
+    if helper_model is None or not hasattr(helper_model, "with_structured_output"):
+        return fallback_name, ""
+
+    filename = getattr(asset, "filename", "")
+    prompt = (
+        "You name uploaded reference images for a 3D scene agent.\n"
+        "Return a short snake_case-ish object/scene identifier and one concise caption.\n"
+        "Keep the name stable, specific, and under 6 words."
+    )
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    if isinstance(filename, str) and filename.strip():
+        content.append({"type": "text", "text": f"Original filename: {filename.strip()}"})
+    content.append({"type": "image_url", "image_url": {"url": data_url}})
+
+    try:
+        structured = helper_model.with_structured_output(ReferenceImageNameSuggestion)
+        response = structured.invoke([HumanMessage(content=content)])
+        if not isinstance(response, ReferenceImageNameSuggestion):
+            response = ReferenceImageNameSuggestion.model_validate(response)
+        suggested_key = _normalize_reference_image_key(response.name)
+        caption = response.caption.strip() if isinstance(response.caption, str) else ""
+        return suggested_key or fallback_name, caption[:240]
+    except Exception:
+        return fallback_name, ""
+
+
+def _tokenize_reference_selector_text(text: str) -> set[str]:
+    if not isinstance(text, str):
+        return set()
+    return set(re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]+", text.lower()))
+
+
+def _fallback_select_reference_image(
+    *,
+    latest_user_request: str,
+    catalog: dict[str, ReferenceImageCatalogEntry],
+) -> tuple[str | None, str]:
+    request_tokens = _tokenize_reference_selector_text(latest_user_request)
+    if not request_tokens:
+        return None, "fallback_no_request_tokens"
+
+    best_name: str | None = None
+    best_score = 0
+    best_use_count = -1
+    for name, entry in catalog.items():
+        candidate_tokens = _tokenize_reference_selector_text(f"{name} {entry['caption']}")
+        if not candidate_tokens:
+            continue
+        score = len(request_tokens & candidate_tokens)
+        if score <= 0:
+            continue
+        if score > best_score or (score == best_score and entry["use_count"] > best_use_count):
+            best_name = name
+            best_score = score
+            best_use_count = entry["use_count"]
+    if best_name is None:
+        return None, "fallback_no_match"
+    return best_name, f"fallback_token_overlap:{best_score}"
+
+
+def _select_reference_image_with_helper(
+    *,
+    latest_user_request: str,
+    catalog: dict[str, ReferenceImageCatalogEntry],
+    provider_name: str | None,
+    api_key: str | None,
+) -> tuple[bool, str | None, str]:
+    if not catalog:
+        return False, None, "no_catalog_images"
+
+    helper_model = _resolve_reference_image_helper_model(
+        provider_name=provider_name,
+        api_key=api_key,
+        run_name="reference_image_select_helper",
+    )
+    if helper_model is None or not hasattr(helper_model, "with_structured_output"):
+        selected_name, reason = _fallback_select_reference_image(
+            latest_user_request=latest_user_request,
+            catalog=catalog,
+        )
+        return (selected_name is not None), selected_name, reason
+
+    catalog_lines: list[str] = []
+    for name, entry in catalog.items():
+        usage_note = f"use_count={entry['use_count']}"
+        if entry["last_used_at"]:
+            usage_note += f", last_used_at={entry['last_used_at']}"
+        caption = entry["caption"] or "(no caption)"
+        catalog_lines.append(f"- {name}: {caption} [{usage_note}]")
+
+    selection_prompt = (
+        "You decide whether a stored reference image should be reattached to the current user request.\n"
+        "Attach at most one image.\n"
+        "Return should_attach=false when the user request can be handled without a prior image.\n"
+        "If should_attach=true, selected_name must exactly match one catalog name."
+    )
+    selection_input = (
+        f"latest_user_request: {latest_user_request}\n"
+        "reference_image_catalog:\n"
+        + ("\n".join(catalog_lines) if catalog_lines else "(empty)")
+    )
+
+    try:
+        structured = helper_model.with_structured_output(ReferenceImageSelectionDecision)
+        response = structured.invoke(
+            [
+                SystemMessage(content=selection_prompt),
+                HumanMessage(content=selection_input),
+            ]
+        )
+        if not isinstance(response, ReferenceImageSelectionDecision):
+            response = ReferenceImageSelectionDecision.model_validate(response)
+        selected_name = _normalize_reference_image_key(response.selected_name)
+        reason = response.reason.strip() if isinstance(response.reason, str) else ""
+        if response.should_attach and selected_name in catalog:
+            return True, selected_name, reason or "helper_selected_reference_image"
+        if not response.should_attach:
+            return False, None, reason or "helper_declined_reference_image"
+    except Exception:
+        pass
+
+    selected_name, reason = _fallback_select_reference_image(
+        latest_user_request=latest_user_request,
+        catalog=catalog,
+    )
+    return (selected_name is not None), selected_name, reason
+
+
+def _request_reference_image_entries(state: AgentState) -> list[dict[str, str]]:
+    catalog = _coerce_reference_image_catalog(state.get("reference_image_catalog"))
+    selected_keys = _coerce_request_reference_image_keys(state.get("request_reference_image_keys"))
+    entries: list[dict[str, str]] = []
+    seen_asset_ids: set[str] = set()
+    for key in selected_keys:
+        entry = catalog.get(key)
+        if entry is None:
+            continue
+        asset_id = entry["asset_id"]
+        stored_path = entry["stored_path"]
+        if not asset_id or not stored_path or asset_id in seen_asset_ids:
+            continue
+        seen_asset_ids.add(asset_id)
+        entries.append(
+            {
+                "key": key,
+                "asset_id": asset_id,
+                "stored_path": stored_path,
+                "caption": entry["caption"],
+            }
+        )
+    return entries
+
+
+def _request_reference_keys_for_attached_images(
+    *,
+    catalog: dict[str, ReferenceImageCatalogEntry],
+    attached_image_ids: list[str],
+) -> list[str]:
+    request_keys: list[str] = []
+    seen_keys: set[str] = set()
+    for asset_id in attached_image_ids:
+        entry_key = _existing_reference_image_key_for_asset(catalog, asset_id)
+        if not entry_key or entry_key in seen_keys:
+            continue
+        seen_keys.add(entry_key)
+        request_keys.append(entry_key)
+    return request_keys
+
+
+def sync_reference_catalog_node(
+    state: AgentState,
+    *,
+    provider_name: str | None = None,
+    api_key: str | None = None,
+) -> Dict[str, Any]:
+    now_iso = datetime.now().isoformat()
+    catalog = _coerce_reference_image_catalog(state.get("reference_image_catalog"))
+    attached_image_ids = _coerce_attached_image_ids(state.get("attached_image_ids"))
+    assets = _resolve_reference_assets_for_catalog_sync(
+        state,
+        catalog=catalog,
+        attached_image_ids=attached_image_ids,
+    )
+    if assets:
+        _merge_reference_assets_into_catalog(
+            catalog=catalog,
+            assets=assets,
+            now_iso=now_iso,
+            provider_name=provider_name,
+            api_key=api_key,
+        )
+    return {
+        "reference_image_catalog": catalog,
+        "request_reference_image_keys": [],
+        "request_reference_image_source": "none",
+        "request_reference_image_reason": None,
+    }
+
+
+def prepare_reference_context_node(
+    state: AgentState,
+    *,
+    provider_name: str | None = None,
+    api_key: str | None = None,
+) -> Dict[str, Any]:
+    now_iso = datetime.now().isoformat()
+    catalog = _coerce_reference_image_catalog(state.get("reference_image_catalog"))
+    attached_image_ids = _coerce_attached_image_ids(state.get("attached_image_ids"))
+
+    if attached_image_ids:
+        request_keys = _request_reference_keys_for_attached_images(
+            catalog=catalog,
+            attached_image_ids=attached_image_ids,
+        )
+        if request_keys:
+            return {
+                "reference_image_catalog": catalog,
+                "request_reference_image_keys": request_keys,
+                "request_reference_image_source": "attached",
+                "request_reference_image_reason": "current_turn_attached_images",
+            }
+        return {
+            "reference_image_catalog": catalog,
+            "request_reference_image_keys": [],
+            "request_reference_image_source": "none",
+            "request_reference_image_reason": "attached_images_unresolved",
+        }
+
+    latest_user_request = latest_human_message(state)
+    should_attach, selected_name, reason = _select_reference_image_with_helper(
+        latest_user_request=latest_user_request,
+        catalog=catalog,
+        provider_name=provider_name,
+        api_key=api_key,
+    )
+    if should_attach and selected_name and selected_name in catalog:
+        selected_entry = catalog[selected_name]
+        catalog[selected_name] = ReferenceImageCatalogEntry(
+            asset_id=selected_entry["asset_id"],
+            stored_path=selected_entry["stored_path"],
+            caption=selected_entry["caption"],
+            source_turn_at=selected_entry["source_turn_at"],
+            created_at=selected_entry["created_at"],
+            last_used_at=now_iso,
+            use_count=max(1, selected_entry["use_count"] + 1),
+        )
+        return {
+            "reference_image_catalog": catalog,
+            "request_reference_image_keys": [selected_name],
+            "request_reference_image_source": "memory_retrieved",
+            "request_reference_image_reason": reason or "selected_from_reference_catalog",
+        }
+    return {
+        "reference_image_catalog": catalog,
+        "request_reference_image_keys": [],
+        "request_reference_image_source": "none",
+        "request_reference_image_reason": reason or "no_reference_image_selected",
+    }
 
 
 def invoke_router_decision(
@@ -253,7 +803,8 @@ def invoke_router_decision(
     latest_user_request: str,
 ) -> RouterDecision:
     thread_id = state.get("thread_id", "default")
-    has_images = _router_has_images(thread_id)
+    has_current_turn_images = _current_turn_has_images(state)
+    has_catalog_images = _catalog_has_images(state)
     unfinished_todos = unfinished_todo_count(state)
     topology_hint = state.get("workflow_topology_request") or state.get("workflow_topology") or "auto"
 
@@ -270,7 +821,8 @@ def invoke_router_decision(
     router_input = (
         f"latest_user_request: {latest_user_request}\n"
         f"thread_id: {thread_id}\n"
-        f"has_uploaded_images: {has_images}\n"
+        f"has_current_turn_images: {has_current_turn_images}\n"
+        f"has_catalog_images: {has_catalog_images}\n"
         f"unfinished_todos_count: {unfinished_todos}\n"
         f"requested_workflow_topology: {topology_hint}\n"
     )
@@ -299,37 +851,7 @@ def invoke_router_decision(
 
 
 def resolve_verification_assets(state: AgentState) -> list[Any]:
-    thread_id = state.get("thread_id", "default")
-    mode = coerce_task_mode(state.get("task_mode"))
-    task_id = state.get("task_id")
-    normalized_task_id = task_id.strip() if isinstance(task_id, str) and task_id.strip() else None
-    role_filter = _verification_roles_for_mode(mode)
-    settings = get_settings()
-
-    memory = get_reference_image_memory()
-    if hasattr(memory, "resolve_assets"):
-        try:
-            if hasattr(memory, "ensure_auto_bindings"):
-                memory.ensure_auto_bindings(
-                    thread_id=thread_id,
-                    task_id=normalized_task_id or GLOBAL_TASK_ID,
-                    preferred_role=_auto_binding_role_for_mode(mode),
-                )
-            return memory.resolve_assets(
-                thread_id=thread_id,
-                task_id=normalized_task_id or GLOBAL_TASK_ID,
-                roles=role_filter,
-                limit=settings.reference_image_max_count,
-            )
-        except Exception:
-            return []
-    if hasattr(memory, "list_images"):
-        try:
-            images = memory.list_images(thread_id)
-            return images[-settings.reference_image_max_count :]
-        except Exception:
-            return []
-    return []
+    return _request_reference_image_entries(state)
 
 
 # Legacy alias kept for test monkeypatching and extension compatibility.
@@ -364,6 +886,20 @@ def _effective_tool_names_for_state(
     )
 
 
+def _apply_request_scoped_tool_constraints(
+    state: AgentState,
+    tool_names: list[str] | None,
+) -> list[str] | None:
+    if tool_names is None:
+        return None
+
+    attached_image_ids = _coerce_attached_image_ids(state.get("attached_image_ids"))
+    if len(attached_image_ids) == 1:
+        return tool_names
+
+    return [name for name in tool_names if name != "reconstruct_full_scene"]
+
+
 
 
 def invoke_role_agent(
@@ -377,6 +913,10 @@ def invoke_role_agent(
     from scene_agent.agent.prompts import get_full_system_prompt
 
     requested_tool_names = _resolve_effective_available_tools(state, available_tool_names)
+    requested_tool_names = _apply_request_scoped_tool_constraints(
+        state,
+        requested_tool_names,
+    )
     effective_tool_names, tool_policy_reason = _effective_tool_names_for_state(
         state,
         requested_tool_names,
@@ -425,7 +965,7 @@ def invoke_role_agent(
             )
         )
     messages.extend(state["messages"])
-    if role in {ROLE_GENERAL, ROLE_BUILDER}:
+    if role in {ROLE_GENERAL, ROLE_BUILDER, ROLE_VERIFIER}:
         messages = _inject_reference_images_into_latest_human_message(
             messages,
             state=state,
@@ -1526,58 +2066,11 @@ def _resolve_renders_url_to_path(url: str) -> str | None:
 
 
 def _prompt_reference_image_urls(state: AgentState) -> list[str]:
-    thread_id_raw = state.get("thread_id")
-    if not isinstance(thread_id_raw, str):
-        return []
-    thread_id = thread_id_raw.strip()
-    if not thread_id:
-        return []
-
-    settings = get_settings()
-    max_images = max(0, int(getattr(settings, "reference_image_max_count", 0)))
-    if max_images == 0:
-        return []
-
-    task_id_raw = state.get("task_id")
-    normalized_task_id = (
-        task_id_raw.strip()
-        if isinstance(task_id_raw, str) and task_id_raw.strip()
-        else GLOBAL_TASK_ID
-    )
-
-    try:
-        memory = get_reference_image_memory()
-    except Exception:
-        return []
-
-    assets: list[Any] = []
-    if hasattr(memory, "resolve_assets"):
-        try:
-            assets = memory.resolve_assets(
-                thread_id=thread_id,
-                task_id=normalized_task_id,
-                limit=max_images,
-            )
-        except Exception:
-            assets = []
-    elif hasattr(memory, "list_assets"):
-        try:
-            assets = memory.list_assets(thread_id)[-max_images:]
-        except Exception:
-            assets = []
-    elif hasattr(memory, "list_images"):
-        try:
-            assets = memory.list_images(thread_id)[-max_images:]
-        except Exception:
-            assets = []
-
-    if not isinstance(assets, list):
-        return []
-
+    assets = _request_reference_image_entries(state)
     urls: list[str] = []
     seen: set[str] = set()
     for asset in assets:
-        stored_path = getattr(asset, "stored_path", None)
+        stored_path = asset.get("stored_path")
         if not isinstance(stored_path, str) or not stored_path.strip():
             continue
         data_url = _path_to_data_url(stored_path)
@@ -1587,8 +2080,6 @@ def _prompt_reference_image_urls(state: AgentState) -> list[str]:
             continue
         seen.add(data_url)
         urls.append(data_url)
-        if len(urls) >= max_images:
-            break
     return urls
 
 

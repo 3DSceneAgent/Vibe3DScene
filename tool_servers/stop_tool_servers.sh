@@ -6,6 +6,7 @@ ENV_FILE="${SCRIPT_DIR}/.env"
 ENV_EXAMPLE="${SCRIPT_DIR}/.env.example"
 COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.tools.yml"
 GPU_COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.tools.gpu.yml"
+SAMSERVER_GPU_COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.tools.samserver.gpu.yml"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   cp "$ENV_EXAMPLE" "$ENV_FILE"
@@ -16,9 +17,11 @@ source "$ENV_FILE"
 set +a
 
 : "${TRELLIS2_ENABLE_GPU:=true}"
+: "${SAMSERVER_ENABLE_GPU:=true}"
 : "${ENABLE_TRELLIS2:=true}"
 : "${ENABLE_RETRIEVAL:=true}"
 : "${ENABLE_PCG:=true}"
+: "${ENABLE_SAMSERVER:=false}"
 
 if docker compose version >/dev/null 2>&1; then
   COMPOSE_BIN=(docker compose)
@@ -33,6 +36,9 @@ COMPOSE_ARGS=(-f "$COMPOSE_FILE")
 if [[ "$TRELLIS2_ENABLE_GPU" == "true" ]]; then
   COMPOSE_ARGS+=( -f "$GPU_COMPOSE_FILE" )
 fi
+if [[ "$SAMSERVER_ENABLE_GPU" == "true" ]]; then
+  COMPOSE_ARGS+=( -f "$SAMSERVER_GPU_COMPOSE_FILE" )
+fi
 
 SERVICES=()
 if [[ "$ENABLE_TRELLIS2" == "true" ]]; then
@@ -43,6 +49,9 @@ if [[ "$ENABLE_RETRIEVAL" == "true" ]]; then
 fi
 if [[ "$ENABLE_PCG" == "true" ]]; then
   SERVICES+=(pcg)
+fi
+if [[ "$ENABLE_SAMSERVER" == "true" ]]; then
+  SERVICES+=(samserver)
 fi
 
 if [[ ${#SERVICES[@]} -eq 0 ]]; then

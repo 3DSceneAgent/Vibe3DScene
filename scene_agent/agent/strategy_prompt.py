@@ -18,6 +18,7 @@ class AssetWorkflowAvailability(TypedDict):
     rodin_ready: bool
     hunyuan_ready: bool
     retrieval_ready: bool
+    sam_reconstruct_ready: bool
     undo_ready: bool
     clear_scene_ready: bool
 
@@ -52,6 +53,12 @@ RETRIEVAL_WORKFLOW_TOOLS: frozenset[str] = frozenset(
         "import_retrieved_asset",
     }
 )
+SAM_RECONSTRUCT_WORKFLOW_TOOLS: frozenset[str] = frozenset(
+    {
+        "reconstruct_full_scene",
+        "import_blend_contents",
+    }
+)
 UNDO_WORKFLOW_TOOLS: frozenset[str] = frozenset({"undo_last_snapshot"})
 CLEAR_SCENE_WORKFLOW_TOOLS: frozenset[str] = frozenset({"clear_scene"})
 
@@ -79,6 +86,7 @@ def infer_asset_workflow_availability(
         "rodin_ready": RODIN_WORKFLOW_TOOLS.issubset(tool_names),
         "hunyuan_ready": HUNYUAN_WORKFLOW_TOOLS.issubset(tool_names),
         "retrieval_ready": RETRIEVAL_WORKFLOW_TOOLS.issubset(tool_names),
+        "sam_reconstruct_ready": SAM_RECONSTRUCT_WORKFLOW_TOOLS.issubset(tool_names),
         "undo_ready": UNDO_WORKFLOW_TOOLS.issubset(tool_names),
         "clear_scene_ready": CLEAR_SCENE_WORKFLOW_TOOLS.issubset(tool_names),
     }
@@ -92,6 +100,7 @@ def build_asset_creation_strategy_text(
     rodin_ready: bool,
     hunyuan_ready: bool,
     retrieval_ready: bool,
+    sam_reconstruct_ready: bool,
     undo_ready: bool,
     clear_scene_ready: bool,
 ) -> str:
@@ -222,8 +231,32 @@ def build_asset_creation_strategy_text(
             ]
         )
 
+    if sam_reconstruct_ready:
+        lines.extend(
+            [
+                "   - SAM3D full-scene reconstruction (image-only)",
+                "     - Flow: reconstruct_full_scene(input_image_path=...)"
+                " -> import_blend_contents(blend_file_path=\"...\")",
+                "     - Use only when the user provides a reference image and wants a fast whole-scene"
+                " layout bootstrap from that image",
+                "     - Do NOT use this tool for text-only requests or single-object generation",
+                "     - The generated .blend is an external scene asset pack; import it first, then refine,"
+                " replace, delete, retarget materials, and verify with existing tools",
+                "     - If reconstruction fails or times out, fall back to retrieval/generation workflows"
+                " and assemble the scene incrementally",
+            ]
+        )
+
     if not any(
-        [sketchfab_ready, infinigen_ready, trellis2_ready, rodin_ready, hunyuan_ready, retrieval_ready]
+        [
+            sketchfab_ready,
+            infinigen_ready,
+            trellis2_ready,
+            rodin_ready,
+            hunyuan_ready,
+            retrieval_ready,
+            sam_reconstruct_ready,
+        ]
     ):
         lines.append("   - Note: No extra generator/retrieval workflow is currently available beyond PolyHaven.")
     lines.append("   (The runtime strategy prompt lists all currently enabled sources and their priority.)")
@@ -254,6 +287,11 @@ def build_asset_creation_strategy_text(
         priority_rules.append("For realistic authored objects: Sketchfab")
     elif retrieval_ready:
         priority_rules.append("For realistic authored objects: Retrieval")
+
+    if sam_reconstruct_ready:
+        priority_rules.append(
+            "For full-scene reference-image bootstrapping: SAM3D reconstruct first, then refine with import/edit tools"
+        )
 
     if infinigen_ready:
         if sketchfab_ready and retrieval_ready:

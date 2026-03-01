@@ -144,6 +144,7 @@ type StreamChatArgs = {
   message: string
   threadId: string
   enabledMcpTools?: string[]
+  attachedImageIds?: string[]
   vlmProvider?: string
   vlmModel?: string
   onEvent: (event: StreamEvent) => void
@@ -203,6 +204,7 @@ export async function streamChat({
   message,
   threadId,
   enabledMcpTools,
+  attachedImageIds,
   vlmProvider,
   vlmModel,
   onEvent,
@@ -211,6 +213,9 @@ export async function streamChat({
   const payload: Record<string, unknown> = { message, thread_id: threadId }
   if (enabledMcpTools) {
     payload.enabled_mcp_tools = enabledMcpTools
+  }
+  if (attachedImageIds && attachedImageIds.length > 0) {
+    payload.attached_image_ids = attachedImageIds
   }
   if (vlmProvider) {
     payload.vlm_provider = vlmProvider

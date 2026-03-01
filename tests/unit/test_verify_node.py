@@ -2,16 +2,10 @@ from __future__ import annotations
 
 import ast
 from datetime import datetime
-from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from scene_agent.agent.nodes import verify_node
-
-
-class _FakeReferenceMemory:
-    def list_images(self, _thread_id: str) -> list:
-        return []
 
 
 def test_verify_node_emits_tool_message_with_internal_tool_call_id(monkeypatch):
@@ -24,14 +18,6 @@ def test_verify_node_emits_tool_message_with_internal_tool_call_id(monkeypatch):
             "reason": "render is blank",
         }
 
-    monkeypatch.setattr(
-        "scene_agent.agent.nodes.verification.get_reference_image_memory",
-        lambda: _FakeReferenceMemory(),
-    )
-    monkeypatch.setattr(
-        "scene_agent.agent.nodes.verification.get_settings",
-        lambda: SimpleNamespace(reference_image_max_count=5),
-    )
     monkeypatch.setattr(
         "scene_agent.agent.nodes.verification.verify_render_with_references",
         fake_verify_render_with_references,
@@ -87,14 +73,6 @@ def test_verify_node_passes_todo_context_even_for_scene_observe(monkeypatch):
         }
 
     monkeypatch.setattr(
-        "scene_agent.agent.nodes.verification.get_reference_image_memory",
-        lambda: _FakeReferenceMemory(),
-    )
-    monkeypatch.setattr(
-        "scene_agent.agent.nodes.verification.get_settings",
-        lambda: SimpleNamespace(reference_image_max_count=5),
-    )
-    monkeypatch.setattr(
         "scene_agent.agent.nodes.verification.verify_render_with_references",
         fake_verify_render_with_references,
     )
@@ -138,14 +116,6 @@ def test_verify_node_passes_scene_context_to_verifier(monkeypatch):
             "reason": "scene context received",
         }
 
-    monkeypatch.setattr(
-        "scene_agent.agent.nodes.verification.get_reference_image_memory",
-        lambda: _FakeReferenceMemory(),
-    )
-    monkeypatch.setattr(
-        "scene_agent.agent.nodes.verification.get_settings",
-        lambda: SimpleNamespace(reference_image_max_count=5),
-    )
     monkeypatch.setattr(
         "scene_agent.agent.nodes.verification.verify_render_with_references",
         fake_verify_render_with_references,
@@ -206,14 +176,6 @@ def test_verify_node_auto_completes_todo_from_verification_assessment(monkeypatc
         }
 
     monkeypatch.setattr(
-        "scene_agent.agent.nodes.verification.get_reference_image_memory",
-        lambda: _FakeReferenceMemory(),
-    )
-    monkeypatch.setattr(
-        "scene_agent.agent.nodes.verification.get_settings",
-        lambda: SimpleNamespace(reference_image_max_count=5),
-    )
-    monkeypatch.setattr(
         "scene_agent.agent.nodes.verification.verify_render_with_references",
         fake_verify_render_with_references,
     )
@@ -256,6 +218,102 @@ def test_verify_node_auto_completes_todo_from_verification_assessment(monkeypatc
     payload = message.content if isinstance(message.content, dict) else ast.literal_eval(message.content)
     assert "todo_status_updates" in payload
     assert payload["todo_status_updates"][0]["matched_todo"] == "Import the low-poly dragon model"
+
+
+def test_verify_node_uses_request_scoped_reference_images_only(monkeypatch):
+    captured_kwargs: dict = {}
+
+    def fake_verify_render_with_references(**kwargs):
+        captured_kwargs.update(kwargs)
+        return {
+            "status": "match",
+            "reason": "request-scoped references received",
+        }
+
+    monkeypatch.setattr(
+        "scene_agent.agent.nodes.verification.verify_render_with_references",
+        fake_verify_render_with_references,
+    )
+
+    state = {
+        "thread_id": "thread-verify-request-images",
+        "messages": [HumanMessage(content="Match the uploaded chair reference.")],
+        "last_render_path": "/tmp/request_scoped_render.png",
+        "last_verified_path": None,
+        "reference_image_catalog": {
+            "chair_ref": {
+                "asset_id": "asset-chair",
+                "stored_path": "/tmp/chair.png",
+                "caption": "wooden chair",
+                "source_turn_at": "2026-01-01T00:00:00",
+                "created_at": "2026-01-01T00:00:00",
+                "last_used_at": None,
+                "use_count": 0,
+            },
+            "lamp_ref": {
+                "asset_id": "asset-lamp",
+                "stored_path": "/tmp/lamp.png",
+                "caption": "floor lamp",
+                "source_turn_at": "2026-01-01T00:00:00",
+                "created_at": "2026-01-01T00:00:00",
+                "last_used_at": None,
+                "use_count": 0,
+            },
+        },
+        "request_reference_image_keys": ["chair_ref"],
+    }
+
+    result = verify_node(state)
+
+    assert captured_kwargs["reference_paths"] == ["/tmp/chair.png"]
+    message = result["messages"][0]
+    payload = message.content if isinstance(message.content, dict) else ast.literal_eval(message.content)
+    assert payload["reference_count"] == 1
+    assert payload["reference_ids"] == ["asset-chair"]
+
+
+def test_verify_node_falls_back_to_prompt_when_no_request_reference_images(monkeypatch):
+    captured_kwargs: dict = {}
+
+    def fake_verify_render_with_references(**kwargs):
+        captured_kwargs.update(kwargs)
+        return {
+            "status": "match",
+            "reason": "text-only verification received",
+        }
+
+    monkeypatch.setattr(
+        "scene_agent.agent.nodes.verification.verify_render_with_references",
+        fake_verify_render_with_references,
+    )
+
+    state = {
+        "thread_id": "thread-verify-text-only",
+        "messages": [HumanMessage(content="Verify this render against the text prompt only.")],
+        "last_render_path": "/tmp/text_only_render.png",
+        "last_verified_path": None,
+        "reference_image_catalog": {
+            "chair_ref": {
+                "asset_id": "asset-chair",
+                "stored_path": "/tmp/chair.png",
+                "caption": "wooden chair",
+                "source_turn_at": "2026-01-01T00:00:00",
+                "created_at": "2026-01-01T00:00:00",
+                "last_used_at": None,
+                "use_count": 0,
+            }
+        },
+        "request_reference_image_keys": [],
+    }
+
+    result = verify_node(state)
+
+    assert captured_kwargs["reference_paths"] == []
+    assert captured_kwargs["user_request"] == "Verify this render against the text prompt only."
+    message = result["messages"][0]
+    payload = message.content if isinstance(message.content, dict) else ast.literal_eval(message.content)
+    assert payload["reference_count"] == 0
+    assert payload["reference_ids"] == []
 
 
 def test_verify_node_skips_when_render_already_verified(monkeypatch):

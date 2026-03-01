@@ -845,6 +845,7 @@ function App() {
       vlmDefaultModel ||
       vlmProviders[0]?.default_model ||
       undefined
+    let attachedImageIds: string[] | undefined
     const now = Date.now()
     const userMessage: Message = {
       id: `msg-${now}-user`,
@@ -922,6 +923,9 @@ function App() {
       }
       try {
         const uploaded = await uploadThreadImages(settings.backendUrl, threadId, files)
+        attachedImageIds = uploaded
+          .map((image) => image.id)
+          .filter((imageId): imageId is string => typeof imageId === 'string' && imageId.length > 0)
         const nextImages = uploaded.map((image, index) => ({
           ...image,
           previewUrl: files[index] ? URL.createObjectURL(files[index]) : undefined
@@ -1338,6 +1342,7 @@ function App() {
         message: text,
         threadId,
         enabledMcpTools,
+        attachedImageIds,
         vlmProvider: selectedProvider,
         vlmModel: selectedModel,
         signal: abortController.signal,

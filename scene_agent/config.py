@@ -179,6 +179,18 @@ class Settings(BaseSettings):
         default="/tmp/scene_agent_reference_images",
         description="Filesystem directory for short-term reference image storage"
     )
+    reference_image_helper_openai_model: str = Field(
+        default="gpt-4.1-mini",
+        description="Lightweight OpenAI model for reference-image naming and retrieval decisions"
+    )
+    reference_image_helper_gemini_model: str = Field(
+        default="gemini-2.5-flash",
+        description="Lightweight Gemini model for reference-image naming and retrieval decisions"
+    )
+    reference_image_helper_anthropic_model: str = Field(
+        default="claude-3-5-haiku-20241022",
+        description="Lightweight Anthropic model for reference-image naming and retrieval decisions"
+    )
     
     # 3D Asset Retrieval API
     retrieval_api_host: str = Field(
@@ -303,6 +315,15 @@ class Settings(BaseSettings):
             "gemini": self.gemini_api_key,
         }
         return provider_keys.get(provider_lower) or self.vlm_api_key
+
+    def get_reference_image_helper_model(self, provider: str) -> str:
+        provider_lower = provider.lower()
+        helper_models = {
+            "openai": self.reference_image_helper_openai_model,
+            "anthropic": self.reference_image_helper_anthropic_model,
+            "gemini": self.reference_image_helper_gemini_model,
+        }
+        return helper_models.get(provider_lower) or helper_models["openai"]
 
     def resolve_frontend_session_quota(self, client_id: str) -> int:
         default_quota = max(1, int(self.frontend_session_quota_default))

@@ -83,6 +83,30 @@ services:
       - tools
     restart: unless-stopped
 
+  samserver:
+    build:
+      context: ./SAMServer
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    container_name: ${SAMSERVER_CONTAINER:-samserver-http}
+    ports:
+      - "${SAMSERVER_HOST:-0.0.0.0}:${SAMSERVER_PORT:-8004}:${SAMSERVER_CONTAINER_PORT:-8003}"
+    environment:
+      HF_TOKEN: ${HUGGINGFACE_TOKEN}
+      MODEL_ROOT: /models
+      SAM_HTTP_JOB_ROOT: /var/lib/sam-http/jobs
+      SAM_INTERNAL_PORT: ${SAMSERVER_INTERNAL_SAM_PORT:-8001}
+      SAM3D_INTERNAL_PORT: ${SAMSERVER_INTERNAL_SAM3D_PORT:-8002}
+      SAM_HTTP_PORT: ${SAMSERVER_CONTAINER_PORT:-8003}
+    volumes:
+      - "${SAMSERVER_MODEL_DIR:-./cache/samserver/models}:/models"
+      - "${SAMSERVER_JOB_DIR:-./cache/samserver/jobs}:/var/lib/sam-http/jobs"
+    networks:
+      - tools
+    restart: unless-stopped
+
 networks:
   tools:
     name: ${DOCKER_NETWORK}

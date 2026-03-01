@@ -22,6 +22,7 @@ from scene_agent.blender.connection import BlenderConnection
 
 from scene_agent.agent.graph import create_agent_graph
 from scene_agent.agent.redis_checkpointer import get_graph_checkpointer
+from scene_agent.agent.state import AgentState
 from scene_agent.blender.session_manager import (
     SessionResourceError,
     SessionResourceReason,
@@ -522,6 +523,35 @@ def _resolve_thread_vlm_for_agent(thread_id: str) -> Dict[str, str]:
     return _resolve_vlm_selection(provider=state["provider"], model=state["model"])
 
 
+_MIGRATABLE_AGENT_STATE_KEYS = frozenset(getattr(AgentState, "__annotations__", {}).keys())
+
+
+def _sanitize_migrated_agent_state(values: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(values, dict):
+        return {}
+    if _MIGRATABLE_AGENT_STATE_KEYS:
+        sanitized = {
+            key: value
+            for key, value in values.items()
+            if key in _MIGRATABLE_AGENT_STATE_KEYS
+        }
+    else:
+        sanitized = dict(values)
+    if "attached_image_ids" in sanitized and not isinstance(sanitized["attached_image_ids"], list):
+        sanitized.pop("attached_image_ids", None)
+    if "request_reference_image_keys" in sanitized and not isinstance(
+        sanitized["request_reference_image_keys"],
+        list,
+    ):
+        sanitized["request_reference_image_keys"] = []
+    if "reference_image_catalog" in sanitized and not isinstance(
+        sanitized["reference_image_catalog"],
+        dict,
+    ):
+        sanitized["reference_image_catalog"] = {}
+    return sanitized
+
+
 async def _migrate_agent_state_if_possible(
     *,
     thread_id: str,
@@ -543,7 +573,17 @@ async def _migrate_agent_state_if_possible(
     values = getattr(snapshot, "values", None)
     if not isinstance(values, dict) or len(values) == 0:
         return
-    await to_graph.aupdate_state(config, values)
+    sanitized_values = _sanitize_migrated_agent_state(values)
+    if not sanitized_values:
+        return
+    try:
+        await to_graph.aupdate_state(config, sanitized_values)
+    except Exception as exc:
+        log_event(
+            "warning",
+            "vlm_switch_state_migration_failed",
+            {"thread_id": thread_id, "error": str(exc)},
+        )
 
 
 async def _create_agent_graph_for_runtime(
@@ -1017,6 +1057,7 @@ class ChatRequest(BaseModel):
     vlm_provider: str | None = None
     vlm_model: str | None = None
     enabled_mcp_tools: list[str] | None = None
+    attached_image_ids: list[str] | None = None
     task_id: str | None = None
     workflow_topology: str | None = None
     memory_profile: str | None = None

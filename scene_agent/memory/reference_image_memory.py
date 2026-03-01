@@ -69,6 +69,21 @@ class ReferenceImageMemory:
                 assets.append(parsed)
         return assets
 
+    def get_assets_by_ids(self, thread_id: str, asset_ids: Iterable[str]) -> list[ImageAsset]:
+        ordered_ids: list[str] = []
+        seen: set[str] = set()
+        for raw_asset_id in asset_ids:
+            asset_id = str(raw_asset_id).strip()
+            if not asset_id or asset_id in seen:
+                continue
+            seen.add(asset_id)
+            ordered_ids.append(asset_id)
+        if not ordered_ids:
+            return []
+
+        assets_by_id = {asset.id: asset for asset in self.list_assets(thread_id)}
+        return [assets_by_id[asset_id] for asset_id in ordered_ids if asset_id in assets_by_id]
+
     def list_bindings(self, thread_id: str, task_id: str | None = None) -> list[ImageBinding]:
         rows = self._store.list_bindings(thread_id, task_id)
         bindings: list[ImageBinding] = []

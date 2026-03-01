@@ -1,6 +1,6 @@
 # 当前后端 Agent Workflow 架构（Router / Single / Dual）
 
-更新时间：2026-02-27
+更新时间：2026-02-28
 
 本文基于当前后端实现代码核对，重点覆盖：
 - API Router 到 Graph 执行入口
@@ -42,13 +42,13 @@ flowchart LR
     I --> J
 
     B --> K["resolve_enabled_tool_names"]
-    K --> L["initial state: messages, enabled_tool_names, task_id, workflow_topology_request, memory_profile_request"]
+    K --> L["initial state: messages, enabled_tool_names, attached_image_ids, task_id, workflow_topology_request, memory_profile_request"]
     J --> M["agent.ainvoke / agent.astream"]
     L --> M
 ```
 
 关键点：
-- 请求级可传 `workflow_topology`、`memory_profile`，在 `routes_chat.py` 透传为 `workflow_topology_request`、`memory_profile_request`。
+- 请求级可传 `workflow_topology`、`memory_profile`、`attached_image_ids`，在 `routes_chat.py` 透传为 `workflow_topology_request`、`memory_profile_request`、`attached_image_ids`。
 - `get_agent(thread_id)` 按线程缓存 graph，并在 provider/model 变化时重建并迁移状态。
 - checkpointer 优先 Redis，不可用时回退 `InMemorySaver`（`redis_checkpointer.py`）。
 
@@ -70,15 +70,17 @@ flowchart TD
     G -->|yes| H["clarification_node"]
     H --> I["END (clarification_required)"]
 
-    G -->|no| J{"plan_mode + dual_agent?"}
-    J -->|yes| K["builder_agent"]
-    J -->|no| L["agent"]
+    G -->|no| J["prepare_reference_context_node"]
+    J --> K{"plan_mode + dual_agent?"}
+    K -->|yes| L["builder_agent"]
+    K -->|no| M["agent"]
 ```
 
 关键点：
 - `dual_agent` 只在 `plan_mode` 生效，非 `plan_mode` 强制降级 `single_agent`。
 - `auto` topology 由 `ENABLE_PLANMODE_DUAL_AGENT` 控制。
 - Router 同时初始化预算与角色状态：`max_request_agent_turns`、`max_request_tool_batches`、`active_role` 等。
+- `prepare_reference_context_node` 只在每次用户请求开头运行一次：若本轮携带 `attached_image_ids`，本轮附件即成为该请求唯一的参考图集合；否则由轻量 helper model 从 `AgentState.reference_image_catalog` 中按需选择至多 1 张。
 
 ---
 
@@ -86,34 +88,35 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["agent"] --> B["post_agent"]
-    B --> C{"AIMessage has tool_calls?"}
+    A["prepare_reference_context"] --> B["agent"]
+    B --> C["post_agent"]
+    C --> D{"AIMessage has tool_calls?"}
 
-    C -->|yes| D["tools"]
-    D --> E["update_memory"]
-    E --> F["scene_observe"]
-    F --> G["verify"]
-    G --> H["quality_evaluator"]
+    D -->|yes| E["tools"]
+    E --> F["update_memory"]
+    F --> G["scene_observe"]
+    G --> H["verify"]
+    H --> I["quality_evaluator"]
 
-    C -->|no| H
+    D -->|no| I
 
-    H --> I["progress_evaluator"]
-    I --> J["budget_evaluator"]
-    J --> K["transition_resolver"]
+    I --> J["progress_evaluator"]
+    J --> K["budget_evaluator"]
+    K --> L["transition_resolver"]
 
-    K -->|agent| A
-    K -->|checkpoint_finalize| L["checkpoint_finalize"]
+    L -->|agent| B
+    L -->|checkpoint_finalize| M["checkpoint_finalize"]
 
-    L --> M{"task_mode == plan_mode?"}
-    M -->|no| Q["END"]
-    M -->|yes| N{"todo_check_gate.should_run?"}
-    N -->|yes| O["todo_check"]
-    N -->|no| P["finalize"]
+    M --> N{"task_mode == plan_mode?"}
+    N -->|no| R["END"]
+    N -->|yes| O{"todo_check_gate.should_run?"}
+    O -->|yes| P["todo_check"]
+    O -->|no| Q["finalize"]
 
-    O --> R{"status"}
-    R -->|completed/not_applicable| P
-    R -->|continue/blocked| A
-    P --> Q
+    P --> S{"status"}
+    S -->|completed/not_applicable| Q
+    S -->|continue/blocked| B
+    Q --> R
 ```
 
 关键点：
@@ -121,6 +124,7 @@ flowchart TD
 - `verify` 的 catastrophic 只产出信号，不再自动注入恢复工具调用。
 - `scene_observe` 仅在最近工具批次包含 scene mutation 时生效。
 - 仅 `plan_mode` 会进入 `finalize` 节点；`conversation_mode` / `single_action_mode` 在 `checkpoint_finalize` 后直接 `END`。
+- `agent` 提示词注图不再按线程全量注入；只读取 `prepare_reference_context_node` 产出的 `request_reference_image_keys`。
 
 ---
 
@@ -128,40 +132,42 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["builder_agent"] --> B["post_builder"]
-    B --> C{"builder has tool_calls?"}
+    A["prepare_reference_context"] --> B["builder_agent"]
+    B --> C["post_builder"]
+    C --> D{"builder has tool_calls?"}
 
-    C -->|yes| D["tools -> update_memory -> scene_observe -> verify"]
-    D --> E["quality_evaluator"]
+    D -->|yes| E["tools -> update_memory -> scene_observe -> verify"]
+    E --> F["quality_evaluator"]
 
-    C -->|no| F["verifier_camera_agent"]
-    F --> G["post_verifier"]
-    G --> H{"verifier has tool_calls?"}
+    D -->|no| G["verifier_camera_agent"]
+    G --> H["post_verifier"]
+    H --> I{"verifier has tool_calls?"}
 
-    H -->|yes| D
-    H -->|no| I["verifier_feedback"]
-    I --> E
+    I -->|yes| E
+    I -->|no| J["verifier_feedback"]
+    J --> F
 
-    E --> J["progress_evaluator"]
-    J --> K["budget_evaluator"]
-    K --> L["transition_resolver"]
+    F --> K["progress_evaluator"]
+    K --> L["budget_evaluator"]
+    L --> M["transition_resolver"]
 
-    L -->|builder_agent| A
-    L -->|planner_refresh| M["planner_refresh"]
-    M --> A
-    L -->|checkpoint_finalize| N["checkpoint_finalize"]
+    M -->|builder_agent| B
+    M -->|planner_refresh| N["planner_refresh"]
+    N --> B
+    M -->|checkpoint_finalize| O["checkpoint_finalize"]
 
-    N --> O{"todo_check_gate.should_run?"}
-    O -->|yes| P["todo_check"]
-    O -->|no| Q["finalize"]
-    P --> R{"status"}
-    R -->|completed/not_applicable| Q
-    R -->|continue/blocked| A
-    Q --> S["END"]
+    O --> P{"todo_check_gate.should_run?"}
+    P -->|yes| Q["todo_check"]
+    P -->|no| R["finalize"]
+    Q --> S{"status"}
+    S -->|completed/not_applicable| R
+    S -->|continue/blocked| B
+    R --> T["END"]
 ```
 
 关键点：
 - `verifier_camera_agent` 是可调用相机/渲染工具的 agent，不是纯文本评审器。
+- `verifier_camera_agent` 现在与 `builder_agent` / `agent` 共用同一套请求级参考图（来自 `request_reference_image_keys`），不再排除上传参考图。
 - `builder` 与 `verifier` 工具域由 `tool_policy.py` 控制：
   - `builder_default` 默认排除相机/渲染工具域。
   - `verifier_default` 仅允许相机/渲染观察工具域。
@@ -180,18 +186,20 @@ flowchart TD
 flowchart LR
     A["POST /threads/{thread_id}/images"] --> B["ImageAssetMemory.add_assets"]
     C["GET /threads/{thread_id}/images"] --> D["ImageAssetMemory.list_assets"]
-
-    E["verify_node"] --> F["resolve_verification_assets"]
-    F --> G["ensure_auto_bindings(task_id, preferred_role_by_mode)"]
-    G --> H["resolve_assets(task_id + global, role_filter)"]
-    H --> I["verify_render_with_references"]
-    I --> J["ToolMessage(name=verification)"]
+    E["POST /chat(/stream) + attached_image_ids"] --> F["prepare_reference_context_node"]
+    F --> G["AgentState.reference_image_catalog + request_reference_image_keys"]
+    G --> H["agent / builder / verifier_camera_agent prompt injection"]
+    G --> I["verify_node -> resolve_verification_assets"]
+    I --> J["verify_render_with_references"]
+    J --> K["ToolMessage(name=verification)"]
 ```
 
 关键点：
 - 对外公开接口只有 `/images`（`reference-images`、`image-bindings` 已从 API 层移除）。
 - 内部仍保留 role 绑定模型：`question_image/object_reference/scene_reference/style_reference/verification_reference`。
-- `verify_node` 会按 `task_mode` 自动选择/补齐绑定角色，再做验证。
+- 上传图片的二进制与元数据仍由 `ImageAssetMemory` 管理；`AgentState` 只保存命名后的轻量 catalog（`asset_id/stored_path/caption/use_count` 等）。
+- `attached_image_ids` 明确标识“本轮附件”；有附件时，本轮附件就是该请求唯一参考图集合。
+- 本轮无附件时，不再自动把线程历史图片全部注入；改由 helper model 从 `reference_image_catalog` 中按需选择至多 1 张，并复用于 `agent` / `verifier_camera_agent` / `verify_node`。
 
 ---
 

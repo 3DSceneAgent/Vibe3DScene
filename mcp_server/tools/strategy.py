@@ -40,6 +40,9 @@ def asset_creation_strategy_text(
     rodin_ready = runtime.is_rodin_tool_enabled() and bool(runtime.get_rodin_api_key())
     hunyuan_ready = runtime.is_hunyuan_tool_enabled()
     retrieval_ready = runtime.is_retrieval_tool_enabled() and service_status.get("retrieval", False)
+    sam_reconstruct_ready = runtime.is_sam_reconstruct_tool_enabled() and service_status.get(
+        "sam_reconstruct", False
+    )
     strategy_text = build_asset_creation_strategy_text(
         sketchfab_ready=sketchfab_ready,
         infinigen_ready=infinigen_ready,
@@ -47,6 +50,7 @@ def asset_creation_strategy_text(
         rodin_ready=rodin_ready,
         hunyuan_ready=hunyuan_ready,
         retrieval_ready=retrieval_ready,
+        sam_reconstruct_ready=sam_reconstruct_ready,
         undo_ready=True,
         clear_scene_ready=True,
     )

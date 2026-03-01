@@ -28,6 +28,8 @@ def _configure_runtime(
     trellis2: bool = False,
     retrieval: bool = False,
     infinigen: bool = False,
+    sam_reconstruct: bool = False,
+    sam_reconstruct_service: bool = True,
     sketchfab: bool = False,
     sketchfab_key: str = "",
 ) -> None:
@@ -37,6 +39,7 @@ def _configure_runtime(
         "ENABLE_TRELLIS2": trellis2,
         "ENABLE_RETRIEVAL": retrieval,
         "ENABLE_INFINIGEN": infinigen,
+        "ENABLE_SAM_RECONSTRUCT": sam_reconstruct,
         "ENABLE_SKETCHFAB": sketchfab,
     }
     monkeypatch.setattr(tool_registry.runtime, "get_blender_mode", lambda: mode)
@@ -50,13 +53,21 @@ def _configure_runtime(
     monkeypatch.setattr(tool_registry.runtime, "is_trellis2_tool_enabled", lambda: trellis2)
     monkeypatch.setattr(tool_registry.runtime, "is_retrieval_tool_enabled", lambda: retrieval)
     monkeypatch.setattr(tool_registry.runtime, "is_infinigen_tool_enabled", lambda: infinigen)
+    monkeypatch.setattr(
+        tool_registry.runtime, "is_sam_reconstruct_tool_enabled", lambda: sam_reconstruct
+    )
     monkeypatch.setattr(tool_registry.runtime, "is_sketchfab_tool_enabled", lambda: sketchfab)
     monkeypatch.setattr(tool_registry.runtime, "get_rodin_api_key", lambda: rodin_key)
     monkeypatch.setattr(tool_registry.runtime, "get_sketchfab_api_key", lambda: sketchfab_key)
     monkeypatch.setattr(
         tool_registry.runtime,
         "probe_conditional_services",
-        lambda _logger: {"trellis2": True, "retrieval": True, "pcg_integrator": True},
+        lambda _logger: {
+            "trellis2": True,
+            "retrieval": True,
+            "pcg_integrator": True,
+            "sam_reconstruct": sam_reconstruct_service,
+        },
     )
 
 
@@ -159,3 +170,23 @@ def test_register_mcp_tools_disables_viewport_screenshot_in_headless(monkeypatch
     assert "camera_act" in enabled
     assert "observe_scene_global" in enabled
     assert "undo_last_snapshot" in enabled
+
+
+def test_register_mcp_tools_enables_sam_reconstruct_when_ready(monkeypatch):
+    _reset_registry_state(monkeypatch)
+    _configure_runtime(monkeypatch, sam_reconstruct=True, sam_reconstruct_service=True)
+    mcp = FakeMCP()
+
+    enabled = tool_registry.register_mcp_tools(mcp, logging.getLogger(__name__))
+
+    assert "reconstruct_full_scene" in enabled
+
+
+def test_register_mcp_tools_skips_sam_reconstruct_when_service_unhealthy(monkeypatch):
+    _reset_registry_state(monkeypatch)
+    _configure_runtime(monkeypatch, sam_reconstruct=True, sam_reconstruct_service=False)
+    mcp = FakeMCP()
+
+    enabled = tool_registry.register_mcp_tools(mcp, logging.getLogger(__name__))
+
+    assert "reconstruct_full_scene" not in enabled

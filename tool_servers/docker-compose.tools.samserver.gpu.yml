@@ -1,0 +1,5 @@
+services:
+  samserver:
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${SAMSERVER_VISIBLE_DEVICES:-all}

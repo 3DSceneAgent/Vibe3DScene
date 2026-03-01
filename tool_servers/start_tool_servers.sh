@@ -6,6 +6,7 @@ ENV_FILE="${SCRIPT_DIR}/.env"
 ENV_EXAMPLE="${SCRIPT_DIR}/.env.example"
 COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.tools.yml"
 GPU_COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.tools.gpu.yml"
+SAMSERVER_GPU_COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.tools.samserver.gpu.yml"
 PROXY_COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.tools.proxy.generated.yml"
 
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -42,12 +43,16 @@ fi
 : "${ENABLE_TRELLIS2:=true}"
 : "${ENABLE_RETRIEVAL:=true}"
 : "${ENABLE_PCG:=true}"
+: "${ENABLE_SAMSERVER:=false}"
 : "${WAIT_FOR_HEALTH_TIMEOUT_SECONDS:=300}"
 : "${TRELLIS2_ENABLE_GPU:=true}"
+: "${SAMSERVER_ENABLE_GPU:=true}"
 : "${TRELLIS2_GPU:=all}"
 : "${HUGGINGFACE_CACHE_DIR:=./cache/huggingface/hub}"
 : "${RETRIEVAL_CACHE_DIR:=./cache/asset-retrieval}"
 : "${POSTGRES_DATA_DIR:=./cache/postgres}"
+: "${SAMSERVER_MODEL_DIR:=./cache/samserver/models}"
+: "${SAMSERVER_JOB_DIR:=./cache/samserver/jobs}"
 
 resolve_healthcheck_host() {
   local host="$1"
@@ -151,24 +156,35 @@ COMPOSE_ARGS=(-f "$COMPOSE_FILE")
 if [[ "$TRELLIS2_ENABLE_GPU" == "true" ]]; then
   COMPOSE_ARGS+=( -f "$GPU_COMPOSE_FILE" )
 fi
+if [[ "$SAMSERVER_ENABLE_GPU" == "true" ]]; then
+  COMPOSE_ARGS+=( -f "$SAMSERVER_GPU_COMPOSE_FILE" )
+fi
 if [[ "$USE_PROXY_OVERRIDE" == "true" ]]; then
   COMPOSE_ARGS+=( -f "$PROXY_COMPOSE_FILE" )
 fi
 
 SERVICES=()
+PULL_SERVICES=()
 if [[ "$ENABLE_TRELLIS2" == "true" ]]; then
   SERVICES+=(trellis2)
+  PULL_SERVICES+=(trellis2)
 fi
 if [[ "$ENABLE_RETRIEVAL" == "true" ]]; then
   SERVICES+=(postgres)
   SERVICES+=(retrieval)
+  PULL_SERVICES+=(postgres)
+  PULL_SERVICES+=(retrieval)
 fi
 if [[ "$ENABLE_PCG" == "true" ]]; then
   SERVICES+=(pcg)
+  PULL_SERVICES+=(pcg)
+fi
+if [[ "$ENABLE_SAMSERVER" == "true" ]]; then
+  SERVICES+=(samserver)
 fi
 
 if [[ ${#SERVICES[@]} -eq 0 ]]; then
-  echo "No services enabled. Set at least one of ENABLE_TRELLIS2/ENABLE_RETRIEVAL/ENABLE_PCG=true." >&2
+  echo "No services enabled. Set at least one service flag to true." >&2
   exit 1
 fi
 
@@ -183,9 +199,19 @@ if [[ "$ENABLE_RETRIEVAL" == "true" ]]; then
   mkdir -p "$POSTGRES_DATA_DIR"
 fi
 
-if [[ "$TOOL_PULL_IMAGES" == "true" ]]; then
-  echo "Pulling images from Docker Hub for: ${SERVICES[*]}"
-  "${COMPOSE_BIN[@]}" "${COMPOSE_ARGS[@]}" pull "${SERVICES[@]}"
+if [[ "$ENABLE_SAMSERVER" == "true" ]]; then
+  mkdir -p "$SAMSERVER_MODEL_DIR"
+  mkdir -p "$SAMSERVER_JOB_DIR"
+fi
+
+if [[ "$TOOL_PULL_IMAGES" == "true" && ${#PULL_SERVICES[@]} -gt 0 ]]; then
+  echo "Pulling images from Docker Hub for: ${PULL_SERVICES[*]}"
+  "${COMPOSE_BIN[@]}" "${COMPOSE_ARGS[@]}" pull "${PULL_SERVICES[@]}"
+fi
+
+if [[ "$ENABLE_SAMSERVER" == "true" ]]; then
+  echo "Building local SAMServer image"
+  "${COMPOSE_BIN[@]}" "${COMPOSE_ARGS[@]}" build samserver
 fi
 
 UP_ARGS=(up -d)
@@ -216,6 +242,12 @@ if [[ "$ENABLE_PCG" == "true" ]]; then
   wait_for_http_health "PCGIntegrator3D" "$pcg_url" "$HEALTH_DEADLINE" || health_failed=1
 fi
 
+if [[ "$ENABLE_SAMSERVER" == "true" ]]; then
+  samserver_host="$(resolve_healthcheck_host "${SAMSERVER_HOST:-0.0.0.0}")"
+  samserver_url="http://${samserver_host}:${SAMSERVER_PORT:-8004}/healthz"
+  wait_for_http_health "SAMServer" "$samserver_url" "$HEALTH_DEADLINE" || health_failed=1
+fi
+
 if [[ "$health_failed" -ne 0 ]]; then
   echo "One or more services did not become healthy within ${WAIT_FOR_HEALTH_TIMEOUT_SECONDS}s." >&2
   exit 1
@@ -231,6 +263,9 @@ if [[ "$ENABLE_RETRIEVAL" == "true" ]]; then
 fi
 if [[ "$ENABLE_PCG" == "true" ]]; then
   echo "PCGIntegrator:  http://${PCG_HOST:-0.0.0.0}:${PCG_PORT:-8003}/health"
+fi
+if [[ "$ENABLE_SAMSERVER" == "true" ]]; then
+  echo "SAMServer:      http://${SAMSERVER_HOST:-0.0.0.0}:${SAMSERVER_PORT:-8004}/healthz"
 fi
 echo ""
 echo "Use ${SCRIPT_DIR}/stop_tool_servers.sh to stop all services."

@@ -34,8 +34,10 @@ from .shared import (
 )
 from .shared import (
     extract_render_path,
+    prepare_reference_context_node,
     latest_human_message,
     resolve_render_message_to_data_url,
+    sync_reference_catalog_node,
     get_reference_image_memory,
     get_settings,
 )
@@ -69,6 +71,8 @@ __all__ = [
     "extract_todo_updates",
     "RENDER_VISION_MESSAGE_ID",
     "SCENE_OBSERVE_MESSAGE_ID",
+    "prepare_reference_context_node",
+    "sync_reference_catalog_node",
     "latest_human_message",
     "extract_render_path",
     "resolve_render_message_to_data_url",

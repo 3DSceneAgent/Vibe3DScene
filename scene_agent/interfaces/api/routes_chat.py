@@ -39,7 +39,14 @@ async def get_agent(thread_id: str | None = None):
 
 
 router = APIRouter()
-_INTERNAL_NON_USER_MESSAGE_NODES = frozenset({"verify", "route_mode"})
+_INTERNAL_NON_USER_MESSAGE_NODES = frozenset(
+    {
+        "verify",
+        "route_mode",
+        "sync_reference_catalog",
+        "prepare_reference_context",
+    }
+)
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -78,6 +85,7 @@ async def chat(request: ChatRequest, request_http: Request, response: Response):
                 "messages": [HumanMessage(content=request.message)],
                 "thread_id": request.thread_id,
                 "enabled_tool_names": enabled_tool_names,
+                "attached_image_ids": request.attached_image_ids,
                 "task_id": request.task_id,
                 "workflow_topology_request": request.workflow_topology,
                 "memory_profile_request": request.memory_profile,
@@ -176,6 +184,7 @@ async def chat_stream(request: ChatRequest, request_http: Request):
                     "messages": [HumanMessage(content=request.message)],
                     "thread_id": request.thread_id,
                     "enabled_tool_names": enabled_tool_names,
+                    "attached_image_ids": request.attached_image_ids,
                     "task_id": request.task_id,
                     "workflow_topology_request": request.workflow_topology,
                     "memory_profile_request": request.memory_profile,

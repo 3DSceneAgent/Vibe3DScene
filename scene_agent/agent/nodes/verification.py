@@ -92,7 +92,20 @@ def verify_node(
     todo_context = active_todo_context(state)
 
     reference_images = resolve_verification_assets(state)
-    reference_paths = [image.stored_path for image in reference_images if isinstance(image.stored_path, str)]
+    reference_paths = [
+        image["stored_path"]
+        for image in reference_images
+        if isinstance(image, dict)
+        and isinstance(image.get("stored_path"), str)
+        and image.get("stored_path")
+    ]
+    reference_ids = [
+        image["asset_id"]
+        for image in reference_images
+        if isinstance(image, dict)
+        and isinstance(image.get("asset_id"), str)
+        and image.get("asset_id")
+    ]
 
     try:
         verification = verify_render_with_references(
@@ -114,7 +127,7 @@ def verify_node(
     verification.update(
         {
             "reference_count": len(reference_paths),
-            "reference_ids": [image.id for image in reference_images],
+            "reference_ids": reference_ids,
             "render_path": render_path,
             "render_source": render_source,
             "todo_context": todo_context,

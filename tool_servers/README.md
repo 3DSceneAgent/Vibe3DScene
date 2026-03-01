@@ -68,6 +68,53 @@ cd tool_servers
 ./stop_tool_servers.sh
 ```
 
+## 3.1) Local shell mode (non-Docker)
+
+This is an additional option. The existing Docker scripts stay unchanged.
+
+```bash
+cd tool_servers
+cp .env.example .env
+```
+
+Configure the local shell toggles in `.env`:
+
+```bash
+ENABLE_TOOL_SERVER_TRELLIS2=true
+ENABLE_TOOL_SERVER_RETRIEVAL=false
+ENABLE_TOOL_SERVER_PCG=true
+ENABLE_TOOL_SERVER_SAM=false
+```
+
+Start enabled local services:
+
+```bash
+cd tool_servers
+./manage_tool_servers_local.sh start
+```
+
+Check status:
+
+```bash
+cd tool_servers
+./manage_tool_servers_local.sh status
+```
+
+Stop managed local services:
+
+```bash
+cd tool_servers
+./manage_tool_servers_local.sh stop
+```
+
+Notes:
+
+- `ENABLE_TOOL_SERVER_*` is separate from the Docker `ENABLE_*` flags.
+- Local shell mode starts processes with `conda run -n <env>`.
+- `TOOL_SERVER_*_CONDA_ENV` lets you pick the conda env for each service.
+- AssetRetrieval3D local shell mode does not start PostgreSQL; point `TOOL_SERVER_RETRIEVAL_DB_HOST` and `TOOL_SERVER_RETRIEVAL_DB_PORT` at an existing database.
+- Runtime logs and pid files are written under `tool_servers/.run/` by default.
+
 ## 4) Build & push images (for the two newly dockerized services)
 
 ### PCGIntegrator3D

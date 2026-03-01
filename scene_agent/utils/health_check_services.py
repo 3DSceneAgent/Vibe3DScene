@@ -9,6 +9,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 import requests
 
@@ -21,6 +22,8 @@ class ServiceSpec:
     port_env_key: str
     default_port: int
     path: str
+    base_url_env_key: str | None = None
+    default_base_url: str | None = None
     expected_fields: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -83,6 +86,17 @@ class ServiceHealthChecker:
                 path="/health",
                 expected_fields={"status": "healthy", "service": "PCGIntegrator3D"},
             ),
+            "sam_reconstruct": ServiceSpec(
+                name="sam_reconstruct",
+                label="SAMServer",
+                host_env_key="",
+                port_env_key="",
+                default_port=8004,
+                path="/healthz",
+                base_url_env_key="SAM_HTTP_BASE_URL",
+                default_base_url="http://127.0.0.1:8004",
+                expected_fields={"status": "ok", "sam_service": True, "sam3d_service": True},
+            ),
         }
 
     @property
@@ -103,6 +117,44 @@ class ServiceHealthChecker:
         except ValueError:
             return spec.default_port
 
+    def _resolve_url(self, spec: ServiceSpec) -> str:
+        if spec.base_url_env_key:
+            base_url = (
+                os.getenv(spec.base_url_env_key, spec.default_base_url or "").strip()
+                or spec.default_base_url
+                or ""
+            )
+            if base_url:
+                effective_base_url = base_url
+                if self.host_override:
+                    effective_base_url = self._apply_host_override_to_base_url(base_url)
+                return f"{effective_base_url.rstrip('/')}{spec.path}"
+        host = self._resolve_host(spec)
+        port = self._resolve_port(spec)
+        return f"http://{host}:{port}{spec.path}"
+
+    def _apply_host_override_to_base_url(self, base_url: str) -> str:
+        parsed = urlsplit(base_url)
+        if not parsed.scheme or not parsed.netloc:
+            return base_url
+
+        hostname = parsed.hostname
+        if not hostname:
+            return base_url
+
+        new_netloc = self.host_override or hostname
+        if parsed.port is not None:
+            new_netloc = f"{new_netloc}:{parsed.port}"
+
+        updated = SplitResult(
+            scheme=parsed.scheme,
+            netloc=new_netloc,
+            path=parsed.path,
+            query=parsed.query,
+            fragment=parsed.fragment,
+        )
+        return urlunsplit(updated)
+
     def _check_expected_fields(
         self, payload: Dict[str, Any], expected_fields: Dict[str, Any]
     ) -> list[str]:
@@ -119,9 +171,7 @@ class ServiceHealthChecker:
             )
 
         spec = self._specs[service_name]
-        host = self._resolve_host(spec)
-        port = self._resolve_port(spec)
-        url = f"http://{host}:{port}{spec.path}"
+        url = self._resolve_url(spec)
 
         try:
             response = self._session.get(url, timeout=self.timeout)
@@ -208,7 +258,7 @@ def main() -> int:
     parser.add_argument(
         "--services",
         default=None,
-        help="Comma-separated service names (trellis2,retrieval,pcg_integrator).",
+        help="Comma-separated service names (trellis2,retrieval,pcg_integrator,sam_reconstruct).",
     )
     parser.add_argument(
         "--json",

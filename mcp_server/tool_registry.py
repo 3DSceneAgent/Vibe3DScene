@@ -10,6 +10,7 @@ from mcp_server.tools.asset_gen.rodin import (
     import_generated_asset,
     poll_rodin_job_status,
 )
+from mcp_server.tools.asset_gen.sam_reconstruct import reconstruct_full_scene
 from mcp_server.tools.asset_gen.trellis2 import generate_trellis2_model
 from mcp_server.tools.asset_retrieval.objaverse_retrieval import (
     import_retrieved_asset,
@@ -146,6 +147,12 @@ def register_mcp_tools(mcp, logger) -> list[str]:
             "pcg_integrator",
             runtime.is_infinigen_tool_enabled,
             "requires ENABLE_INFINIGEN=true",
+        ),
+        (
+            reconstruct_full_scene,
+            "sam_reconstruct",
+            runtime.is_sam_reconstruct_tool_enabled,
+            "requires ENABLE_SAM_RECONSTRUCT=true",
         ),
         (
             generate_trellis2_model,

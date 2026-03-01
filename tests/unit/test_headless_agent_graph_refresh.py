@@ -107,6 +107,17 @@ def test_get_agent_rebuilds_graph_and_migrates_state_on_vlm_switch(monkeypatch):
         "messages": ["m1", "m2"],
         "todos": [{"id": "todo-1", "description": "demo", "status": "pending"}],
         "thread_id": thread_id,
+        "attached_image_ids": "asset-1",
+        "request_reference_image_keys": "chair_ref",
+        "reference_image_catalog": [],
+        "unknown_runtime_field": "drop-me",
+    }
+    migrated_state = {
+        "messages": ["m1", "m2"],
+        "todos": [{"id": "todo-1", "description": "demo", "status": "pending"}],
+        "thread_id": thread_id,
+        "request_reference_image_keys": [],
+        "reference_image_catalog": {},
     }
 
     async def fake_create_graph(*, session_id=None, provider=None, model=None, api_key=None):
@@ -139,8 +150,8 @@ def test_get_agent_rebuilds_graph_and_migrates_state_on_vlm_switch(monkeypatch):
     assert len(created) == 2
     assert second_graph is created[1]
     assert second_graph is not first_graph
-    assert second_graph._state == initial_state
-    assert second_graph.updated == [initial_state]
+    assert second_graph._state == migrated_state
+    assert second_graph.updated == [migrated_state]
 
     _reset_runtime_state(thread_id)
     manager.remove(thread_id)
