@@ -13,9 +13,24 @@ class TodoItem(TypedDict):
     """Individual todo item for task tracking"""
     id: str
     description: str
-    status: str  # "pending" | "in_progress" | "completed" | "failed"
+    status: str  # "pending" | "in_progress" | "completed" | "failed" | "superseded"
     created_at: str
     completed_at: str | None
+
+
+class TodoVersion(TypedDict):
+    """Append-only todo history entry."""
+    event_id: str
+    todo_id: str
+    version: int
+    prev_event_id: str | None
+    title: str
+    status: str  # "pending" | "in_progress" | "completed" | "failed" | "superseded"
+    reason: str
+    source: str  # "agent_commit" | "verification" | "system"
+    created_at: str
+    created_by_role: str  # "general" | "builder" | "verifier" | "system"
+    render_path: str | None
 
 
 class ReferenceImageCatalogEntry(TypedDict):
@@ -89,6 +104,10 @@ class AgentState(TypedDict):
         scene_objects: Dict of objects in the scene {name: {position, size, type, bbox}}
         persistent_cameras: List of camera names seen in scene-level observe
         todos: List of todo items for task tracking
+        todo_versions: Append-only todo history entries (source of truth)
+        todo_protocol_version: Active todo protocol version
+        active_todo_id: Current primary todo in focus
+        pending_todo_updates: Parsed internal todo update requests awaiting commit
         thread_id: Conversation/session identifier
         enabled_tool_names: Optional runtime MCP tool allow-list for this request
         task_id: Optional task identifier for image-role bindings
@@ -126,15 +145,22 @@ class AgentState(TypedDict):
         max_plan_replans: Max allowed plan refresh attempts in this request run
         verification_mismatch_streak: Consecutive mismatch/catastrophic verification count
         quality_eval: Latest quality evaluator output
+        convergence_eval: Latest convergence evaluator output
+        recent_verification_signatures: Recent structured verification signatures
+        convergence_intervention_count: Number of convergence guidance injections in current request
         progress_eval: Latest progress evaluator output
         budget_eval: Latest budget evaluator output
         transition_next: Cached deterministic transition decision
         transition_reason: Human-readable transition reason for observability
-        todo_check_gate: Runtime gate decision for whether to run todo_check
-        todo_check: Latest todo_check result payload
-        last_todo_check_round: Tool round index when todo_check last ran
-        last_todo_snapshot: Last status snapshot used for stagnation detection
-        stagnation_count: Consecutive todo_check rounds without todo status change
+        context_summary: Latest projected historical summary for prompt compaction
+        context_summary_message_count: Number of omitted messages summarized in context_summary
+        context_compaction_count: Number of prompt compactions performed
+        finalize_guard_gate: Latest checkpoint-finalize gate decision payload
+        finalize_guard: Latest finalize guard snapshot payload
+        last_finalize_guard_round: Tool round index when the finalize guard last captured state
+        last_finalize_guard_todo_snapshot: Last todo snapshot captured by the finalize guard
+        stagnation_count: Legacy finalize guard field retained for observability/compatibility;
+            single-agent stop control now relies on budget + convergence instead
         verify_forced_recovery: Whether verify node forced hard-recovery tool calls
         catastrophic_recovery_attempts: Consecutive catastrophic hard-recovery attempts
         workflow: Final workflow metadata from finalize node
@@ -184,22 +210,33 @@ class AgentState(TypedDict):
     max_plan_replans: NotRequired[int]
     verification_mismatch_streak: NotRequired[int]
     quality_eval: NotRequired[dict[str, Any]]
+    convergence_eval: NotRequired[dict[str, Any]]
+    recent_verification_signatures: NotRequired[list[dict[str, Any]]]
+    convergence_intervention_count: NotRequired[int]
     progress_eval: NotRequired[dict[str, Any]]
     budget_eval: NotRequired[dict[str, Any]]
     transition_reason: NotRequired[str]
+    context_summary: NotRequired[str]
+    context_summary_message_count: NotRequired[int]
+    context_compaction_count: NotRequired[int]
 
     # State collections
     scene_objects: NotRequired[Annotated[dict[str, Any], replace_mapping]]
     persistent_cameras: NotRequired[Annotated[list[str], merge_unique_strings]]
     scene_camera_params: NotRequired[Annotated[dict[str, Any], replace_mapping]]
     todos: NotRequired[Annotated[list[TodoItem], merge_todos]]
+    todo_versions: NotRequired[list[TodoVersion]]
+    todo_protocol_version: NotRequired[int]
+    active_todo_id: NotRequired[str | None]
+    pending_todo_updates: NotRequired[list[dict[str, Any]]]
+    assistant_turn_kind: NotRequired[str]
 
     # Workflow checkpoints
-    todo_check_gate: NotRequired[dict]
-    todo_check: NotRequired[dict]
-    last_todo_check_round: NotRequired[int]
-    last_todo_check_verified_path: NotRequired[str | None]
-    last_todo_snapshot: NotRequired[dict[str, str]]
+    finalize_guard_gate: NotRequired[dict]
+    finalize_guard: NotRequired[dict]
+    last_finalize_guard_round: NotRequired[int]
+    last_finalize_guard_verified_path: NotRequired[str | None]
+    last_finalize_guard_todo_snapshot: NotRequired[dict[str, str]]
     stagnation_count: NotRequired[int]
     verify_forced_recovery: NotRequired[bool]
     catastrophic_recovery_attempts: NotRequired[int]

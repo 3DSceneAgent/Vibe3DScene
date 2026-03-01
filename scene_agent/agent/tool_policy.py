@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 from scene_agent.agent.state import TaskMode
+from scene_agent.agent.todo_protocol import TODO_UPDATE_TOOL_NAME
 from scene_agent.agent.workflow_profiles import AgentRole, ToolProfile
 
 VERIFIER_CAMERA_TOOLS: frozenset[str] = frozenset(
@@ -121,6 +122,9 @@ def resolve_effective_tool_names(
 
     profile = explicit_profile or _default_profile_for_role(mode, role)
     filtered = _filter_for_profile(selected, profile)
+
+    if mode != "plan_mode" or role != "general":
+        filtered = [name for name in filtered if name != TODO_UPDATE_TOOL_NAME]
 
     if mode == "conversation_mode":
         filtered = _filter_for_profile(filtered, "read_only")

@@ -6,6 +6,7 @@ from .agents import (
     post_agent_node,
     post_builder_node,
     post_verifier_node,
+    turn_dispatch_node,
     verifier_camera_agent_node,
 )
 from .evaluators import (
@@ -23,7 +24,8 @@ from .execution import (
     checkpoint_gate_node,
     extract_todo_updates,
     scene_observe_node,
-    todo_check_node,
+    todo_commit_node,
+    finalize_guard_node,
     update_memory_node,
 )
 from .finalize import finalize_node
@@ -51,6 +53,7 @@ __all__ = [
     "builder_agent_node",
     "verifier_camera_agent_node",
     "post_agent_node",
+    "turn_dispatch_node",
     "post_builder_node",
     "post_verifier_node",
     "verifier_agent_node",
@@ -62,9 +65,10 @@ __all__ = [
     "planner_refresh_node",
     "finalize_node",
     "update_memory_node",
+    "todo_commit_node",
     "scene_observe_node",
     "checkpoint_gate_node",
-    "todo_check_node",
+    "finalize_guard_node",
     "blocked_recovery_node",
     "blocked_recovery_action_node",
     "verify_node",

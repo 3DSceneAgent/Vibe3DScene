@@ -15,9 +15,13 @@ import tempfile
 from datetime import datetime
 from typing import Any, Dict, Literal
 from urllib.parse import unquote, urlparse
+from uuid import uuid4
 from langchain_core.messages import ToolMessage, AIMessage, SystemMessage, HumanMessage
 from pydantic import BaseModel, Field, ValidationError
+from scene_agent.agent.context_manager import build_projected_context
 from scene_agent.agent.state import AgentState, ReferenceImageCatalogEntry, TaskMode, TodoItem
+from scene_agent.agent.todo_protocol import TODO_UPDATE_TOOL_NAME
+from scene_agent.agent.todo_state import project_latest_todos
 from scene_agent.agent.tool_policy import (
     READ_ONLY_TOOLS,
     coerce_request_tool_budgets,
@@ -80,12 +84,12 @@ TOPOLOGY_DUAL = "dual_agent"
 ROLE_GENERAL = "general"
 ROLE_BUILDER = "builder"
 ROLE_VERIFIER = "verifier"
-DEFAULT_MAX_PLAN_REPLANS = 2
+DEFAULT_MAX_PLAN_REPLANS = 3
 
 REQUEST_BUDGET_DEFAULTS: dict[TaskMode, dict[str, int]] = {
     MODE_CONVERSATION: {"max_request_agent_turns": 2, "max_request_tool_batches": 0},
     MODE_SINGLE_ACTION: {"max_request_agent_turns": 3, "max_request_tool_batches": 1},
-    MODE_PLAN: {"max_request_agent_turns": -1, "max_request_tool_batches": -1},
+    MODE_PLAN: {"max_request_agent_turns": 50, "max_request_tool_batches": 40},
 }
 
 CONVERSATION_READ_ONLY_TOOLS: frozenset[str] = READ_ONLY_TOOLS
@@ -180,7 +184,16 @@ def _coerce_role(raw_role: Any) -> str:
 
 
 def request_budget(mode: TaskMode) -> dict[str, int]:
-    return dict(REQUEST_BUDGET_DEFAULTS.get(mode, REQUEST_BUDGET_DEFAULTS[MODE_PLAN]))
+    budget = dict(REQUEST_BUDGET_DEFAULTS.get(mode, REQUEST_BUDGET_DEFAULTS[MODE_PLAN]))
+    if mode != MODE_PLAN:
+        return budget
+    try:
+        settings = get_settings()
+        budget["max_request_agent_turns"] = max(1, int(settings.plan_mode_max_agent_turns))
+        budget["max_request_tool_batches"] = max(1, int(settings.plan_mode_max_tool_batches))
+    except Exception:
+        pass
+    return budget
 
 
 def _verification_roles_for_mode(mode: TaskMode) -> set[str]:
@@ -199,11 +212,42 @@ def _auto_binding_role_for_mode(mode: TaskMode) -> str:
     return "scene_reference"
 
 
+def effective_todo_snapshot(state: AgentState) -> list[TodoItem]:
+    return project_latest_todos(
+        state.get("todo_versions"),
+        fallback_todos_raw=state.get("todos"),
+    )
+
+
 def unfinished_todo_count(state: AgentState) -> int:
-    todos = coerce_todos(state.get("todos"))
-    latest = latest_todos_by_description(todos)
-    effective = list(latest.values()) if latest else todos
-    return sum(1 for todo in effective if todo.get("status") in {"pending", "in_progress"})
+    todos = effective_todo_snapshot(state)
+    return sum(1 for todo in todos if todo.get("status") in {"pending", "in_progress"})
+
+
+def build_todo_runtime_prompt(state: AgentState) -> str:
+    todos = effective_todo_snapshot(state)
+    lines = [
+        "Todo protocol:",
+        f"- Use `{TODO_UPDATE_TOOL_NAME}` for all todo changes.",
+        "- Never emit textual <todos> blocks.",
+    ]
+    active_todo_id = state.get("active_todo_id")
+    if isinstance(active_todo_id, str) and active_todo_id:
+        lines.append(f"- Current active todo: {active_todo_id}")
+    if not todos:
+        lines.append("- No current todos. For complex tasks, create them with todo_update(create).")
+        return "\n".join(lines)
+
+    lines.append("Current todo state (latest version per todo_id):")
+    for todo in todos[:12]:
+        todo_id = str(todo.get("id", "")).strip()
+        status = str(todo.get("status", "")).strip()
+        description = str(todo.get("description", "")).strip()
+        if not todo_id or not description:
+            continue
+        marker = " (active)" if todo_id == active_todo_id else ""
+        lines.append(f"- {todo_id} [{status}] {description}{marker}")
+    return "\n".join(lines)
 
 
 def _classify_task_mode_from_text(text: str) -> tuple[TaskMode, str]:
@@ -912,6 +956,7 @@ def invoke_role_agent(
     # Build messages including system prompt
     from scene_agent.agent.prompts import get_full_system_prompt
 
+    mode = coerce_task_mode(state.get("task_mode"))
     requested_tool_names = _resolve_effective_available_tools(state, available_tool_names)
     requested_tool_names = _apply_request_scoped_tool_constraints(
         state,
@@ -964,7 +1009,14 @@ def invoke_role_agent(
                 )
             )
         )
-    messages.extend(state["messages"])
+    if role == ROLE_GENERAL and (mode == MODE_PLAN or effective_todo_snapshot(state)):
+        messages.append(SystemMessage(content=build_todo_runtime_prompt(state)))
+    messages, summary_text, omitted_count = build_projected_context(
+        base_messages=messages,
+        state_messages=list(state["messages"]),
+        pinned_message_ids={RENDER_VISION_MESSAGE_ID, SCENE_OBSERVE_MESSAGE_ID},
+        max_recent_messages=12,
+    )
     if role in {ROLE_GENERAL, ROLE_BUILDER, ROLE_VERIFIER}:
         messages = _inject_reference_images_into_latest_human_message(
             messages,
@@ -973,6 +1025,9 @@ def invoke_role_agent(
     
     # Invoke the LLM
     response = llm_with_tools.invoke(messages)
+    response_id = getattr(response, "id", None)
+    if not isinstance(response_id, str) or not response_id:
+        response.id = f"assistant_turn_{uuid4().hex}"
     response, dropped_tools = _filter_unavailable_tool_calls(response, effective_tool_names)
     if dropped_tools:
         content_text = message_content_to_text(getattr(response, "content", ""))
@@ -984,6 +1039,14 @@ def invoke_role_agent(
             )
     
     result: Dict[str, Any] = {"messages": [response]}
+    if omitted_count > 0:
+        current_compactions = coerce_non_negative_int(state.get("context_compaction_count"))
+        result["context_summary"] = summary_text
+        result["context_summary_message_count"] = omitted_count
+        result["context_compaction_count"] = current_compactions + 1
+    else:
+        result["context_summary"] = ""
+        result["context_summary_message_count"] = 0
     if _coerce_role(state.get("active_role")) != role:
         result["active_role"] = role
     return result
@@ -1109,14 +1172,18 @@ def build_workflow_metadata(state: AgentState) -> dict[str, Any]:
     stop_reason = state.get("request_stop_reason")
     if isinstance(stop_reason, str) and stop_reason:
         finish_reason = stop_reason
+    elif isinstance(state.get("transition_reason"), str) and str(state.get("transition_reason")).strip():
+        transition_reason = str(state.get("transition_reason")).strip()
+        if transition_reason not in {"continue_execution", "router_initialized"}:
+            finish_reason = transition_reason
 
-    todo_check = state.get("todo_check")
-    if isinstance(todo_check, dict):
-        todo_status = todo_check.get("status")
-        if todo_status == "completed":
+    finalize_guard = state.get("finalize_guard")
+    if isinstance(finalize_guard, dict):
+        guard_status = finalize_guard.get("status")
+        if guard_status == "completed":
             finish_reason = "todos_completed"
-        elif todo_status == "blocked":
-            finish_reason = "todo_check_blocked"
+        elif guard_status == "blocked":
+            finish_reason = "finalize_guard_blocked"
 
     if finish_reason == "no_tool_calls" and task_mode == MODE_CONVERSATION:
         finish_reason = "conversation_completed"
@@ -1147,16 +1214,16 @@ def _build_finalize_summary(state: AgentState, workflow: dict[str, Any]) -> str:
         f"Scene workflow finished ({finish_reason}).",
     ]
 
-    todo_check = state.get("todo_check")
-    todo_check_status: str | None = None
-    todo_check_reason: str | None = None
-    if isinstance(todo_check, dict):
-        status = todo_check.get("status")
-        reason = todo_check.get("reason")
+    finalize_guard = state.get("finalize_guard")
+    finalize_guard_status: str | None = None
+    finalize_guard_reason: str | None = None
+    if isinstance(finalize_guard, dict):
+        status = finalize_guard.get("status")
+        reason = finalize_guard.get("reason")
         if isinstance(status, str) and status:
-            todo_check_status = status
+            finalize_guard_status = status
         if isinstance(reason, str) and reason:
-            todo_check_reason = reason
+            finalize_guard_reason = reason
 
     lines.extend(
         [
@@ -1168,11 +1235,11 @@ def _build_finalize_summary(state: AgentState, workflow: dict[str, Any]) -> str:
             ),
         ]
     )
-    if todo_check_status:
-        if todo_check_reason:
-            lines.append(f"Todo check status: {todo_check_status} ({todo_check_reason}).")
+    if finalize_guard_status:
+        if finalize_guard_reason:
+            lines.append(f"Finalize guard status: {finalize_guard_status} ({finalize_guard_reason}).")
         else:
-            lines.append(f"Todo check status: {todo_check_status}.")
+            lines.append(f"Finalize guard status: {finalize_guard_status}.")
 
     verification_status, verification_reason = _latest_verification_feedback(state)
     lines.extend(["", "Verification Highlights"])
@@ -1190,12 +1257,12 @@ def _build_finalize_summary(state: AgentState, workflow: dict[str, Any]) -> str:
 
 
 def _collect_current_todo_counts(state: AgentState) -> dict[str, int]:
-    todo_check = state.get("todo_check")
-    if isinstance(todo_check, dict):
-        pending = todo_check.get("pending_count")
-        in_progress = todo_check.get("in_progress_count")
-        completed = todo_check.get("completed_count")
-        failed = todo_check.get("failed_count")
+    finalize_guard = state.get("finalize_guard")
+    if isinstance(finalize_guard, dict):
+        pending = finalize_guard.get("pending_count")
+        in_progress = finalize_guard.get("in_progress_count")
+        completed = finalize_guard.get("completed_count")
+        failed = finalize_guard.get("failed_count")
         if all(
             isinstance(value, int) and value >= 0
             for value in (pending, in_progress, completed, failed)
@@ -1209,9 +1276,7 @@ def _collect_current_todo_counts(state: AgentState) -> dict[str, int]:
                 "failed": failed,
             }
 
-    todos = coerce_todos(state.get("todos"))
-    latest_by_description = latest_todos_by_description(todos)
-    effective_todos = list(latest_by_description.values()) if latest_by_description else todos
+    effective_todos = effective_todo_snapshot(state)
     return {
         "total": len(effective_todos),
         "pending": sum(1 for todo in effective_todos if todo.get("status") == "pending"),
@@ -1232,12 +1297,17 @@ def _build_finalize_next_action(
 
     focus = active_todo_context(state)
     if focus:
+        focus_entry = focus[0]
+        focus_text = str(focus_entry.get("title", "")).strip()
+        focus_id = str(focus_entry.get("todo_id", "")).strip()
+        if focus_id:
+            focus_text = f"{focus_id} {focus_text}".strip()
         return (
             "Continue from the next unfinished todo: "
-            + focus[0]
+            + focus_text
             + ". Apply edits, then render and verify again."
         )
-    if finish_reason == "todo_check_blocked":
+    if finish_reason == "finalize_guard_blocked":
         return "Resolve the highest-impact scene mismatch first, then re-run render + verification."
     return "Continue iterating on unfinished todos, then render and verify before finalizing."
 
@@ -1300,9 +1370,9 @@ def _build_finalize_summary_context(
     state: AgentState,
     workflow: dict[str, Any],
 ) -> dict[str, Any]:
-    todo_check = state.get("todo_check")
-    todo_summary: dict[str, Any] = {}
-    if isinstance(todo_check, dict):
+    finalize_guard = state.get("finalize_guard")
+    guard_summary: dict[str, Any] = {}
+    if isinstance(finalize_guard, dict):
         for key in (
             "status",
             "reason",
@@ -1313,7 +1383,7 @@ def _build_finalize_summary_context(
             "stagnation_count",
             "tool_round_count",
         ):
-            todo_summary[key] = todo_check.get(key)
+            guard_summary[key] = finalize_guard.get(key)
 
     return {
         "finish_reason": workflow.get("finish_reason"),
@@ -1329,7 +1399,7 @@ def _build_finalize_summary_context(
         "plan_replan_count": coerce_non_negative_int(state.get("plan_replan_count")),
         "verifier_feedback": state.get("verifier_feedback") if isinstance(state.get("verifier_feedback"), dict) else {},
         "latest_user_request": latest_human_message(state),
-        "todo_check": todo_summary,
+        "finalize_guard": guard_summary,
         "active_todos": active_todo_context(state),
         "latest_verification": _sanitize_verification_payload(latest_verification_payload(state)),
     }
@@ -1486,6 +1556,8 @@ def _resolve_effective_available_tools(
         for tool_name in requested_tools
         if isinstance(tool_name, str) and tool_name
     }
+    if TODO_UPDATE_TOOL_NAME in deduped_available:
+        requested_set.add(TODO_UPDATE_TOOL_NAME)
     return [name for name in deduped_available if name in requested_set]
 
 
@@ -1707,7 +1779,7 @@ def collect_latest_tool_batch_names(messages: list) -> list[str]:
     names_reversed: list[str] = []
     for msg in reversed(messages):
         if isinstance(msg, ToolMessage):
-            if isinstance(msg.name, str) and msg.name:
+            if isinstance(msg.name, str) and msg.name and msg.name != TODO_UPDATE_TOOL_NAME:
                 names_reversed.append(msg.name)
             continue
         if names_reversed:
@@ -2133,22 +2205,31 @@ def latest_human_message(state: AgentState) -> str:
     return ""
 
 
-def active_todo_context(state: AgentState) -> list[str]:
-    todos = coerce_todos(state.get("todos"))
+def active_todo_context(state: AgentState) -> list[dict[str, str]]:
+    todos = effective_todo_snapshot(state)
     if not todos:
         return []
-    latest = latest_todos_by_description(todos)
-    in_progress: list[str] = []
-    pending: list[str] = []
-    for todo in latest.values():
+    in_progress: list[dict[str, str]] = []
+    pending: list[dict[str, str]] = []
+    active_todo_id = state.get("active_todo_id")
+    for todo in todos:
         description = str(todo.get("description", "")).strip()
         status = str(todo.get("status", "")).strip()
-        if not description:
+        todo_id = str(todo.get("id", "")).strip()
+        if not description or not todo_id:
+            continue
+        payload = {
+            "todo_id": todo_id,
+            "title": description,
+            "status": status,
+        }
+        if todo_id == active_todo_id and status in {"pending", "in_progress"}:
+            in_progress.insert(0, payload)
             continue
         if status == "in_progress":
-            in_progress.append(description)
+            in_progress.append(payload)
         elif status == "pending":
-            pending.append(description)
+            pending.append(payload)
     return (in_progress + pending)[:5]
 
 
@@ -2224,17 +2305,17 @@ def _extract_verification_todo_assessments(
     for item in raw_assessment:
         if not isinstance(item, dict):
             continue
-        objective = item.get("objective")
+        todo_id = item.get("todo_id")
         status = item.get("status")
         reason = item.get("reason")
-        if not isinstance(objective, str) or not objective.strip():
+        if not isinstance(todo_id, str) or not todo_id.strip():
             continue
         normalized_status = _normalize_verification_todo_status(status)
         if normalized_status is None:
             continue
         assessments.append(
             {
-                "objective": objective.strip(),
+                "todo_id": todo_id.strip(),
                 "status": normalized_status,
                 "reason": reason.strip() if isinstance(reason, str) else "",
             }
@@ -2245,12 +2326,16 @@ def _extract_verification_todo_assessments(
 def build_todo_updates_from_verification(
     state: AgentState,
     verification: dict[str, Any],
-) -> tuple[list[TodoItem], list[dict[str, str]]]:
-    todos = coerce_todos(state.get("todos"))
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    todos = effective_todo_snapshot(state)
     if not todos:
         return [], []
 
-    latest_todos = latest_todos_by_description(todos)
+    latest_todos = {
+        str(todo.get("id", "")).strip(): todo
+        for todo in todos
+        if isinstance(todo.get("id"), str) and str(todo.get("id"))
+    }
     if not latest_todos:
         return [], []
 
@@ -2258,34 +2343,35 @@ def build_todo_updates_from_verification(
     if not assessments:
         return [], []
 
-    updates_by_id: dict[str, TodoItem] = {}
+    todo_actions: list[dict[str, Any]] = []
     update_records: list[dict[str, str]] = []
-    now_iso = datetime.now().isoformat()
 
     for assessment in assessments:
         if assessment["status"] != "completed":
             continue
-        matched = _match_todo_by_objective(latest_todos, assessment["objective"])
+        matched = latest_todos.get(assessment["todo_id"])
         if not matched:
             continue
         if matched.get("status") == "completed":
             continue
-
-        updated = dict(matched)
-        updated["status"] = "completed"
-        updated["completed_at"] = now_iso
-        todo_item = TodoItem(**updated)
-        updates_by_id[todo_item["id"]] = todo_item
+        todo_actions.append(
+            {
+                "action": "set_status",
+                "todo_id": assessment["todo_id"],
+                "status": "completed",
+                "reason": assessment.get("reason", ""),
+            }
+        )
         update_records.append(
             {
-                "objective": assessment["objective"],
+                "todo_id": assessment["todo_id"],
                 "matched_todo": str(matched.get("description", "")),
                 "status": "completed",
                 "reason": assessment.get("reason", ""),
             }
         )
 
-    return list(updates_by_id.values()), update_records
+    return todo_actions, update_records
 
 
 def build_verification_scene_context(state: AgentState) -> dict[str, Any] | None:
@@ -2324,6 +2410,10 @@ def build_verification_scene_context(state: AgentState) -> dict[str, Any] | None
         cameras = [name for name in persistent_cameras if isinstance(name, str)]
         if cameras:
             context["persistent_cameras"] = cameras[:12]
+
+    active_todos = active_todo_context(state)
+    if active_todos:
+        context["active_todos"] = active_todos
 
     return context or None
 
@@ -2544,8 +2634,13 @@ def build_verification_guidance_message(
     focus_candidates: list[str] = []
 
     for line in active_todo_context(state):
-        if line not in focus_candidates:
-            focus_candidates.append(line)
+        todo_id = str(line.get("todo_id", "")).strip()
+        title = str(line.get("title", "")).strip()
+        label = f"{todo_id} {title}".strip()
+        if not label:
+            continue
+        if label not in focus_candidates:
+            focus_candidates.append(label)
         if len(focus_candidates) >= 4:
             break
 

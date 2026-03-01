@@ -75,28 +75,13 @@ Local refinement workflow (IMPORTANT):
 Task planning and tracking (IMPORTANT):
 For complex tasks (3+ steps), break them down into subtasks:
 
-1. At the start of a complex task, create a plan:
-   <todos>
-   - [pending] Import wooden table model
-   - [pending] Position table at origin
-   - [pending] Add coffee cup on table
-   - [pending] Set up lighting and camera
-   - [pending] Render final scene
-   </todos>
+1. At the start of a complex task, call todo_update() with create actions to establish the plan.
+2. As you work, call todo_update() to move tasks into in_progress / completed / failed.
+3. If the task definition changes substantially but it is still the same task, use revise on the same todo_id.
+4. If an old task is replaced by a new plan, create the new task first and then supersede the old one.
+5. Never emit textual <todos> blocks; todo_update() is the only valid todo protocol.
 
-2. As you work, update todo status in your responses:
-   <todos>
-   - [completed] Import wooden table model
-   - [in_progress] Position table at origin
-   - [pending] Add coffee cup on table
-   - [pending] Set up lighting and camera
-   - [pending] Render final scene
-   </todos>
-
-3. Mark items as completed, in_progress, or failed as you go
-4. If a todo fails, create new todos to fix the issue
-
-This helps track progress and makes your reasoning transparent.
+This keeps planning state structured, versioned, and auditable.
 
 Verification guidance:
 - Verification runs AUTOMATICALLY after every tool batch — you do not need to trigger it.

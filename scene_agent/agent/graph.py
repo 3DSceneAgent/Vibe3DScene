@@ -16,7 +16,9 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 
 
 from scene_agent.agent.graph_factory import build_agent_state_graph
+from scene_agent.agent.internal_tools import get_internal_agent_tools
 from scene_agent.agent.state import AgentState
+from scene_agent.agent.todo_protocol import TODO_UPDATE_TOOL_NAME
 from scene_agent.agent.redis_checkpointer import get_graph_checkpointer
 from scene_agent.memory.reference_image_memory import get_image_asset_memory
 from scene_agent.agent.nodes import (
@@ -29,14 +31,14 @@ from scene_agent.agent.nodes import (
     finalize_node,
     planner_refresh_node,
     progress_evaluator_node,
-    post_agent_node,
     post_builder_node,
     post_verifier_node,
     route_mode_llm_node,
     sync_reference_catalog_node,
     scene_observe_node,
-    todo_check_node,
     transition_resolver_node,
+    todo_commit_node,
+    turn_dispatch_node,
     update_memory_node,
     verifier_camera_agent_node,
     verifier_feedback_node,
@@ -151,14 +153,44 @@ def _route_after_prepare_reference_context(state: AgentState) -> Literal["agent"
     return "agent"
 
 
-def _route_after_post_agent(state: AgentState) -> Literal["tools", "quality_evaluator"]:
+def _route_after_turn_dispatch(
+    state: AgentState,
+) -> Literal["todo_commit", "tools", "quality_evaluator", "agent"]:
+    turn_kind = state.get("assistant_turn_kind")
+    pending_updates = state.get("pending_todo_updates")
+    has_pending_updates = isinstance(pending_updates, list) and len(pending_updates) > 0
+
+    if turn_kind == "mixed":
+        return "todo_commit"
+    if turn_kind == "todo_only":
+        if has_pending_updates:
+            return "todo_commit"
+        if _agent_turn_budget_exhausted(state):
+            return "quality_evaluator"
+        return "agent"
+    if turn_kind == "external_only":
+        return "tools"
+    return "quality_evaluator"
+
+
+def _route_after_post_agent(
+    state: AgentState,
+) -> Literal["todo_commit", "tools", "quality_evaluator", "agent"]:
+    return _route_after_turn_dispatch(state)
+
+
+def _route_after_todo_commit(
+    state: AgentState,
+) -> Literal["tools", "quality_evaluator", "agent"]:
     messages = state.get("messages") or []
     for message in reversed(list(messages)):
         if isinstance(message, AIMessage):
             if _message_has_tool_calls(message):
                 return "tools"
-            return "quality_evaluator"
-    return "quality_evaluator"
+            break
+    if _agent_turn_budget_exhausted(state):
+        return "quality_evaluator"
+    return "agent"
 
 
 def _route_after_post_builder(
@@ -468,18 +500,9 @@ def _wrap_tool_call_with_retry(
     )
 
 
-def _should_run_todo_check(state: AgentState) -> bool:
-    gate = state.get("todo_check_gate")
-    if not isinstance(gate, dict):
-        return False
-    return bool(gate.get("should_run"))
-
-
 def _route_after_loop_checkpoint(
     state: AgentState,
-) -> Literal["todo_check", "agent", "builder_agent", "checkpoint_finalize"]:
-    if _should_run_todo_check(state):
-        return "todo_check"
+) -> Literal["agent", "builder_agent", "checkpoint_finalize"]:
     if _agent_turn_budget_exhausted(state):
         return "checkpoint_finalize"
     if _is_dual_plan_mode(state):
@@ -490,34 +513,22 @@ def _route_after_loop_checkpoint(
 def _route_after_finalize_checkpoint(state: AgentState) -> str:
     if _task_mode(state) != "plan_mode":
         return END
-    if _should_run_todo_check(state):
-        return "todo_check"
+    finalize_guard = state.get("finalize_guard")
+    if isinstance(finalize_guard, dict):
+        status = str(finalize_guard.get("status") or "").strip().lower()
+        if status == "continue":
+            if _agent_turn_budget_exhausted(state):
+                return "finalize"
+            if _is_dual_plan_mode(state):
+                return "builder_agent"
+            return "agent"
     return "finalize"
 
 
-def _route_after_todo_check(
+def _route_after_finalize_guard(
     state: AgentState,
 ) -> str:
-    if _task_mode(state) != "plan_mode":
-        return END
-    if _agent_turn_budget_exhausted(state):
-        return "finalize"
-    gate = state.get("todo_check_gate")
-    if isinstance(gate, dict) and gate.get("stage") == "finalize":
-        todo_check = state.get("todo_check")
-        if isinstance(todo_check, dict):
-            status = todo_check.get("status")
-            if status in {"completed", "not_applicable"}:
-                return "finalize"
-            if status == "blocked":
-                if _is_dual_plan_mode(state):
-                    return "builder_agent"
-                return "agent"
-        else:
-            return "finalize"
-    if _is_dual_plan_mode(state):
-        return "builder_agent"
-    return "agent"
+    return _route_after_finalize_checkpoint(state)
 
 
 def _route_after_blocked_recovery_action(
@@ -599,6 +610,7 @@ async def create_agent_graph(
     
     # Load tools from Blender MCP server
     tools = await get_blender_tools(session_id=session_id)
+    tools.extend(get_internal_agent_tools())
     available_tool_names = [
         tool.name
         for tool in tools
@@ -612,6 +624,12 @@ async def create_agent_graph(
         hint = _extract_tool_hint(tool)
         if hint:
             available_tool_hints[tool_name] = hint
+    public_tool_names = [name for name in available_tool_names if name != TODO_UPDATE_TOOL_NAME]
+    public_tool_hints = {
+        name: hint
+        for name, hint in available_tool_hints.items()
+        if name != TODO_UPDATE_TOOL_NAME
+    }
     
     # Bind tools to model
     llm_with_tools = model.bind_tools(tools)
@@ -649,7 +667,7 @@ async def create_agent_graph(
         clarification_node=clarification_node,
         prepare_reference_context_node=call_prepare_reference_context,
         agent_node=call_model,
-        post_agent_node=post_agent_node,
+        turn_dispatch_node=turn_dispatch_node,
         builder_agent_node=call_builder_model,
         post_builder_node=post_builder_node,
         verifier_camera_agent_node=call_verifier_camera_model,
@@ -664,10 +682,10 @@ async def create_agent_graph(
             wrap_tool_call=_wrap_tool_call_with_retry,
             awrap_tool_call=_awrap_tool_call_with_retry,
         ),
+        todo_commit_node=todo_commit_node,
         update_memory_node=update_memory_node,
         scene_observe_node=scene_observe_node,
         checkpoint_finalize_node=lambda state: checkpoint_gate_node(state, stage="finalize"),
-        todo_check_node=todo_check_node,
         verify_node=lambda state: verify_node(
             state,
             provider_name=selected_provider,
@@ -680,13 +698,13 @@ async def create_agent_graph(
         route_after_mode=_route_after_mode,
         route_after_sync_reference_catalog=_route_after_sync_reference_catalog,
         route_after_prepare_reference_context=_route_after_prepare_reference_context,
-        route_after_post_agent=_route_after_post_agent,
+        route_after_turn_dispatch=_route_after_turn_dispatch,
+        route_after_todo_commit=_route_after_todo_commit,
         route_after_post_builder=_route_after_post_builder,
         route_after_post_verifier=_route_after_post_verifier,
         route_after_verify=_route_after_verify,
         route_after_transition_resolver=_route_after_transition_resolver,
         route_after_finalize_checkpoint=_route_after_finalize_checkpoint,
-        route_after_todo_check=_route_after_todo_check,
     )
     
     # Compile with checkpointing
@@ -694,6 +712,8 @@ async def create_agent_graph(
     app = builder.compile(checkpointer=checkpointer)
     setattr(app, "_available_tool_names", available_tool_names)
     setattr(app, "_available_tool_hints", available_tool_hints)
+    setattr(app, "_public_tool_names", public_tool_names)
+    setattr(app, "_public_tool_hints", public_tool_hints)
     setattr(app, "_vlm_provider", selected_provider)
     setattr(app, "_vlm_model", selected_model)
     

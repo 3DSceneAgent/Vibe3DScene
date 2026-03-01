@@ -104,6 +104,22 @@ class Settings(BaseSettings):
         default=120,
         description="Max seconds to allow a single streaming response"
     )
+    api_plan_stream_timeout_seconds: int = Field(
+        default=1800,
+        description="Max seconds to allow an idle plan_mode stream before timing out; <= 0 disables the idle timeout"
+    )
+    plan_mode_max_agent_turns: int = Field(
+        default=50,
+        description="Maximum agent turns allowed for a single plan_mode request"
+    )
+    plan_mode_max_tool_batches: int = Field(
+        default=40,
+        description="Maximum tool batches allowed for a single plan_mode request"
+    )
+    plan_mode_max_replans: int = Field(
+        default=3,
+        description="Maximum replans allowed for a single plan_mode request"
+    )
     headless_request_timeout_seconds: int = Field(
         default=15,
         description="Max seconds to allow a single headless scene/render request"

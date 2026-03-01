@@ -1245,7 +1245,7 @@ def load_example_prompts() -> list[str]:
 
 
 def extract_available_tool_names(agent: Any) -> list[str]:
-    raw_names = getattr(agent, "_available_tool_names", [])
+    raw_names = getattr(agent, "_public_tool_names", getattr(agent, "_available_tool_names", []))
     if not isinstance(raw_names, list):
         return []
     valid_names = [
@@ -1257,7 +1257,7 @@ def extract_available_tool_names(agent: Any) -> list[str]:
 
 
 def extract_available_tool_hints(agent: Any) -> dict[str, str]:
-    raw_hints = getattr(agent, "_available_tool_hints", {})
+    raw_hints = getattr(agent, "_public_tool_hints", getattr(agent, "_available_tool_hints", {}))
     if not isinstance(raw_hints, dict):
         return {}
     cleaned: dict[str, str] = {}
@@ -1295,11 +1295,23 @@ def normalize_requested_tool_names(raw_names: list[str] | None) -> list[str] | N
     return normalized
 
 
+def extract_runtime_tool_names(agent: Any) -> list[str]:
+    raw_names = getattr(agent, "_available_tool_names", [])
+    if not isinstance(raw_names, list):
+        return []
+    valid_names = [
+        name
+        for name in raw_names
+        if isinstance(name, str) and name
+    ]
+    return sorted(set(valid_names))
+
+
 def resolve_enabled_tool_names(
     agent: Any,
     requested_tool_names: list[str] | None,
 ) -> list[str]:
-    available_tool_names = extract_available_tool_names(agent)
+    available_tool_names = extract_runtime_tool_names(agent)
     if requested_tool_names is None:
         return available_tool_names
     requested_set = set(requested_tool_names)

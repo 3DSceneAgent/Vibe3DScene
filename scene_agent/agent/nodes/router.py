@@ -3,6 +3,7 @@ from typing import Any, Dict
 from langchain_core.messages import AIMessage
 from scene_agent.agent.memory_scope import resolve_memory_profile
 from scene_agent.agent.state import AgentState
+from scene_agent.config import get_settings
 from .shared import (
     DEFAULT_MAX_PLAN_REPLANS,
     MODE_CONVERSATION,
@@ -121,14 +122,19 @@ def route_mode_node(
     if not clarification_question:
         clarification_question = build_router_clarification_question(latest_user_request)
     need_clarification = bool(decision.need_clarification) or decision.confidence < ROUTER_MIN_CONFIDENCE
+    active_todo_id = state.get("active_todo_id")
+    if not isinstance(active_todo_id, str):
+        active_todo_id = None
 
-    if mode == MODE_PLAN:
-        max_plan_replans = -1
-    else:
-        max_plan_replans = coerce_non_negative_int(
-            state.get("max_plan_replans"),
-            default=DEFAULT_MAX_PLAN_REPLANS,
-        )
+    max_plan_replans_default = DEFAULT_MAX_PLAN_REPLANS
+    try:
+        max_plan_replans_default = max(0, int(get_settings().plan_mode_max_replans))
+    except Exception:
+        pass
+    max_plan_replans = coerce_non_negative_int(
+        state.get("max_plan_replans"),
+        default=max_plan_replans_default,
+    )
 
     return {
         "task_mode": mode,
@@ -151,10 +157,20 @@ def route_mode_node(
         "builder_stall_count": 0,
         "verification_mismatch_streak": 0,
         "quality_eval": {"status": "unknown", "reason": "not_evaluated"},
+        "convergence_eval": {"status": "stable", "pattern": "none", "reason": "not_evaluated"},
+        "recent_verification_signatures": [],
+        "convergence_intervention_count": 0,
         "progress_eval": {"status": "continue", "reason": "not_evaluated"},
         "budget_eval": {"budget_ok": True, "stop_reason": None},
         "plan_replan_count": 0,
         "max_plan_replans": max_plan_replans,
+        "todo_protocol_version": 1,
+        "pending_todo_updates": [],
+        "assistant_turn_kind": "no_calls",
+        "active_todo_id": active_todo_id,
+        "context_summary": "",
+        "context_summary_message_count": 0,
+        "context_compaction_count": 0,
         "transition_next": None,
         "transition_reason": "router_initialized",
         "max_request_agent_turns": budget["max_request_agent_turns"],

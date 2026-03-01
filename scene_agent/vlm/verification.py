@@ -83,19 +83,30 @@ def _extract_json(text: str) -> dict[str, Any] | None:
         return None
 
 
-def _format_todo_context(todo_context: list[str] | None) -> str:
+def _format_todo_context(todo_context: list[dict[str, str]] | None) -> str:
     if not todo_context:
         return ""
-    normalized_items: list[str] = []
+    normalized_items: list[dict[str, str]] = []
     for item in todo_context[:5]:
-        normalized = " ".join(str(item).strip().split())
-        if normalized:
-            normalized_items.append(normalized)
+        if not isinstance(item, dict):
+            continue
+        todo_id = " ".join(str(item.get("todo_id", "")).strip().split())
+        title = " ".join(str(item.get("title", "")).strip().split())
+        status = " ".join(str(item.get("status", "")).strip().split())
+        if not todo_id or not title:
+            continue
+        normalized_items.append(
+            {
+                "todo_id": todo_id,
+                "title": title,
+                "status": status or "unknown",
+            }
+        )
     if not normalized_items:
         return ""
-    lines = ["Current todo objectives (primary verification target):"]
+    lines = ["Current active todos (primary verification target):"]
     for item in normalized_items:
-        lines.append(f"- {item}")
+        lines.append(f"- {item['todo_id']} [{item['status']}] {item['title']}")
     return "\n".join(lines)
 
 
@@ -162,7 +173,7 @@ def verify_render_with_references(
     reference_paths: list[str],
     user_request: str,
     render_source: str = "agent_camera",
-    todo_context: list[str] | None = None,
+    todo_context: list[dict[str, str]] | None = None,
     scene_context: dict[str, Any] | None = None,
     provider_name: str | None = None,
     api_key: str | None = None,
@@ -211,8 +222,8 @@ def verify_render_with_references(
         prompt += (
             "\n\nIf current todo objectives are provided, treat them as the primary verification target. "
             "Use the full user request only as background context."
-            "\nYou MUST include a `todo_assessment` JSON array with exactly one item per provided todo objective."
-            "\nEach item format: {\"objective\": \"...\", \"status\": \"done|not_done|uncertain\", \"reason\": \"...\"}."
+            "\nYou MUST include a `todo_assessment` JSON array with exactly one item per provided todo."
+            "\nEach item format: {\"todo_id\": \"...\", \"status\": \"done|not_done|uncertain\", \"reason\": \"...\"}."
             "\nOnly mark status as `done` when there is clear visual evidence in the current render."
         )
 

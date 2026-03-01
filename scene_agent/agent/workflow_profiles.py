@@ -96,9 +96,9 @@ DEFAULT_WORKFLOW_PROFILE: WorkflowProfile = {
     },
     "memory_profile": "thread_shared_only",
     "budgets": {
-        "max_request_agent_turns": 8,
-        "max_request_tool_batches": 6,
-        "max_plan_replans": 2,
+        "max_request_agent_turns": 50,
+        "max_request_tool_batches": 40,
+        "max_plan_replans": 3,
     },
     "verify_policy": {
         "use_verifier_agent": False,

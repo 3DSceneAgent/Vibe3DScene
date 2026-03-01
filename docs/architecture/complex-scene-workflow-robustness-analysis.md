@@ -39,26 +39,32 @@
 
 #### P0 — 致命 / 长任务必触发
 
-| # | 风险 | 现象 | 根因 |
-|---|------|------|------|
-| S1 | **Context Window 线性膨胀** | 30-40 轮后推理质量退化、远端目标遗忘、甚至超限截断 | `AIMessage`/`ToolMessage`/`verification` 全量累积，无压缩/摘要/滑窗机制 |
-| S2 | **plan_mode 无硬预算** | Agent 可在 verify-fix 循环中无限运行，成本失控 | `max_request_agent_turns = -1`，`max_request_tool_batches = -1`，`max_plan_replans = -1` |
-| S3 | **验证振荡无收敛检测** | "scale too large → fix → scale too small → fix → ..." 死循环 | 无连续相似 mismatch 识别；无策略升级/熔断路径 |
+| # | 风险 | 现象 | 根因 | 状态 |
+|---|------|------|------|------|
+| S1 | **Context Window 线性膨胀** | 30-40 轮后推理质量退化、远端目标遗忘、甚至超限截断 | `AIMessage`/`ToolMessage`/`verification` 全量累积，无压缩/摘要/滑窗机制 | 已完成（single-agent） |
+| S2 | **plan_mode 无硬预算** | Agent 可在 verify-fix 循环中无限运行，成本失控 | `max_request_agent_turns = -1`，`max_request_tool_batches = -1`，`max_plan_replans = -1` | 已完成（single-agent） |
+| S3 | **验证振荡无收敛检测** | "scale too large → fix → scale too small → fix → ..." 死循环 | 无连续相似 mismatch 识别；无策略升级/熔断路径 | 已完成（single-agent） |
 
 #### P1 — 严重 / 复杂任务高概率触发
 
 | # | 风险 | 现象 | 根因 |
 |---|------|------|------|
 | S4 | **VLM 验证假阳/假阴** | 空间关系误判、遮挡导致误 pass/误 fail | VLM 空间推理弱；catastrophic 检测依赖硬编码阈值（`stddev ≤ 2.0` 等） |
-| S5 | **停滞检测延迟** | 浪费 6+ 轮才识别到 blocked | `TODO_CHECK_INTERVAL_ROUNDS = 3` × `TODO_STAGNATION_LIMIT = 2`；无法识别"抖动式伪进展" |
+| S5 | **语义级进度度量仍偏弱** | 难稳定区分"慢进展"与"真停滞"；收敛能止血，但还不够细 | 目前 single-agent 主路径已不再依赖 `stagnation_count`；仍缺少语义级 milestone/progress 追踪 |
 | S6 | **单次 HTTP 请求执行** | 长任务 HTTP 超时/断连 → 全部丢失 | `ainvoke`/`astream` 全量在一次 request 中完成，无 pause/resume |
 
 #### P2 — 中等 / 大规模场景中显现
 
 | # | 风险 | 现象 | 根因 |
 |---|------|------|------|
-| S7 | **Todo 结构扁平** | 执行顺序错位、返工增多 | 缺少依赖关系、阶段里程碑、优先级机制 |
+| S7 | **Todo 结构扁平（暂时不修）** | 执行顺序错位、返工增多 | 缺少依赖关系、阶段里程碑、优先级机制 |
 | S8 | **工具故障级联** | 单工具失败后 state 不一致，后续操作基于错误场景 | 重试仅 2 次；无事务回滚；错误 ToolMessage 继续进入 agent context |
+
+补充说明（2026-03-01）：
+
+- `S5` 的旧版硬编码 `stagnation_count` 路径已从 single-agent 主循环控制中移除；`finalize_guard` 现在只保留为 finalize 前的一致性 guard，不再负责主循环停机。
+- 在当前实现中，这个 finalize guard 已内联进 `checkpoint_finalize`，不再以独立图结点存在。
+- 这意味着 single-agent 的主循环稳定性已转由 `budget + convergence` 控制，但更细粒度的“语义级慢进展”度量仍属于后续 P1 项（见第 7 节 `停滞检测增强`）。
 
 ---
 
@@ -111,7 +117,7 @@
 | **P0** | 无收敛/振荡检测 | verify-fix 死循环无法自动终止 |
 | **P1** | 长任务单请求执行模型 | HTTP 超时、断连丢失进度 |
 | **P1** | 进度度量偏弱 | 难区分"慢进展"与"真停滞" |
-| **P1** | 扁平 Todo 无依赖 | 执行顺序混乱，返工增多 |
+| **P1** | 扁平 Todo 无依赖（暂时不修） | 执行顺序混乱，返工增多 |
 | **P2** | 缺少运行时 observability | 无 token/cost/turns 面板 |
 | **P2** | 无失败案例归档与回归 | 同类问题反复出现 |
 
@@ -203,6 +209,12 @@ ws://host/chat/ws?thread_id=xxx
 
 ### 6.4 方案 D：增强现有 SSE（最小改动）
 
+完成状态（2026-03-01，方案 D 首轮落地）：
+- `已完成` SSE 事件已统一带递增 `seq`，并通过 SSE `id` + `Last-Event-ID` 支持同一流会话内补发。
+- `已完成` 心跳包已升级为结构化 `heartbeat` 事件，附带 `task_mode / graph_steps / todo_completed / latest_seq` 等进度摘要。
+- `已完成` `plan_mode` 空闲流超时已独立提升（默认 `1800s`，可配置；`<= 0` 可禁用）。
+- `已完成` 客户端断连后，后端流生产任务会继续在后台跑完当前 graph；客户端可用 `X-Stream-Request-Id` 重新附着活动流。
+
 **核心思路**：保留当前 SSE 架构，增加断线恢复与进度快照。
 
 改进点：
@@ -228,7 +240,7 @@ ws://host/chat/ws?thread_id=xxx
 
 ### 6.6 推荐路线
 
-1. **短期（1-2 周）**：采用方案 D，增加事件序号 + 心跳进度摘要 + plan_mode 超时延长，快速改善体验。
+1. **短期（已完成，2026-03-01）**：方案 D 已落地，当前 SSE 已具备事件序号、心跳进度摘要、plan_mode 超时延长与断线后同流恢复能力。
 2. **中期（3-4 周）**：实现方案 A，plan_mode 走异步任务模式，短模式保持同步 SSE。
 3. **长期（可选）**：在方案 A 基础上叠加方案 B 的 phase 拆分，实现"阶段提交 + 用户审查"的交互模式。
 
@@ -243,6 +255,66 @@ ws://host/chat/ws?thread_id=xxx
 | 1 | **Context 管理** | 引入"近期原文 + 历史摘要"双层记忆；限制注入 messages 条数 | `nodes/shared.py`, `state.py`, 新增 `context_manager.py` |
 | 2 | **预算护栏** | plan_mode 设置 agent/tool/replan 合理上限（如 50/40/3），用户可配置 | `nodes/shared.py`, `nodes/router.py`, `workflow_profiles.py` |
 | 3 | **收敛检测** | 连续 N 轮相似 mismatch → 策略切换/跳过/熔断 | `nodes/evaluators.py`, 新增 `convergence.py` |
+
+P0 完成状态（2026-03-01，single-agent 首轮落地）：
+
+- `已完成` Context 管理：`context_manager` 已接入 prompt 投影压缩，Agent 不再向模型注入全量历史消息；改为“系统提示 + todo 视图 + 关键近因消息 + 历史摘要”。
+- `已完成` 预算护栏：`plan_mode` 默认预算已改为有限值（`50 / 40 / 3`），不再使用无限预算。
+- `已完成` 收敛检测：已新增基于稳定 `todo_id` 的 convergence guard，可识别重复失败 / 振荡 / 连续 catastrophic，并触发指导性重试或硬熔断。
+- `已完成` Todo 解耦：`todo_update` 已从文本 `<todos>` 协议迁移到结构化提交，并通过 `turn_dispatch -> todo_commit` 独立路径执行，不再触发 Blender 工具链上的额外 observe/verify。
+- `已完成` Todo finalize guard 瘦身：`finalize_guard` 不再用硬编码 stagnation 阈值驱动主循环，也不会在 budget/convergence hard-stop 后把流程错误送回 `agent`；该 guard 已内联进 `checkpoint_finalize`。
+
+#### P0 实施方案（single-agent 确认版）
+
+为避免 `todo` 更新与 Blender 工具链耦合，single-agent 的 P0 改造按以下方案落地：
+
+1. **Todo 协议改为结构化调用，不再使用 `<todos>` 文本块**
+   - 主 Agent 不再通过自然语言标签输出 todo。
+   - 改为发出结构化 `todo_update` 调用（tool-call-like action），请求创建 / 修订 / 状态更新 todo。
+   - 不保留后向兼容与灰度迁移；旧文本协议直接退出主路径。
+
+2. **新增不可变 Todo 版本链（append-only）**
+   - `todos` 仅保留为"最新快照视图"。
+   - 新增 `todo_versions` 作为事实源，每次变更都追加新版本，不覆盖历史。
+   - 大幅改写任务描述时使用同一 `todo_id` 追加 `revise` 版本，而不是按 description 模糊匹配。
+   - 引入 `superseded` 终态，表示旧任务被新计划替代，而非执行失败。
+
+3. **保留 Agent 与后置分流结点，但重定义为 `turn_dispatch`**
+   - `agent` 结点只负责一次 LLM 调用，产出最新 `AIMessage`。
+   - 原 `post_agent` 的职责改为纯确定性的 `turn_dispatch`：
+     - 递增 request-level agent turn 计数
+     - 解析最新 `AIMessage` 中的结构化调用
+     - 区分内部 `todo_update` 与外部 Blender tool calls
+     - 生成后续路由所需的 pending state
+
+4. **新增独立 `todo_commit` 结点，不走 Blender `ToolNode`**
+   - `todo_update` 不直接进入现有 `agent -> tools -> update_memory -> scene_observe -> verify` 链。
+   - 新增 `todo_commit` 结点在 `turn_dispatch` 后优先消费 todo 更新：
+     - 只更新 `todo_versions` / `todos`
+     - 不增加 `request_tool_batches`
+     - 不触发 `scene_observe`
+     - 不触发 `verify`
+   - 若同一轮还存在 Blender 工具调用，则 `todo_commit` 完成后再进入 `tools`。
+
+5. **Verification 改为按 `todo_id` 回写，而不是按 description 猜测**
+   - verification 上下文中显式注入当前 todo 的 `todo_id / status / title`。
+   - `todo_assessment` 输出改为按 `todo_id` 标记完成状态。
+   - verify 回写时直接按 `todo_id` 追加新版本，彻底移除基于 description 的模糊匹配。
+
+6. **在此基础上补齐其余 P0 能力**
+   - **Budget**：`plan_mode` 默认硬预算改为有限值（建议 `50 / 40 / 3`），不再使用无限预算。
+   - **Convergence**：基于稳定 `todo_id` 和 failure bucket 做重复失败 / 振荡识别，触发策略升级或熔断。
+   - **Context**：引入 `context_manager`，只向模型注入投影后的窗口化上下文（当前 todo 视图 + 最新验证 + 最新视觉证据 + 历史摘要）。
+
+推荐实现顺序：
+
+1. `todo_versions + turn_dispatch + todo_commit`
+2. verification 改为 `todo_id` 映射
+3. budget 护栏
+4. convergence 检测
+5. context 投影压缩
+
+该方案的核心目标是：让"计划元数据更新"与"场景工具执行"彻底解耦，避免一次 todo 变更也触发整条 render-and-verify 闭环，同时为后续的预算与收敛控制提供稳定的任务身份。
 
 ### P1 — 显著提升鲁棒性
 

@@ -1,5 +1,10 @@
 """Node implementations by category."""
 from typing import Any, Dict
+from langchain_core.messages import SystemMessage
+from scene_agent.agent.convergence import (
+    CONVERGENCE_GUIDANCE_MESSAGE_ID,
+    evaluate_convergence,
+)
 from scene_agent.agent.memory_scope import merge_role_private_memory
 from scene_agent.agent.state import AgentState, TodoItem, create_todo
 from .shared import (
@@ -113,15 +118,39 @@ def quality_evaluator_node(state: AgentState) -> Dict[str, Any]:
         streak += 1
     else:
         streak = 0
+    last_verified_value = state.get("last_verified_path")
+    last_verified_path = last_verified_value if isinstance(last_verified_value, str) and last_verified_value else None
+    active_todo_value = state.get("active_todo_id")
+    active_todo_id = active_todo_value if isinstance(active_todo_value, str) and active_todo_value else None
+    convergence = evaluate_convergence(
+        state=state,
+        verification=verification,
+        quality_status=status,
+        quality_reason=reason,
+        active_todo_id=active_todo_id,
+        last_verified_path=last_verified_path,
+    )
 
-    return {
+    result: Dict[str, Any] = {
         "quality_eval": {
             "status": status,
             "reason": reason,
             "source_verification_status": normalized_status or "none",
         },
         "verification_mismatch_streak": streak,
+        "recent_verification_signatures": convergence["recent_verification_signatures"],
+        "convergence_intervention_count": convergence["convergence_intervention_count"],
+        "convergence_eval": convergence["convergence_eval"],
     }
+    guidance_text = convergence.get("guidance_text")
+    if isinstance(guidance_text, str) and guidance_text.strip():
+        result["messages"] = [
+            SystemMessage(
+                id=CONVERGENCE_GUIDANCE_MESSAGE_ID,
+                content=guidance_text.strip(),
+            )
+        ]
+    return result
 
 def progress_evaluator_node(state: AgentState) -> Dict[str, Any]:
     mode = coerce_task_mode(state.get("task_mode"))
@@ -142,9 +171,17 @@ def progress_evaluator_node(state: AgentState) -> Dict[str, Any]:
     if mode == MODE_PLAN and (mismatch_streak >= 2 or builder_stall_count >= 2):
         should_replan = True
 
+    convergence_eval = state.get("convergence_eval")
+    convergence_status = ""
+    if isinstance(convergence_eval, dict):
+        convergence_status = str(convergence_eval.get("status", "")).strip().lower()
+
     if mode == MODE_CONVERSATION:
         status = "done"
         reason = "conversation_mode_response_ready"
+    elif convergence_status == "hard_stop":
+        status = "blocked"
+        reason = "convergence_guard_triggered"
     elif quality_status == "match" and unfinished_todos == 0:
         status = "done"
         reason = "verification_match_and_no_open_todos"
@@ -242,6 +279,17 @@ def transition_resolver_node(state: AgentState) -> Dict[str, Any]:
         return {
             "transition_next": "checkpoint_finalize",
             "transition_reason": "progress_done",
+        }
+
+    convergence_eval = state.get("convergence_eval")
+    convergence_status = ""
+    if isinstance(convergence_eval, dict):
+        convergence_status = str(convergence_eval.get("status", "")).strip().lower()
+    if convergence_status == "hard_stop":
+        reason = str(convergence_eval.get("reason") or "convergence_guard_triggered")
+        return {
+            "transition_next": "checkpoint_finalize",
+            "transition_reason": reason,
         }
 
     quality_eval = state.get("quality_eval")

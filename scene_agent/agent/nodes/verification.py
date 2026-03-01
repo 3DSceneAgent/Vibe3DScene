@@ -3,6 +3,7 @@ import hashlib
 from typing import Any, Dict
 from langchain_core.messages import ToolMessage
 from scene_agent.agent.state import AgentState
+from scene_agent.agent.todo_state import apply_todo_actions
 from scene_agent.config import get_settings
 from scene_agent.memory.reference_image_memory import get_reference_image_memory
 from scene_agent.vlm.verification import verify_render_with_references
@@ -141,7 +142,7 @@ def verify_node(
     if guidance_text:
         verification["guidance"] = guidance_text
 
-    todo_updates, todo_update_records = build_todo_updates_from_verification(
+    todo_actions, todo_update_records = build_todo_updates_from_verification(
         state,
         verification,
     )
@@ -160,8 +161,21 @@ def verify_node(
         "verify_forced_recovery": False,
         "catastrophic_recovery_attempts": 0,
     }
-    if todo_updates:
-        result["todos"] = todo_updates
+    if todo_actions:
+        active_todo_value = state.get("active_todo_id")
+        active_todo_id = active_todo_value if isinstance(active_todo_value, str) and active_todo_value else None
+        todo_versions, todos, next_active_todo_id = apply_todo_actions(
+            state.get("todo_versions"),
+            todo_actions,
+            fallback_todos_raw=state.get("todos"),
+            source="verification",
+            role="system",
+            render_path=render_path,
+            previous_active_todo_id=active_todo_id,
+        )
+        result["todo_versions"] = todo_versions
+        result["todos"] = todos
+        result["active_todo_id"] = next_active_todo_id
 
     return result
 

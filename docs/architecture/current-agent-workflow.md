@@ -14,11 +14,15 @@
 - `scene_agent/interfaces/api/shared.py`
 - `scene_agent/agent/graph.py`
 - `scene_agent/agent/graph_factory.py`
+- `scene_agent/agent/context_manager.py`
+- `scene_agent/agent/convergence.py`
 - `scene_agent/agent/nodes/router.py`
 - `scene_agent/agent/nodes/agents.py`
 - `scene_agent/agent/nodes/evaluators.py`
 - `scene_agent/agent/nodes/execution.py`
 - `scene_agent/agent/nodes/verification.py`
+- `scene_agent/agent/todo_protocol.py`
+- `scene_agent/agent/todo_state.py`
 - `scene_agent/agent/tool_policy.py`
 - `scene_agent/agent/workflow_profiles.py`
 - `scene_agent/memory/reference_image_memory.py`
@@ -89,42 +93,51 @@ flowchart TD
 ```mermaid
 flowchart TD
     A["prepare_reference_context"] --> B["agent"]
-    B --> C["post_agent"]
-    C --> D{"AIMessage has tool_calls?"}
+    B --> C["turn_dispatch"]
+    C --> D{"assistant_turn_kind"}
 
-    D -->|yes| E["tools"]
-    E --> F["update_memory"]
-    F --> G["scene_observe"]
-    G --> H["verify"]
-    H --> I["quality_evaluator"]
+    D -->|todo_only| E["todo_commit"]
+    E --> B
 
-    D -->|no| I
+    D -->|mixed| E
+    E -->|remaining external tools| F["tools"]
 
-    I --> J["progress_evaluator"]
-    J --> K["budget_evaluator"]
-    K --> L["transition_resolver"]
+    D -->|external_only| F
+    F --> G["update_memory"]
+    G --> H["scene_observe"]
+    H --> I["verify"]
+    I --> J["quality_evaluator"]
 
-    L -->|agent| B
-    L -->|checkpoint_finalize| M["checkpoint_finalize"]
+    D -->|no_calls| J
 
-    M --> N{"task_mode == plan_mode?"}
-    N -->|no| R["END"]
-    N -->|yes| O{"todo_check_gate.should_run?"}
-    O -->|yes| P["todo_check"]
-    O -->|no| Q["finalize"]
+    J --> K["progress_evaluator"]
+    K --> L["budget_evaluator"]
+    L --> M["transition_resolver"]
 
-    P --> S{"status"}
-    S -->|completed/not_applicable| Q
-    S -->|continue/blocked| B
-    Q --> R
+    M -->|agent| B
+    M -->|checkpoint_finalize| N["checkpoint_finalize"]
+
+    N --> O{"task_mode == plan_mode?"}
+    O -->|no| S["END"]
+    O -->|yes| P{"inline finalize guard"}
+    P -->|continue| B
+    P -->|finalize| R["finalize"]
+    R --> S
 ```
 
 关键点：
+- `agent` 后不再直接进入 `post_agent`；已改为 `turn_dispatch`，负责解析本轮 `AIMessage`，区分内部 `todo_update` 与外部 Blender tool calls。
+- 新增 `todo_commit` 独立结点：结构化 todo 更新在这里提交，不走 `tools -> update_memory -> scene_observe -> verify` 链，因此不会为一次计划更新额外触发渲染与验证。
 - `verify` 后固定进入 evaluator 链（`quality -> progress -> budget -> transition_resolver`）。
 - `verify` 的 catastrophic 只产出信号，不再自动注入恢复工具调用。
 - `scene_observe` 仅在最近工具批次包含 scene mutation 时生效。
+- `quality_evaluator` 已接入 convergence guard：识别重复失败 / 振荡 / 连续 catastrophic 后，给出指导性重试或直接熔断。
 - 仅 `plan_mode` 会进入 `finalize` 节点；`conversation_mode` / `single_action_mode` 在 `checkpoint_finalize` 后直接 `END`。
 - `agent` 提示词注图不再按线程全量注入；只读取 `prepare_reference_context_node` 产出的 `request_reference_image_keys`。
+- `agent` 上下文注入已接入 `context_manager`，只投影关键近因消息与历史摘要，不再全量注入 `state["messages"]`。
+- `checkpoint_finalize` 现在内联执行 finalize guard：直接基于当前 todo 快照判断“继续执行”还是“允许收尾”，不再进入独立 `finalize_guard` 结点。
+- `finalize_guard` 作为独立图结点已退出主路径；同名 state 仍保留为一份由 `checkpoint_finalize` 写出的终态快照，供 summary / observability 复用。
+- finalize guard 不再用硬编码 `stagnation_count` 驱动主循环停机；single-agent 主循环稳定性已转由 evaluator 链中的 budget + convergence 负责。
 
 ---
 
@@ -156,12 +169,9 @@ flowchart TD
     N --> B
     M -->|checkpoint_finalize| O["checkpoint_finalize"]
 
-    O --> P{"todo_check_gate.should_run?"}
-    P -->|yes| Q["todo_check"]
-    P -->|no| R["finalize"]
-    Q --> S{"status"}
-    S -->|completed/not_applicable| R
-    S -->|continue/blocked| B
+    O --> P{"inline finalize guard"}
+    P -->|continue| B
+    P -->|finalize| R["finalize"]
     R --> T["END"]
 ```
 
@@ -244,7 +254,11 @@ flowchart LR
 
 ## 7. 当前实现的关键差异说明（相对早期版本）
 
+- single-agent 已从 `post_agent` 演进为 `turn_dispatch -> todo_commit`：
+  - `turn_dispatch` 负责确定性拆分内部 todo 更新与外部工具调用。
+  - `todo_commit` 只提交计划状态，不触发额外 render/verify。
 - 主图不再接 `blocked_recovery -> blocked_recovery_action`，恢复策略改为由 agent 根据 catastrophic 信号自主修复。
 - Router / Evaluator / Topology 已模块化拆分，不再集中在单一 `nodes.py` 文件。
 - API 层已拆为多 router 模块（`routes_chat/routes_assets/routes_scene/routes_runtime/routes_system`），不再是单一 `api.py`。
 - SSE 用户消息流对内部节点做了可见性约束：`route_mode`（以及 `verify` 的非 tool token）不会直接显示到聊天消息中。
+- `finalize_guard` 已不再作为独立结点存在于主图；相关状态快照改由 `checkpoint_finalize` 内联写入。

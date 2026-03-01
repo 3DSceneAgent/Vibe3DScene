@@ -5,11 +5,12 @@ from scene_agent.agent.graph import (
     _route_after_finalize_checkpoint,
     _route_after_loop_checkpoint,
     _route_after_post_agent,
+    _route_after_todo_commit,
     _route_after_post_builder,
     _route_after_post_verifier,
     _route_after_transition_resolver,
     _route_after_verify,
-    _route_after_todo_check,
+    _route_after_finalize_guard,
 )
 from scene_agent.agent.nodes import (
     RENDER_VISION_MESSAGE_ID,
@@ -20,11 +21,12 @@ from scene_agent.agent.nodes import (
     checkpoint_gate_node,
     finalize_node,
     planner_refresh_node,
-    post_agent_node,
     post_builder_node,
     route_mode_node,
     scene_observe_node,
-    todo_check_node,
+    todo_commit_node,
+    finalize_guard_node,
+    turn_dispatch_node,
     transition_resolver_node,
     verifier_agent_node,
 )
@@ -67,7 +69,7 @@ def _todo(
 
 def test_checkpoint_gate_skips_without_todos_in_loop():
     result = checkpoint_gate_node({"tool_round_count": 3}, stage="loop")
-    gate = result["todo_check_gate"]
+    gate = result["finalize_guard_gate"]
     assert gate["should_run"] is False
     assert gate["reason"] == "no_todos"
 
@@ -77,63 +79,94 @@ def test_checkpoint_gate_runs_on_interval_when_todos_exist():
         {
             "todos": [_todo("todo-1", "Import table", "in_progress")],
             "tool_round_count": 4,
-            "last_todo_check_round": 1,
+            "last_finalize_guard_round": 1,
         },
         stage="loop",
     )
-    gate = result["todo_check_gate"]
+    gate = result["finalize_guard_gate"]
     assert gate["should_run"] is True
     assert gate["reason"] == "interval_reached"
 
 
-def test_checkpoint_gate_runs_before_finalize_when_todos_exist():
+def test_checkpoint_gate_inlines_finalize_guard_when_todos_remain_open():
     result = checkpoint_gate_node(
         {
             "todos": [_todo("todo-1", "Import table", "in_progress")],
             "tool_round_count": 1,
-            "last_todo_check_round": 1,
+            "last_finalize_guard_round": 1,
         },
         stage="finalize",
     )
-    gate = result["todo_check_gate"]
-    assert gate["should_run"] is True
-    assert gate["reason"] == "pre_finalize_guard"
+    gate = result["finalize_guard_gate"]
+    assert gate["should_run"] is False
+    assert gate["reason"] == "unfinished_todos_remaining"
+    assert result["finalize_guard"]["status"] == "continue"
 
 
-def test_todo_check_not_applicable_when_no_todos():
-    result = todo_check_node({"tool_round_count": 2, "todo_check_gate": {"stage": "loop"}})
-    assert result["todo_check"]["status"] == "not_applicable"
-    assert result["todo_check"]["reason"] == "no_todos"
+def test_checkpoint_gate_skips_finalize_guard_on_request_stop_reason():
+    result = checkpoint_gate_node(
+        {
+            "todos": [_todo("todo-1", "Import table", "in_progress")],
+            "tool_round_count": 1,
+            "request_stop_reason": "tool_batch_budget_exhausted",
+        },
+        stage="finalize",
+    )
+    gate = result["finalize_guard_gate"]
+    assert gate["should_run"] is False
+    assert gate["reason"] == "terminal_stop_skip_guard"
+    assert result["finalize_guard"]["status"] == "skipped"
 
 
-def test_todo_check_completed_when_no_pending_or_in_progress():
-    result = todo_check_node(
+def test_checkpoint_gate_skips_finalize_guard_on_convergence_hard_stop():
+    result = checkpoint_gate_node(
+        {
+            "todos": [_todo("todo-1", "Import table", "in_progress")],
+            "tool_round_count": 1,
+            "convergence_eval": {"status": "hard_stop", "reason": "convergence_guard_triggered"},
+        },
+        stage="finalize",
+    )
+    gate = result["finalize_guard_gate"]
+    assert gate["should_run"] is False
+    assert gate["reason"] == "convergence_hard_stop_skip_guard"
+    assert result["finalize_guard"]["status"] == "skipped"
+
+
+def test_finalize_guard_not_applicable_when_no_todos():
+    result = finalize_guard_node({"tool_round_count": 2, "finalize_guard_gate": {"stage": "loop"}})
+    assert result["finalize_guard"]["status"] == "not_applicable"
+    assert result["finalize_guard"]["reason"] == "no_todos"
+
+
+def test_finalize_guard_completed_when_no_pending_or_in_progress():
+    result = finalize_guard_node(
         {
             "todos": [
                 _todo("todo-1", "Import table", "completed", completed_at="2026-01-01T00:10:00"),
                 _todo("todo-2", "Add cup", "failed"),
             ],
             "tool_round_count": 5,
-            "todo_check_gate": {"stage": "loop"},
+            "finalize_guard_gate": {"stage": "loop"},
         }
     )
-    assert result["todo_check"]["status"] == "completed"
-    assert result["todo_check"]["reason"] == "all_todos_terminal"
+    assert result["finalize_guard"]["status"] == "completed"
+    assert result["finalize_guard"]["reason"] == "all_todos_terminal"
 
 
-def test_todo_check_blocks_after_stagnation_limit():
-    result = todo_check_node(
+def test_finalize_guard_keeps_finalize_guard_as_continue_when_todos_are_open():
+    result = finalize_guard_node(
         {
             "todos": [_todo("todo-1", "Import table", "pending")],
             "tool_round_count": 6,
-            "todo_check_gate": {"stage": "loop"},
-            "last_todo_snapshot": {"import table": "pending"},
+            "finalize_guard_gate": {"stage": "loop"},
+            "last_finalize_guard_todo_snapshot": {"todo-1": "pending"},
             "stagnation_count": 1,
         }
     )
-    assert result["todo_check"]["status"] == "blocked"
-    assert result["todo_check"]["reason"] == "todo_progress_stagnant"
-    assert result["stagnation_count"] == 2
+    assert result["finalize_guard"]["status"] == "continue"
+    assert result["finalize_guard"]["reason"] == "unfinished_todos_remaining"
+    assert result["stagnation_count"] == 0
 
 
 def test_route_mode_node_classifies_conversation_mode_for_simple_qa():
@@ -182,9 +215,9 @@ def test_route_mode_node_forces_plan_mode_when_unfinished_todos_exist():
     )
     assert result["task_mode"] == "plan_mode"
     assert result["task_intent"] == "continue_existing_plan"
-    assert result["max_request_agent_turns"] == -1
-    assert result["max_request_tool_batches"] == -1
-    assert result["max_plan_replans"] == -1
+    assert result["max_request_agent_turns"] == 50
+    assert result["max_request_tool_batches"] == 40
+    assert result["max_plan_replans"] == 3
 
 
 def test_route_mode_node_sets_dual_topology_for_plan_mode_when_requested():
@@ -231,62 +264,103 @@ def test_route_mode_node_downgrades_dual_request_for_conversation_mode():
     assert result["active_role"] == "general"
 
 
-def test_post_agent_reuses_todo_id_by_description():
+def test_turn_dispatch_extracts_internal_todo_updates():
     state = {
         "messages": [
             AIMessage(
-                content=(
-                    "<todos>\n"
-                    "- [completed] Import table\n"
-                    "</todos>\n"
-                )
+                content="Planning scene build.",
+                tool_calls=[
+                    {
+                        "name": "todo_update",
+                        "args": {
+                            "actions": [
+                                {
+                                    "action": "create",
+                                    "title": "Import table",
+                                    "status": "pending",
+                                    "reason": "Initial planning step",
+                                }
+                            ]
+                        },
+                        "id": "todo-create-1",
+                        "type": "tool_call",
+                    }
+                ],
             )
-        ],
-        "todos": [_todo("todo-existing", "Import table", "in_progress")],
+        ]
     }
-    result = post_agent_node(state)
-    assert result["todos"][0]["id"] == "todo-existing"
-    assert result["todos"][0]["status"] == "completed"
+    result = turn_dispatch_node(state)
+    assert result["assistant_turn_kind"] == "todo_only"
+    assert result["request_agent_turns"] == 1
+    assert len(result["pending_todo_updates"]) == 1
 
 
-def test_route_after_todo_check_continues_when_finalize_stage_not_terminal():
-    next_node = _route_after_todo_check(
+def test_todo_commit_creates_snapshot_and_version_entry():
+    result = todo_commit_node(
         {
-            "todo_check_gate": {"stage": "finalize"},
-            "todo_check": {"status": "continue"},
+            "active_role": "general",
+            "pending_todo_updates": [
+                {
+                    "tool_call_id": "todo-create-1",
+                    "request": {
+                        "actions": [
+                            {
+                                "action": "create",
+                                "title": "Import table",
+                                "status": "pending",
+                                "reason": "Initial plan",
+                                "set_active": True,
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+    )
+    assert result["todo_protocol_version"] == 1
+    assert len(result["todo_versions"]) == 1
+    assert result["todos"][0]["description"] == "Import table"
+    assert result["active_todo_id"] == result["todos"][0]["id"]
+
+
+def test_route_after_finalize_guard_continues_when_finalize_stage_not_terminal():
+    next_node = _route_after_finalize_guard(
+        {
+            "finalize_guard_gate": {"stage": "finalize"},
+            "finalize_guard": {"status": "continue"},
             "last_render_path": None,
         }
     )
     assert next_node == "agent"
 
 
-def test_route_after_todo_check_routes_blocked_to_agent_in_single_mode():
-    next_node = _route_after_todo_check(
+def test_route_after_finalize_guard_finalizes_blocked_status_in_single_mode():
+    next_node = _route_after_finalize_guard(
         {
-            "todo_check_gate": {"stage": "finalize"},
-            "todo_check": {"status": "blocked", "stagnation_count": 2},
+            "finalize_guard_gate": {"stage": "finalize"},
+            "finalize_guard": {"status": "blocked", "stagnation_count": 2},
             "last_render_path": None,
         }
     )
-    assert next_node == "agent"
+    assert next_node == "finalize"
 
 
-def test_route_after_todo_check_keeps_blocked_on_agent_path_even_with_high_stagnation():
-    next_node = _route_after_todo_check(
+def test_route_after_finalize_guard_finalizes_blocked_status_even_with_high_stagnation():
+    next_node = _route_after_finalize_guard(
         {
-            "todo_check_gate": {"stage": "finalize"},
-            "todo_check": {"status": "blocked", "stagnation_count": 4},
+            "finalize_guard_gate": {"stage": "finalize"},
+            "finalize_guard": {"status": "blocked", "stagnation_count": 4},
             "last_render_path": None,
         }
     )
-    assert next_node == "agent"
+    assert next_node == "finalize"
 
 
-def test_route_after_todo_check_finalizes_when_finalize_stage_terminal():
-    next_node = _route_after_todo_check(
+def test_route_after_finalize_guard_finalizes_when_finalize_stage_terminal():
+    next_node = _route_after_finalize_guard(
         {
-            "todo_check_gate": {"stage": "finalize"},
-            "todo_check": {"status": "completed"},
+            "finalize_guard_gate": {"stage": "finalize"},
+            "finalize_guard": {"status": "completed"},
             "last_render_path": None,
         }
     )
@@ -297,28 +371,40 @@ def test_route_after_finalize_checkpoint_ends_non_plan_modes():
     next_node = _route_after_finalize_checkpoint(
         {
             "task_mode": "conversation_mode",
-            "todo_check_gate": {"should_run": True},
+            "finalize_guard_gate": {"should_run": True},
         }
     )
     assert next_node == "__end__"
 
 
-def test_route_after_finalize_checkpoint_keeps_plan_finalize_flow():
+def test_route_after_finalize_checkpoint_returns_to_agent_when_guard_detects_open_todos():
     next_node = _route_after_finalize_checkpoint(
         {
             "task_mode": "plan_mode",
-            "todo_check_gate": {"should_run": True},
+            "finalize_guard": {"status": "continue"},
+            "request_agent_turns": 1,
+            "max_request_agent_turns": 8,
         }
     )
-    assert next_node == "todo_check"
+    assert next_node == "agent"
 
 
-def test_route_after_todo_check_ends_non_plan_modes_as_defensive_fallback():
-    next_node = _route_after_todo_check(
+def test_route_after_finalize_checkpoint_finalizes_when_guard_allows_finish():
+    next_node = _route_after_finalize_checkpoint(
+        {
+            "task_mode": "plan_mode",
+            "finalize_guard": {"status": "completed"},
+        }
+    )
+    assert next_node == "finalize"
+
+
+def test_route_after_finalize_guard_ends_non_plan_modes_as_defensive_fallback():
+    next_node = _route_after_finalize_guard(
         {
             "task_mode": "single_action_mode",
-            "todo_check_gate": {"stage": "finalize"},
-            "todo_check": {"status": "blocked", "stagnation_count": 2},
+            "finalize_guard_gate": {"stage": "finalize"},
+            "finalize_guard": {"status": "blocked", "stagnation_count": 2},
         }
     )
     assert next_node == "__end__"
@@ -327,7 +413,7 @@ def test_route_after_todo_check_ends_non_plan_modes_as_defensive_fallback():
 def test_blocked_recovery_node_prioritizes_undo_when_available():
     result = blocked_recovery_node(
         {
-            "todo_check": {"status": "blocked", "stagnation_count": 2},
+            "finalize_guard": {"status": "blocked", "stagnation_count": 2},
             "enabled_tool_names": ["get_scene_info", "observe_scene_global", "undo_last_snapshot"],
         }
     )
@@ -340,7 +426,7 @@ def test_blocked_recovery_node_prioritizes_undo_when_available():
 def test_blocked_recovery_node_second_attempt_forces_reset_even_with_undo_available():
     result = blocked_recovery_node(
         {
-            "todo_check": {"status": "blocked", "stagnation_count": 3},
+            "finalize_guard": {"status": "blocked", "stagnation_count": 3},
             "enabled_tool_names": ["get_scene_info", "observe_scene_global", "undo_last_snapshot"],
         }
     )
@@ -353,7 +439,7 @@ def test_blocked_recovery_node_second_attempt_forces_reset_even_with_undo_availa
 def test_blocked_recovery_node_prefers_clear_scene_when_available():
     result = blocked_recovery_node(
         {
-            "todo_check": {"status": "blocked", "stagnation_count": 2},
+            "finalize_guard": {"status": "blocked", "stagnation_count": 2},
             "enabled_tool_names": ["clear_scene", "get_scene_info", "observe_scene_global"],
         }
     )
@@ -366,7 +452,7 @@ def test_blocked_recovery_node_prefers_clear_scene_when_available():
 def test_blocked_recovery_node_uses_clear_and_rebuild_when_undo_unavailable():
     result = blocked_recovery_node(
         {
-            "todo_check": {"status": "blocked", "stagnation_count": 2},
+            "finalize_guard": {"status": "blocked", "stagnation_count": 2},
             "enabled_tool_names": ["get_scene_info", "delete_objects"],
         }
     )
@@ -379,7 +465,7 @@ def test_blocked_recovery_node_uses_clear_and_rebuild_when_undo_unavailable():
 def test_blocked_recovery_action_node_attempt_one_prefers_undo_and_observe():
     result = blocked_recovery_action_node(
         {
-            "todo_check": {"status": "blocked", "stagnation_count": 2},
+            "finalize_guard": {"status": "blocked", "stagnation_count": 2},
             "enabled_tool_names": ["undo_last_snapshot", "get_scene_info", "observe_scene_global"],
         }
     )
@@ -391,7 +477,7 @@ def test_blocked_recovery_action_node_attempt_one_prefers_undo_and_observe():
 def test_blocked_recovery_action_node_attempt_two_prefers_clear_scene():
     result = blocked_recovery_action_node(
         {
-            "todo_check": {"status": "blocked", "stagnation_count": 3},
+            "finalize_guard": {"status": "blocked", "stagnation_count": 3},
             "enabled_tool_names": ["clear_scene", "get_scene_info", "observe_scene_global"],
         }
     )
@@ -488,28 +574,34 @@ def test_route_after_post_verifier_routes_to_checkpoint_on_turn_budget_exhaustio
     assert next_node == "quality_evaluator"
 
 
-def test_route_after_post_agent_retries_once_when_tools_expected_but_missing():
+def test_route_after_post_agent_routes_todo_only_turns_to_todo_commit():
     next_node = _route_after_post_agent(
         {
-            "messages": [AIMessage(content="Continuing with tool calls.")],
-            "task_mode": "plan_mode",
+            "assistant_turn_kind": "todo_only",
+            "pending_todo_updates": [{"tool_call_id": "todo-1", "request": {"actions": []}}],
+        }
+    )
+    assert next_node == "todo_commit"
+
+
+def test_route_after_post_agent_routes_external_only_to_tools():
+    next_node = _route_after_post_agent(
+        {
+            "assistant_turn_kind": "external_only",
+        }
+    )
+    assert next_node == "tools"
+
+
+def test_route_after_todo_commit_returns_to_agent_when_no_external_calls():
+    next_node = _route_after_todo_commit(
+        {
+            "messages": [ToolMessage(name="todo_update", content={"applied": True}, tool_call_id="todo-1")],
             "request_agent_turns": 1,
             "max_request_agent_turns": 8,
         }
     )
-    assert next_node == "quality_evaluator"
-
-
-def test_route_after_post_agent_finalizes_after_retry_budget_exhausted():
-    next_node = _route_after_post_agent(
-        {
-            "messages": [AIMessage(content="Continuing with tool calls.")],
-            "task_mode": "plan_mode",
-            "request_agent_turns": 2,
-            "max_request_agent_turns": 8,
-        }
-    )
-    assert next_node == "quality_evaluator"
+    assert next_node == "agent"
 
 
 def test_route_after_transition_resolver_routes_to_agent_for_single_topology():
@@ -528,34 +620,47 @@ def test_route_after_loop_checkpoint_routes_to_builder_for_dual_plan_mode():
         {
             "task_mode": "plan_mode",
             "workflow_topology": "dual_agent",
-            "todo_check_gate": {"should_run": False},
+            "finalize_guard_gate": {"should_run": False},
         }
     )
     assert next_node == "builder_agent"
 
 
-def test_route_after_todo_check_returns_builder_for_dual_plan_mode():
-    next_node = _route_after_todo_check(
+def test_route_after_finalize_guard_returns_builder_for_dual_plan_mode():
+    next_node = _route_after_finalize_guard(
         {
             "task_mode": "plan_mode",
             "workflow_topology": "dual_agent",
-            "todo_check_gate": {"stage": "loop"},
-            "todo_check": {"status": "continue"},
+            "finalize_guard_gate": {"stage": "loop"},
+            "finalize_guard": {"status": "continue"},
         }
     )
     assert next_node == "builder_agent"
 
 
-def test_route_after_todo_check_returns_builder_for_dual_plan_blocked_finalize_stage():
-    next_node = _route_after_todo_check(
+def test_route_after_finalize_checkpoint_returns_builder_for_dual_plan_when_guard_continues():
+    next_node = _route_after_finalize_checkpoint(
         {
             "task_mode": "plan_mode",
             "workflow_topology": "dual_agent",
-            "todo_check_gate": {"stage": "finalize"},
-            "todo_check": {"status": "blocked", "stagnation_count": 3},
+            "finalize_guard": {"status": "continue"},
+            "request_agent_turns": 1,
+            "max_request_agent_turns": 8,
         }
     )
     assert next_node == "builder_agent"
+
+
+def test_route_after_finalize_guard_finalizes_blocked_status_for_dual_plan_finalize_stage():
+    next_node = _route_after_finalize_guard(
+        {
+            "task_mode": "plan_mode",
+            "workflow_topology": "dual_agent",
+            "finalize_guard_gate": {"stage": "finalize"},
+            "finalize_guard": {"status": "blocked", "stagnation_count": 3},
+        }
+    )
+    assert next_node == "finalize"
 
 
 def test_route_after_blocked_recovery_action_returns_builder_for_dual_plan_without_calls():
@@ -575,7 +680,7 @@ def test_finalize_node_emits_summary_message():
             "task_mode": "plan_mode",
             "request_agent_turns": 3,
             "request_tool_batches": 2,
-            "todo_check": {
+            "finalize_guard": {
                 "status": "completed",
                 "reason": "all_todos_terminal",
                 "pending_count": 0,
@@ -594,7 +699,26 @@ def test_finalize_node_emits_summary_message():
     assert "Scene workflow finished" in result["messages"][0].content
 
 
-def test_finalize_summary_uses_todo_check_counts_for_consistency():
+def test_finalize_node_uses_transition_reason_when_stop_reason_is_absent():
+    result = finalize_node(
+        {
+            "task_mode": "plan_mode",
+            "transition_reason": "repeated_same_failure_signature_after_guidance",
+            "finalize_guard": {
+                "status": "skipped",
+                "reason": "convergence_hard_stop_skip_guard",
+                "pending_count": 1,
+                "in_progress_count": 0,
+                "completed_count": 0,
+                "failed_count": 0,
+            },
+            "messages": [],
+        }
+    )
+    assert result["workflow"]["finish_reason"] == "repeated_same_failure_signature_after_guidance"
+
+
+def test_finalize_summary_uses_finalize_guard_counts_for_consistency():
     result = finalize_node(
         {
             "task_mode": "plan_mode",
@@ -603,7 +727,7 @@ def test_finalize_summary_uses_todo_check_counts_for_consistency():
                 _todo("todo-1", "Create cube", "pending"),
                 _todo("todo-1b", "Create cube", "completed", completed_at="2026-01-01T00:10:00"),
             ],
-            "todo_check": {
+            "finalize_guard": {
                 "status": "completed",
                 "reason": "all_todos_terminal",
                 "pending_count": 0,
@@ -635,7 +759,7 @@ def test_finalize_node_prefers_model_generated_summary_when_available():
     result = finalize_node(
         {
             "task_mode": "plan_mode",
-            "todo_check": {
+            "finalize_guard": {
                 "status": "blocked",
                 "reason": "todo_progress_stagnant",
                 "pending_count": 1,
@@ -662,7 +786,7 @@ def test_finalize_fallback_does_not_dump_raw_verification_dict_string():
     result = finalize_node(
         {
             "task_mode": "plan_mode",
-            "todo_check": {
+            "finalize_guard": {
                 "status": "blocked",
                 "reason": "todo_progress_stagnant",
                 "pending_count": 2,

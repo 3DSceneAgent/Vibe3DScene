@@ -17,7 +17,7 @@ def build_agent_state_graph(
     clarification_node: Callable[..., Any],
     prepare_reference_context_node: Callable[..., Any],
     agent_node: Callable[..., Any],
-    post_agent_node: Callable[..., Any],
+    turn_dispatch_node: Callable[..., Any],
     builder_agent_node: Callable[..., Any],
     post_builder_node: Callable[..., Any],
     verifier_camera_agent_node: Callable[..., Any],
@@ -27,10 +27,10 @@ def build_agent_state_graph(
     progress_evaluator_node: Callable[..., Any],
     budget_evaluator_node: Callable[..., Any],
     tools_node: Any,
+    todo_commit_node: Callable[..., Any],
     update_memory_node: Callable[..., Any],
     scene_observe_node: Callable[..., Any],
     checkpoint_finalize_node: Callable[..., Any],
-    todo_check_node: Callable[..., Any],
     verify_node: Callable[..., Any],
     transition_resolver_node: Callable[..., Any],
     planner_refresh_node: Callable[..., Any],
@@ -38,13 +38,13 @@ def build_agent_state_graph(
     route_after_mode: Callable[..., Any],
     route_after_sync_reference_catalog: Callable[..., Any],
     route_after_prepare_reference_context: Callable[..., Any],
-    route_after_post_agent: Callable[..., Any],
+    route_after_turn_dispatch: Callable[..., Any],
+    route_after_todo_commit: Callable[..., Any],
     route_after_post_builder: Callable[..., Any],
     route_after_post_verifier: Callable[..., Any],
     route_after_verify: Callable[..., Any],
     route_after_transition_resolver: Callable[..., Any],
     route_after_finalize_checkpoint: Callable[..., Any],
-    route_after_todo_check: Callable[..., Any],
 ) -> StateGraph:
     builder = StateGraph(AgentState)
 
@@ -53,7 +53,7 @@ def build_agent_state_graph(
     builder.add_node("clarification", clarification_node)
     builder.add_node("prepare_reference_context", prepare_reference_context_node)
     builder.add_node("agent", agent_node)
-    builder.add_node("post_agent", post_agent_node)
+    builder.add_node("turn_dispatch", turn_dispatch_node)
     builder.add_node("builder_agent", builder_agent_node)
     builder.add_node("post_builder", post_builder_node)
     builder.add_node("verifier_camera_agent", verifier_camera_agent_node)
@@ -63,10 +63,10 @@ def build_agent_state_graph(
     builder.add_node("progress_evaluator", progress_evaluator_node)
     builder.add_node("budget_evaluator", budget_evaluator_node)
     builder.add_node("tools", tools_node)
+    builder.add_node("todo_commit", todo_commit_node)
     builder.add_node("update_memory", update_memory_node)
     builder.add_node("scene_observe", scene_observe_node)
     builder.add_node("checkpoint_finalize", checkpoint_finalize_node)
-    builder.add_node("todo_check", todo_check_node)
     builder.add_node("verify", verify_node)
     builder.add_node("transition_resolver", transition_resolver_node)
     builder.add_node("planner_refresh", planner_refresh_node)
@@ -78,8 +78,9 @@ def build_agent_state_graph(
     builder.add_edge("clarification", END)
     builder.add_conditional_edges("prepare_reference_context", route_after_prepare_reference_context)
 
-    builder.add_edge("agent", "post_agent")
-    builder.add_conditional_edges("post_agent", route_after_post_agent)
+    builder.add_edge("agent", "turn_dispatch")
+    builder.add_conditional_edges("turn_dispatch", route_after_turn_dispatch)
+    builder.add_conditional_edges("todo_commit", route_after_todo_commit)
 
     builder.add_edge("builder_agent", "post_builder")
     builder.add_conditional_edges("post_builder", route_after_post_builder)
@@ -102,7 +103,6 @@ def build_agent_state_graph(
     builder.add_edge("planner_refresh", "builder_agent")
 
     builder.add_conditional_edges("checkpoint_finalize", route_after_finalize_checkpoint)
-    builder.add_conditional_edges("todo_check", route_after_todo_check)
     builder.add_edge("finalize", END)
 
     return builder
