@@ -73,6 +73,21 @@ def test_active_stream_session_request_stop_records_reason_once() -> None:
     assert session.termination_reason == "ownership_lost"
 
 
+def test_active_stream_session_caps_history_and_replays_by_sequence(monkeypatch) -> None:
+    monkeypatch.setattr(routes_chat, "_STREAM_SESSION_HISTORY_LIMIT", 3)
+    session = routes_chat._ActiveStreamSession(
+        stream_request_id="stream-cap",
+        thread_id="thread-cap",
+        request_id="request-cap",
+    )
+
+    for idx in range(5):
+        session.publish({"delta": f"chunk-{idx}"})
+
+    assert [payload["seq"] for payload in session.snapshot_after(0)] == [3, 4, 5]
+    assert [payload["seq"] for payload in session.snapshot_after(3)] == [4, 5]
+
+
 def test_run_stream_runtime_heartbeat_touches_local_session_and_registry(monkeypatch) -> None:
     manager = routes_chat.get_session_manager().__class__()
     local_session = manager.ensure("thread-heartbeat", "headless")

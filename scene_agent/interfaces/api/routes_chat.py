@@ -53,6 +53,7 @@ _INTERNAL_NON_USER_MESSAGE_NODES = frozenset(
 )
 _STREAM_REQUEST_ID_HEADER = "X-Stream-Request-Id"
 _STREAM_SESSION_RETAIN_SECONDS = 120.0
+_STREAM_SESSION_HISTORY_LIMIT = 2000
 _STREAM_POLL_INTERVAL_SECONDS = 0.25
 _ACTIVE_STREAM_SESSIONS: dict[str, "_ActiveStreamSession"] = {}
 _ACTIVE_STREAM_SESSIONS_LOCK = threading.Lock()
@@ -97,11 +98,18 @@ class _ActiveStreamSession:
             event_payload.setdefault("stream_request_id", self.stream_request_id)
             self.updated_at = time.time()
             self.history.append(event_payload)
+            overflow = len(self.history) - _STREAM_SESSION_HISTORY_LIMIT
+            if overflow > 0:
+                del self.history[:overflow]
 
     def snapshot_after(self, last_seq: int) -> list[dict[str, Any]]:
         with self.lock:
-            start_index = max(0, int(last_seq))
-            return [dict(item) for item in self.history[start_index:]]
+            normalized_last_seq = max(0, int(last_seq))
+            return [
+                dict(item)
+                for item in self.history
+                if int(item.get("seq", 0)) > normalized_last_seq
+            ]
 
     def latest_seq(self) -> int:
         with self.lock:

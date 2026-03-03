@@ -321,7 +321,14 @@ export async function streamChat({
     }
 
     while (true) {
-      const { value, done } = await reader.read()
+      let chunk: ReadableStreamReadResult<Uint8Array>
+      try {
+        chunk = await reader.read()
+      } catch {
+        streamEndedUnexpectedly = !sawTerminalEvent && !signal?.aborted
+        break
+      }
+      const { value, done } = chunk
       if (done) {
         streamEndedUnexpectedly = !sawTerminalEvent && !signal?.aborted
         break

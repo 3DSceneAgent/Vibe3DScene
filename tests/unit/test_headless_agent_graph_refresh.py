@@ -17,6 +17,8 @@ class DummyProcess:
 
 def _reset_runtime_state(thread_id: str) -> None:
     api_module._agent_graphs_by_thread.pop(thread_id, None)
+    with api_module._agent_graph_refresh_lock:
+        api_module._agent_graph_refresh_tasks.pop(thread_id, None)
     with api_module._thread_vlm_lock:
         api_module._thread_vlm_configs.pop(thread_id, None)
 
@@ -156,3 +158,53 @@ def test_get_agent_rebuilds_graph_and_migrates_state_on_vlm_switch(monkeypatch):
     _reset_runtime_state(thread_id)
     manager.remove(thread_id)
     coordinator.delete_session_metadata(thread_id)
+
+
+def test_get_agent_coalesces_concurrent_refreshes(monkeypatch):
+    monkeypatch.setenv("BLENDER_MODE", "headless")
+    monkeypatch.setenv("VLM_API_KEY", "test-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    reload_settings()
+
+    thread_id = f"agent-concurrent-thread-{uuid.uuid4().hex[:8]}"
+    manager = get_session_manager()
+    manager.remove(thread_id)
+    _reset_runtime_state(thread_id)
+
+    class DummyGraph:
+        _vlm_provider = "gemini"
+        _vlm_model = "gemini-2.5-pro"
+
+    created: list[DummyGraph] = []
+
+    async def fake_create_graph(*, session_id=None, provider=None, model=None, api_key=None):
+        assert session_id == thread_id
+        assert provider is not None
+        assert model is not None
+        assert api_key
+        await asyncio.sleep(0)
+        graph = DummyGraph()
+        created.append(graph)
+        return graph
+
+    monkeypatch.setattr(api_shared, "_create_agent_graph_for_runtime", fake_create_graph)
+
+    session = manager.ensure(thread_id, "headless")
+    session.process = DummyProcess(running=True)
+    session.mcp_process = DummyProcess(running=True)
+
+    async def run_concurrently():
+        return await asyncio.gather(
+            api_module.get_agent(thread_id),
+            api_module.get_agent(thread_id),
+        )
+
+    first_graph, second_graph = asyncio.run(run_concurrently())
+
+    assert len(created) == 1
+    assert first_graph is second_graph
+
+    _reset_runtime_state(thread_id)
+    manager.remove(thread_id)

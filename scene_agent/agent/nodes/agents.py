@@ -18,6 +18,7 @@ def agent_node(
     state: AgentState,
     llm_with_tools,
     available_tool_names: list[str] | None = None,
+    summary_model: Any | None = None,
 ) -> Dict[str, Any]:
     """
     Agent node: VLM reasoning with all tools bound.
@@ -35,12 +36,14 @@ def agent_node(
         llm_with_tools=llm_with_tools,
         available_tool_names=available_tool_names,
         role=ROLE_GENERAL,
+        summary_model=summary_model,
     )
 
 def builder_agent_node(
     state: AgentState,
     llm_with_tools,
     available_tool_names: list[str] | None = None,
+    summary_model: Any | None = None,
 ) -> Dict[str, Any]:
     """
     Builder agent node for dual-agent plan_mode execution.
@@ -50,12 +53,14 @@ def builder_agent_node(
         llm_with_tools=llm_with_tools,
         available_tool_names=available_tool_names,
         role=ROLE_BUILDER,
+        summary_model=summary_model,
     )
 
 def verifier_camera_agent_node(
     state: AgentState,
     llm_with_tools,
     available_tool_names: list[str] | None = None,
+    summary_model: Any | None = None,
 ) -> Dict[str, Any]:
     """
     Tool-capable verifier agent.
@@ -68,6 +73,7 @@ def verifier_camera_agent_node(
         llm_with_tools=llm_with_tools,
         available_tool_names=available_tool_names,
         role=ROLE_VERIFIER,
+        summary_model=summary_model,
     )
 
 def _tool_calls_from_message(message: Any) -> list[dict[str, Any]]:

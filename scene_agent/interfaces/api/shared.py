@@ -80,6 +80,8 @@ EXAMPLE_PROMPTS_PATH = (
 # Global agent instance
 _agent_graph = None
 _agent_graphs_by_thread: Dict[str, Any] = {}
+_agent_graph_refresh_tasks: Dict[str, asyncio.Task] = {}
+_agent_graph_refresh_lock = threading.Lock()
 _idle_sweeper_task: asyncio.Task | None = None
 
 # Blender addon connection (direct socket)
@@ -986,6 +988,68 @@ def message_is_tool(serialized: Dict[str, Any]) -> bool:
     return serialized.get("type") == "tool"
 
 
+def _thread_graph_matches_runtime(graph: Any, vlm_runtime: dict[str, Any]) -> bool:
+    if graph is None:
+        return False
+    graph_provider = getattr(graph, "_vlm_provider", None)
+    graph_model = getattr(graph, "_vlm_model", None)
+    has_vlm_metadata = graph_provider is not None and graph_model is not None
+    if not has_vlm_metadata:
+        return True
+    return (
+        graph_provider == vlm_runtime["provider"]
+        and graph_model == vlm_runtime["model"]
+    )
+
+
+async def _refresh_thread_agent_graph(
+    *,
+    thread_id: str,
+    vlm_runtime: dict[str, Any],
+) -> Any:
+    previous_graph = _agent_graphs_by_thread.get(thread_id)
+    next_graph = await _create_agent_graph_for_runtime(
+        session_id=thread_id,
+        provider=vlm_runtime["provider"],
+        model=vlm_runtime["model"],
+        api_key=vlm_runtime["api_key"],
+    )
+    if previous_graph is not None:
+        await _migrate_agent_state_if_possible(
+            thread_id=thread_id,
+            from_graph=previous_graph,
+            to_graph=next_graph,
+        )
+    _agent_graphs_by_thread[thread_id] = next_graph
+    return next_graph
+
+
+async def _ensure_thread_agent_graph(
+    *,
+    thread_id: str,
+    vlm_runtime: dict[str, Any],
+) -> Any:
+    created_task = False
+    with _agent_graph_refresh_lock:
+        task = _agent_graph_refresh_tasks.get(thread_id)
+        if task is None or task.done():
+            task = asyncio.create_task(
+                _refresh_thread_agent_graph(
+                    thread_id=thread_id,
+                    vlm_runtime=vlm_runtime,
+                )
+            )
+            _agent_graph_refresh_tasks[thread_id] = task
+            created_task = True
+    try:
+        return await task
+    finally:
+        if created_task:
+            with _agent_graph_refresh_lock:
+                if _agent_graph_refresh_tasks.get(thread_id) is task:
+                    _agent_graph_refresh_tasks.pop(thread_id, None)
+
+
 async def get_agent(thread_id: str | None = None):
     """Get or create the agent graph (singleton or per-thread in headless mode)."""
     global _agent_graph, _agent_graphs_by_thread
@@ -1004,34 +1068,16 @@ async def get_agent(thread_id: str | None = None):
                     restart_needed = True
 
         graph = _agent_graphs_by_thread.get(thread_id)
-        graph_provider = getattr(graph, "_vlm_provider", None) if graph is not None else None
-        graph_model = getattr(graph, "_vlm_model", None) if graph is not None else None
-        has_vlm_metadata = graph_provider is not None and graph_model is not None
-        graph_mismatch = (
-            graph is None
-            or (
-                has_vlm_metadata
-                and (
-                    graph_provider != vlm_runtime["provider"]
-                    or graph_model != vlm_runtime["model"]
-                )
+        if not _thread_graph_matches_runtime(graph, vlm_runtime):
+            graph = await _ensure_thread_agent_graph(
+                thread_id=thread_id,
+                vlm_runtime=vlm_runtime,
             )
-        )
-        if graph_mismatch:
-            previous_graph = graph
-            next_graph = await _create_agent_graph_for_runtime(
-                session_id=thread_id,
-                provider=vlm_runtime["provider"],
-                model=vlm_runtime["model"],
-                api_key=vlm_runtime["api_key"],
-            )
-            if previous_graph is not None:
-                await _migrate_agent_state_if_possible(
+            if not _thread_graph_matches_runtime(graph, vlm_runtime):
+                graph = await _ensure_thread_agent_graph(
                     thread_id=thread_id,
-                    from_graph=previous_graph,
-                    to_graph=next_graph,
+                    vlm_runtime=vlm_runtime,
                 )
-            _agent_graphs_by_thread[thread_id] = next_graph
         elif restart_needed:
             # Keep existing graph memory, only bring headless runtime back.
             from scene_agent.tools.blender_tools import get_blender_tools as _ensure_tools

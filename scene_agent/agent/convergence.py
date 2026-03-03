@@ -6,6 +6,7 @@ from typing import Any
 
 
 CONVERGENCE_GUIDANCE_MESSAGE_ID = "convergence_guidance_current"
+_MAX_GUIDED_RETRIES_BEFORE_HARD_STOP = 2
 
 
 def _coerce_signature_history(raw_value: Any) -> list[dict[str, Any]]:
@@ -64,6 +65,46 @@ def _signature_key(signature: dict[str, Any]) -> tuple[str, str, str]:
     )
 
 
+def _is_alternating_bucket_sequence(buckets: list[str]) -> bool:
+    if len(buckets) < 4:
+        return False
+    if any(not bucket or bucket in {"unknown", "catastrophic"} for bucket in buckets):
+        return False
+    unique_buckets = set(buckets)
+    if len(unique_buckets) != 2:
+        return False
+    if any(buckets[idx] == buckets[idx - 1] for idx in range(1, len(buckets))):
+        return False
+    return (
+        len({buckets[idx] for idx in range(0, len(buckets), 2)}) == 1
+        and len({buckets[idx] for idx in range(1, len(buckets), 2)}) == 1
+    )
+
+
+def _has_oscillation_pattern(history: list[dict[str, Any]]) -> bool:
+    if len(history) < 4:
+        return False
+
+    recent_window = history[-6:]
+    signatures_by_todo: dict[str, list[dict[str, Any]]] = {}
+    for item in recent_window:
+        todo_id = str(item.get("todo_id") or "")
+        if not todo_id:
+            continue
+        signatures_by_todo.setdefault(todo_id, []).append(item)
+
+    for todo_history in signatures_by_todo.values():
+        if len(todo_history) < 4:
+            continue
+        max_window = min(6, len(todo_history))
+        for window_size in range(max_window, 3, -1):
+            candidate = todo_history[-window_size:]
+            buckets = [str(entry.get("failure_bucket") or "") for entry in candidate]
+            if _is_alternating_bucket_sequence(buckets):
+                return True
+    return False
+
+
 def _pattern_from_history(history: list[dict[str, Any]]) -> tuple[str, str]:
     if len(history) >= 2:
         last_two = history[-2:]
@@ -76,18 +117,8 @@ def _pattern_from_history(history: list[dict[str, Any]]) -> tuple[str, str]:
         if keys[0] == keys[1] == keys[2] and keys[0][0]:
             return "repeat_loop", "repeated_same_failure_signature"
 
-    if len(history) >= 4:
-        a, b, c, d = history[-4:]
-        if (
-            str(a.get("todo_id") or "")
-            and str(a.get("todo_id")) == str(b.get("todo_id")) == str(c.get("todo_id")) == str(d.get("todo_id"))
-            and str(a.get("failure_bucket") or "")
-            in {"scale", "placement", "layout"}
-            and str(a.get("failure_bucket")) == str(c.get("failure_bucket"))
-            and str(b.get("failure_bucket")) == str(d.get("failure_bucket"))
-            and str(a.get("failure_bucket")) != str(b.get("failure_bucket"))
-        ):
-            return "oscillation_loop", "alternating_failure_buckets"
+    if _has_oscillation_pattern(history):
+        return "oscillation_loop", "alternating_failure_buckets"
 
     return "none", "no_convergence_pattern"
 
@@ -128,13 +159,18 @@ def evaluate_convergence(
         prior_interventions = raw_interventions
 
     if quality_status not in {"mismatch", "catastrophic"}:
+        should_reset = quality_status == "match"
         return {
-            "recent_verification_signatures": [],
-            "convergence_intervention_count": 0,
+            "recent_verification_signatures": [] if should_reset else previous_history,
+            "convergence_intervention_count": 0 if should_reset else prior_interventions,
             "convergence_eval": {
                 "status": "stable",
                 "pattern": "none",
-                "reason": "verification_not_in_failure_state",
+                "reason": (
+                    "verification_match_resets_failure_history"
+                    if should_reset
+                    else "verification_not_in_failure_state"
+                ),
             },
             "guidance_text": None,
         }
@@ -164,7 +200,7 @@ def evaluate_convergence(
         }
 
     if pattern in {"repeat_loop", "oscillation_loop"}:
-        if prior_interventions >= 1:
+        if prior_interventions >= _MAX_GUIDED_RETRIES_BEFORE_HARD_STOP:
             return {
                 "recent_verification_signatures": history,
                 "convergence_intervention_count": prior_interventions,

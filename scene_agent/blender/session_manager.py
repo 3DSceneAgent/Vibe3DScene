@@ -670,12 +670,11 @@ def start_mcp_process(
             cwd=cwd,
             close_fds=False,
         )
+        log_file.close()
         print(f"  MCP PID: {session.mcp_process.pid}")
         time.sleep(1.5)
         if session.mcp_process.poll() is not None:
             exit_code = session.mcp_process.returncode
-            log_file.flush()
-            log_file.close()
             try:
                 with open(log_path, "r") as read_file:
                     log_content = read_file.read()

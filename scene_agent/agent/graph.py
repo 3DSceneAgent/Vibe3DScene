@@ -98,6 +98,37 @@ def _coerce_non_negative_int(value: Any, *, default: int = 0) -> int:
     return default
 
 
+def _build_context_summary_helper_model(
+    *,
+    provider_name: str,
+    api_key: str,
+    settings: Any,
+) -> Any | None:
+    try:
+        if hasattr(settings, "get_context_summary_helper_model"):
+            helper_model_name = settings.get_context_summary_helper_model(provider_name)
+        else:
+            helper_model_name = settings.get_reference_image_helper_model(provider_name)
+        helper_provider = get_vlm_provider(
+            provider_name=provider_name,
+            api_key=api_key,
+            model=helper_model_name,
+        )
+        helper_model = helper_provider.get_chat_model()
+    except Exception:
+        return None
+
+    if hasattr(helper_model, "with_config"):
+        try:
+            return helper_model.with_config(
+                tags=["nostream"],
+                run_name="context_summary_helper",
+            )
+        except Exception:
+            return helper_model
+    return helper_model
+
+
 def _task_mode(state: AgentState) -> str:
     raw_mode = state.get("task_mode")
     if isinstance(raw_mode, str) and raw_mode.strip():
@@ -607,6 +638,11 @@ async def create_agent_graph(
         model=selected_model,
     )
     model = vlm_provider.get_chat_model()
+    context_summary_model = _build_context_summary_helper_model(
+        provider_name=selected_provider,
+        api_key=selected_api_key,
+        settings=settings,
+    )
     
     # Load tools from Blender MCP server
     tools = await get_blender_tools(session_id=session_id)
@@ -636,13 +672,28 @@ async def create_agent_graph(
     
     # Define agent node with bound tools
     def call_model(state: AgentState) -> dict:
-        return agent_node(state, llm_with_tools, available_tool_names)
+        return agent_node(
+            state,
+            llm_with_tools,
+            available_tool_names,
+            summary_model=context_summary_model,
+        )
 
     def call_builder_model(state: AgentState) -> dict:
-        return builder_agent_node(state, llm_with_tools, available_tool_names)
+        return builder_agent_node(
+            state,
+            llm_with_tools,
+            available_tool_names,
+            summary_model=context_summary_model,
+        )
 
     def call_verifier_camera_model(state: AgentState) -> dict:
-        return verifier_camera_agent_node(state, llm_with_tools, available_tool_names)
+        return verifier_camera_agent_node(
+            state,
+            llm_with_tools,
+            available_tool_names,
+            summary_model=context_summary_model,
+        )
 
     def call_route_mode(state: AgentState) -> dict:
         return route_mode_llm_node(state, router_model=model)

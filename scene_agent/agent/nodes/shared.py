@@ -18,6 +18,7 @@ from urllib.parse import unquote, urlparse
 from uuid import uuid4
 from langchain_core.messages import ToolMessage, AIMessage, SystemMessage, HumanMessage
 from pydantic import BaseModel, Field, ValidationError
+from scene_agent.agent.convergence import CONVERGENCE_GUIDANCE_MESSAGE_ID
 from scene_agent.agent.context_manager import build_projected_context
 from scene_agent.agent.state import AgentState, ReferenceImageCatalogEntry, TaskMode, TodoItem
 from scene_agent.agent.todo_protocol import TODO_UPDATE_TOOL_NAME
@@ -952,6 +953,7 @@ def invoke_role_agent(
     llm_with_tools: Any,
     available_tool_names: list[str] | None,
     role: str,
+    summary_model: Any | None = None,
 ) -> Dict[str, Any]:
     # Build messages including system prompt
     from scene_agent.agent.prompts import get_full_system_prompt
@@ -1011,17 +1013,24 @@ def invoke_role_agent(
         )
     if role == ROLE_GENERAL and (mode == MODE_PLAN or effective_todo_snapshot(state)):
         messages.append(SystemMessage(content=build_todo_runtime_prompt(state)))
-    messages, summary_text, omitted_count = build_projected_context(
-        base_messages=messages,
-        state_messages=list(state["messages"]),
-        pinned_message_ids={RENDER_VISION_MESSAGE_ID, SCENE_OBSERVE_MESSAGE_ID},
-        max_recent_messages=12,
-    )
+    state_messages = list(state["messages"])
     if role in {ROLE_GENERAL, ROLE_BUILDER, ROLE_VERIFIER}:
-        messages = _inject_reference_images_into_latest_human_message(
-            messages,
+        state_messages = _inject_reference_images_into_latest_human_message(
+            state_messages,
             state=state,
         )
+    messages, summary_text, omitted_count = build_projected_context(
+        base_messages=messages,
+        state_messages=state_messages,
+        pinned_message_ids={
+            RENDER_VISION_MESSAGE_ID,
+            SCENE_OBSERVE_MESSAGE_ID,
+            CONVERGENCE_GUIDANCE_MESSAGE_ID,
+        },
+        max_recent_messages=12,
+        token_counter=llm_with_tools,
+        summary_model=summary_model,
+    )
     
     # Invoke the LLM
     response = llm_with_tools.invoke(messages)

@@ -207,6 +207,18 @@ class Settings(BaseSettings):
         default="claude-3-5-haiku-20241022",
         description="Lightweight Anthropic model for reference-image naming and retrieval decisions"
     )
+    context_summary_helper_openai_model: str = Field(
+        default="gpt-4.1-mini",
+        description="Lightweight OpenAI model for context compression summaries"
+    )
+    context_summary_helper_gemini_model: str = Field(
+        default="gemini-2.5-flash",
+        description="Lightweight Gemini model for context compression summaries"
+    )
+    context_summary_helper_anthropic_model: str = Field(
+        default="claude-3-5-haiku-20241022",
+        description="Lightweight Anthropic model for context compression summaries"
+    )
     
     # 3D Asset Retrieval API
     retrieval_api_host: str = Field(
@@ -338,6 +350,15 @@ class Settings(BaseSettings):
             "openai": self.reference_image_helper_openai_model,
             "anthropic": self.reference_image_helper_anthropic_model,
             "gemini": self.reference_image_helper_gemini_model,
+        }
+        return helper_models.get(provider_lower) or helper_models["openai"]
+
+    def get_context_summary_helper_model(self, provider: str) -> str:
+        provider_lower = provider.lower()
+        helper_models = {
+            "openai": self.context_summary_helper_openai_model,
+            "anthropic": self.context_summary_helper_anthropic_model,
+            "gemini": self.context_summary_helper_gemini_model,
         }
         return helper_models.get(provider_lower) or helper_models["openai"]
 
