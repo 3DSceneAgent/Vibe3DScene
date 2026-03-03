@@ -490,7 +490,13 @@ class TestVerifyRenderImageDelivery:
             render_path=render_path,
             reference_paths=[],
             user_request="Create a complete cozy living room scene with bookshelves and wall art.",
-            todo_context=["Move the sofa to align with the carpet center line."],
+            todo_context=[
+                {
+                    "todo_id": "todo-1",
+                    "title": "Move the sofa to align with the carpet center line.",
+                    "status": "in_progress",
+                }
+            ],
             render_source=render_source,
             provider_name="openai",
             api_key="test-key",
@@ -503,7 +509,7 @@ class TestVerifyRenderImageDelivery:
             if isinstance(item, dict) and item.get("type") == "text"
         ]
         full_text = " ".join(text_items)
-        assert "current todo objectives (primary verification target)" in full_text.lower()
+        assert "current active todos (primary verification target)" in full_text.lower()
         assert "move the sofa to align with the carpet center line." in full_text.lower()
         assert "background context only" in full_text.lower()
         assert "todo_assessment" in full_text

@@ -276,17 +276,19 @@ def build_router_clarification_question(text: str) -> str:
     mode_guess, _ = _classify_task_mode_from_text(text)
     if mode_guess == MODE_PLAN:
         return (
-            "我需要先确认目标：你是要完整多步重建场景（plan_mode），"
-            "还是只做一个单步修改（single_action_mode）？请明确最终目标和成功标准。"
+            "Before I start, please confirm scope: do you want a full multi-step scene build "
+            "(`plan_mode`) or a quick one-step edit (`single_action_mode`)? "
+            "Please include your final goal and success criteria."
         )
     if mode_guess == MODE_SINGLE_ACTION:
         return (
-            "请补充这个单步动作的关键约束：目标对象、位置/尺寸、材质或参考图用途，"
-            "以便我准确执行。"
+            "Optional but helpful: share any hard constraints for this edit "
+            "(target object, placement/size, material, or reference-image usage). "
+            "If not, I can proceed with sensible defaults."
         )
     return (
-        "请确认你的意图：是只做问答解释，还是要我对 3D 场景执行修改？"
-        "如果要修改，请描述具体动作。"
+        "Please confirm intent: are you asking for explanation only, "
+        "or should I modify the 3D scene? If you want changes, describe the action."
     )
 
 
@@ -945,6 +947,82 @@ def _apply_request_scoped_tool_constraints(
     return [name for name in tool_names if name != "reconstruct_full_scene"]
 
 
+def _normalize_role_memory_value(raw_value: Any) -> str:
+    if raw_value is None:
+        return ""
+    if isinstance(raw_value, str):
+        text = " ".join(raw_value.strip().split())
+    elif isinstance(raw_value, (int, float, bool)):
+        text = str(raw_value)
+    elif isinstance(raw_value, list):
+        compact = [str(item).strip() for item in raw_value if str(item).strip()]
+        text = ", ".join(compact[:4])
+    elif isinstance(raw_value, dict):
+        text = json.dumps(raw_value, ensure_ascii=False, default=str)
+    else:
+        text = str(raw_value).strip()
+    if len(text) > 240:
+        return f"{text[:240].rstrip()}..."
+    return text
+
+
+def _build_role_private_memory_prompt(
+    state: AgentState,
+    *,
+    role: str,
+) -> str | None:
+    memory_profile = str(state.get("memory_profile") or "").strip().lower()
+    if memory_profile != "shared_plus_role_private":
+        return None
+
+    role_private_memory = state.get("role_private_memory")
+    if not isinstance(role_private_memory, dict):
+        return None
+    role_bucket = role_private_memory.get(role)
+    if not isinstance(role_bucket, dict) or not role_bucket:
+        return None
+
+    role_key_priority: dict[str, tuple[str, ...]] = {
+        ROLE_BUILDER: (
+            "last_action_summary",
+            "last_replan_reason",
+            "replan_count",
+        ),
+        ROLE_VERIFIER: (
+            "last_verifier_action_summary",
+            "last_feedback_status",
+            "last_feedback_reason",
+            "last_feedback_confidence",
+        ),
+        ROLE_GENERAL: ("last_action_summary",),
+    }
+    prioritized_keys = list(role_key_priority.get(role, ()))
+    for key in role_bucket.keys():
+        if isinstance(key, str) and key not in prioritized_keys:
+            prioritized_keys.append(key)
+
+    lines: list[str] = []
+    for key in prioritized_keys:
+        if not isinstance(key, str):
+            continue
+        value_text = _normalize_role_memory_value(role_bucket.get(key))
+        if not value_text:
+            continue
+        pretty_key = key.replace("_", " ").strip()
+        lines.append(f"- {pretty_key}: {value_text}")
+        if len(lines) >= 5:
+            break
+    if not lines:
+        return None
+
+    return "\n".join(
+        [
+            "Role-private memory (historical hint for this role; prioritize current request and latest evidence):",
+            *lines,
+        ]
+    )
+
+
 
 
 def invoke_role_agent(
@@ -981,6 +1059,9 @@ def invoke_role_agent(
                 )
             )
         )
+    role_private_memory_prompt = _build_role_private_memory_prompt(state, role=role)
+    if role_private_memory_prompt:
+        messages.append(SystemMessage(content=role_private_memory_prompt))
     tool_constraints = _build_available_tools_constraint(effective_tool_names)
     if tool_constraints:
         messages.append(SystemMessage(content=tool_constraints))

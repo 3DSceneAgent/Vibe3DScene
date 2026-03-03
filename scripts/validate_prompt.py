@@ -29,6 +29,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from scene_agent.agent.graph import create_agent_graph
 from scene_agent.env import load_project_dotenv
 
+_TOPOLOGY_RUN_CHOICES = ("auto", "single", "dual", "compare")
+_MEMORY_PROFILE_CHOICES = ("auto", "thread_shared_only", "shared_plus_role_private")
+
 
 def _set_proxy_env(proxy: str | None) -> None:
     if not proxy:
@@ -108,8 +111,73 @@ def _collect_graph_updates_from_payload(
             latest_todos.extend([item for item in todos if isinstance(item, dict)])
 
 
-async def _run_invoke_mode(args: argparse.Namespace) -> dict[str, Any]:
-    thread_id = args.thread_id or f"invoke-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+def _requested_topology_from_run(topology_run: str) -> str:
+    if topology_run == "single":
+        return "single_agent"
+    if topology_run == "dual":
+        return "dual_agent"
+    return "auto"
+
+
+def _topology_mismatch(
+    requested_topology: str,
+    effective_topology: str | None,
+) -> bool | None:
+    if requested_topology not in {"single_agent", "dual_agent"}:
+        return None
+    if not effective_topology:
+        return None
+    return effective_topology != requested_topology
+
+
+def _resolve_scenario_thread_id(
+    args: argparse.Namespace,
+    *,
+    scenario_label: str,
+) -> str:
+    if args.topology_run == "compare":
+        if args.thread_id:
+            return f"{args.thread_id}__{scenario_label}"
+        prefix = "invoke" if args.mode == "invoke" else "api"
+        return f"{prefix}-{scenario_label}-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+    if args.thread_id:
+        return args.thread_id
+    prefix = "invoke" if args.mode == "invoke" else "api"
+    return f"{prefix}-{scenario_label}-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+
+
+def _build_compare_summary(
+    single_run: dict[str, Any],
+    dual_run: dict[str, Any],
+) -> dict[str, Any]:
+    single_elapsed = single_run.get("elapsed_sec")
+    dual_elapsed = dual_run.get("elapsed_sec")
+    elapsed_delta: float | None = None
+    if isinstance(single_elapsed, (int, float)) and isinstance(dual_elapsed, (int, float)):
+        elapsed_delta = round(float(dual_elapsed) - float(single_elapsed), 2)
+    return {
+        "single_effective_topology": single_run.get("effective_topology"),
+        "dual_effective_topology": dual_run.get("effective_topology"),
+        "single_effective_task_mode": single_run.get("effective_task_mode"),
+        "dual_effective_task_mode": dual_run.get("effective_task_mode"),
+        "single_elapsed_sec": single_elapsed,
+        "dual_elapsed_sec": dual_elapsed,
+        "elapsed_delta_sec": elapsed_delta,
+        "single_graph_steps": single_run.get("graph_steps"),
+        "dual_graph_steps": dual_run.get("graph_steps"),
+        "single_topology_mismatch": single_run.get("topology_mismatch"),
+        "dual_topology_mismatch": dual_run.get("topology_mismatch"),
+    }
+
+
+async def _run_invoke_mode(
+    args: argparse.Namespace,
+    *,
+    scenario_label: str,
+    thread_id: str,
+    requested_topology: str,
+    requested_memory_profile: str,
+) -> dict[str, Any]:
     graph_nodes: list[str] = []
     latest_todos: list[dict[str, Any]] = []
 
@@ -122,11 +190,14 @@ async def _run_invoke_mode(args: argparse.Namespace) -> dict[str, Any]:
     config = {"configurable": {"thread_id": thread_id}}
 
     start = time.time()
+    invoke_input: dict[str, Any] = {
+        "messages": [HumanMessage(content=args.prompt)],
+        "thread_id": thread_id,
+        "workflow_topology_request": requested_topology,
+        "memory_profile_request": requested_memory_profile,
+    }
     stream = graph.astream(
-        {
-            "messages": [HumanMessage(content=args.prompt)],
-            "thread_id": thread_id,
-        },
+        invoke_input,
         config=config,
         stream_mode=["updates", "messages", "values"],
     )
@@ -149,10 +220,35 @@ async def _run_invoke_mode(args: argparse.Namespace) -> dict[str, Any]:
     last_verification = _latest_verification_from_messages(state_messages)
     assistant_text = _last_assistant_text(state_messages)
     todo_check = values.get("todo_check") if isinstance(values.get("todo_check"), dict) else None
+    effective_task_mode_raw = values.get("task_mode")
+    effective_topology_raw = values.get("workflow_topology")
+    effective_memory_profile_raw = values.get("memory_profile")
+    effective_task_mode = (
+        effective_task_mode_raw
+        if isinstance(effective_task_mode_raw, str) and effective_task_mode_raw.strip()
+        else None
+    )
+    effective_topology = (
+        effective_topology_raw
+        if isinstance(effective_topology_raw, str) and effective_topology_raw.strip()
+        else None
+    )
+    effective_memory_profile = (
+        effective_memory_profile_raw
+        if isinstance(effective_memory_profile_raw, str) and effective_memory_profile_raw.strip()
+        else None
+    )
 
     return {
         "mode": "invoke",
+        "run_label": scenario_label,
         "thread_id": thread_id,
+        "requested_topology": requested_topology,
+        "requested_memory_profile": requested_memory_profile,
+        "effective_task_mode": effective_task_mode,
+        "effective_topology": effective_topology,
+        "effective_memory_profile": effective_memory_profile,
+        "topology_mismatch": _topology_mismatch(requested_topology, effective_topology),
         "elapsed_sec": round(elapsed, 2),
         "graph_steps": len(graph_nodes),
         "graph_nodes_tail": graph_nodes[-30:],
@@ -198,13 +294,21 @@ def _iter_api_sse(base_url: str, payload: dict[str, Any], timeout: float) -> lis
     return events
 
 
-def _run_api_mode(args: argparse.Namespace) -> dict[str, Any]:
-    thread_id = args.thread_id or f"api-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+def _run_api_mode(
+    args: argparse.Namespace,
+    *,
+    scenario_label: str,
+    thread_id: str,
+    requested_topology: str,
+    requested_memory_profile: str,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {"message": args.prompt, "thread_id": thread_id}
     if args.vlm_provider:
         payload["vlm_provider"] = args.vlm_provider
     if args.vlm_model:
         payload["vlm_model"] = args.vlm_model
+    payload["workflow_topology"] = requested_topology
+    payload["memory_profile"] = requested_memory_profile
 
     graph_nodes: list[str] = []
     latest_todos: list[dict[str, Any]] = []
@@ -212,14 +316,30 @@ def _run_api_mode(args: argparse.Namespace) -> dict[str, Any]:
     assistant_text_parts: list[str] = []
     done_event: dict[str, Any] | None = None
     error_event: dict[str, Any] | None = None
+    effective_task_mode: str | None = None
+    effective_topology: str | None = None
+    effective_memory_profile: str | None = None
 
     start = time.time()
     events = _iter_api_sse(args.base_url, payload, args.timeout)
     for event in events:
         if event.get("event") == "graph_node":
-            node = (event.get("graph_node") or {}).get("node")
+            graph_node_payload = event.get("graph_node")
+            node = (graph_node_payload or {}).get("node") if isinstance(graph_node_payload, dict) else None
             if isinstance(node, str):
                 graph_nodes.append(node)
+            if isinstance(graph_node_payload, dict):
+                state_patch = graph_node_payload.get("state_patch")
+                if isinstance(state_patch, dict):
+                    task_mode_raw = state_patch.get("task_mode")
+                    topology_raw = state_patch.get("workflow_topology")
+                    memory_profile_raw = state_patch.get("memory_profile")
+                    if isinstance(task_mode_raw, str) and task_mode_raw.strip():
+                        effective_task_mode = task_mode_raw
+                    if isinstance(topology_raw, str) and topology_raw.strip():
+                        effective_topology = topology_raw
+                    if isinstance(memory_profile_raw, str) and memory_profile_raw.strip():
+                        effective_memory_profile = memory_profile_raw
         todos = event.get("todos")
         if isinstance(todos, list):
             latest_todos = [item for item in todos if isinstance(item, dict)]
@@ -252,7 +372,14 @@ def _run_api_mode(args: argparse.Namespace) -> dict[str, Any]:
 
     return {
         "mode": "api",
+        "run_label": scenario_label,
         "thread_id": thread_id,
+        "requested_topology": requested_topology,
+        "requested_memory_profile": requested_memory_profile,
+        "effective_task_mode": effective_task_mode,
+        "effective_topology": effective_topology,
+        "effective_memory_profile": effective_memory_profile,
+        "topology_mismatch": _topology_mismatch(requested_topology, effective_topology),
         "elapsed_sec": round(elapsed, 2),
         "done_event": done_event,
         "error_event": error_event,
@@ -282,6 +409,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vlm-provider", default=None, help="Optional VLM provider.")
     parser.add_argument("--vlm-model", default=None, help="Optional VLM model.")
     parser.add_argument("--vlm-api-key", default=None, help="Optional VLM API key for invoke mode.")
+    parser.add_argument(
+        "--topology-run",
+        choices=_TOPOLOGY_RUN_CHOICES,
+        default="auto",
+        help="Workflow topology scenario: auto, single, dual, or compare (single+dual).",
+    )
+    parser.add_argument(
+        "--memory-profile",
+        choices=_MEMORY_PROFILE_CHOICES,
+        default="auto",
+        help="Memory profile request to pass through router.",
+    )
     return parser
 
 
@@ -292,10 +431,61 @@ def main() -> int:
     _set_proxy_env(args.proxy)
 
     try:
-        if args.mode == "invoke":
-            summary = asyncio.run(_run_invoke_mode(args))
+        if args.topology_run == "compare":
+            run_summaries: list[dict[str, Any]] = []
+            for scenario_label in ("single", "dual"):
+                thread_id = _resolve_scenario_thread_id(args, scenario_label=scenario_label)
+                requested_topology = _requested_topology_from_run(scenario_label)
+                requested_memory_profile = args.memory_profile
+                if args.mode == "invoke":
+                    run_summary = asyncio.run(
+                        _run_invoke_mode(
+                            args,
+                            scenario_label=scenario_label,
+                            thread_id=thread_id,
+                            requested_topology=requested_topology,
+                            requested_memory_profile=requested_memory_profile,
+                        )
+                    )
+                else:
+                    run_summary = _run_api_mode(
+                        args,
+                        scenario_label=scenario_label,
+                        thread_id=thread_id,
+                        requested_topology=requested_topology,
+                        requested_memory_profile=requested_memory_profile,
+                    )
+                run_summaries.append(run_summary)
+            summary = {
+                "mode": args.mode,
+                "topology_run": args.topology_run,
+                "runs": run_summaries,
+                "comparison": _build_compare_summary(run_summaries[0], run_summaries[1]),
+            }
         else:
-            summary = _run_api_mode(args)
+            scenario_label = args.topology_run
+            thread_id = _resolve_scenario_thread_id(args, scenario_label=scenario_label)
+            requested_topology = _requested_topology_from_run(scenario_label)
+            requested_memory_profile = args.memory_profile
+            if args.mode == "invoke":
+                summary = asyncio.run(
+                    _run_invoke_mode(
+                        args,
+                        scenario_label=scenario_label,
+                        thread_id=thread_id,
+                        requested_topology=requested_topology,
+                        requested_memory_profile=requested_memory_profile,
+                    )
+                )
+            else:
+                summary = _run_api_mode(
+                    args,
+                    scenario_label=scenario_label,
+                    thread_id=thread_id,
+                    requested_topology=requested_topology,
+                    requested_memory_profile=requested_memory_profile,
+                )
+            summary["topology_run"] = args.topology_run
     except Exception as exc:
         print(
             json.dumps(

@@ -29,6 +29,7 @@ def test_get_vlm_models_endpoint_returns_catalog_and_thread_selection(monkeypatc
     assert payload["thread_selection"]["provider"] == "openai"
     assert payload["thread_selection"]["locked"] is False
     assert any(provider["provider"] == "openai" for provider in payload["providers"])
+    assert any(provider["provider"] == "qwen" for provider in payload["providers"])
 
 
 def test_chat_allows_model_change_after_session_starts(monkeypatch):

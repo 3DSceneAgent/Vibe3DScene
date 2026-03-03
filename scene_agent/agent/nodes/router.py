@@ -94,7 +94,10 @@ def route_mode_node(
             "shared_plus_role_private",
         }:
             memory_profile_request = normalized_memory_request
-    memory_profile = resolve_memory_profile(memory_profile_request)
+    if memory_profile_request == "auto" and mode == MODE_PLAN and workflow_topology == TOPOLOGY_DUAL:
+        memory_profile = "shared_plus_role_private"
+    else:
+        memory_profile = resolve_memory_profile(memory_profile_request)
 
     current_task_id = state.get("task_id")
     if isinstance(current_task_id, str) and current_task_id.strip():
@@ -121,7 +124,11 @@ def route_mode_node(
     clarification_question = decision.clarification_question.strip()
     if not clarification_question:
         clarification_question = build_router_clarification_question(latest_user_request)
-    need_clarification = bool(decision.need_clarification) or decision.confidence < ROUTER_MIN_CONFIDENCE
+    # Keep action workflows flowing unless router explicitly asks for clarification.
+    # Low-confidence auto-clarification is only enforced for conversation intents.
+    need_clarification = bool(decision.need_clarification)
+    if not need_clarification and mode == MODE_CONVERSATION and decision.confidence < ROUTER_MIN_CONFIDENCE:
+        need_clarification = True
     active_todo_id = state.get("active_todo_id")
     if not isinstance(active_todo_id, str):
         active_todo_id = None
@@ -185,7 +192,8 @@ def route_mode_llm_node(state: AgentState, router_model: Any) -> Dict[str, Any]:
 def clarification_node(state: AgentState) -> Dict[str, Any]:
     question_raw = state.get("router_clarification_question")
     question = question_raw.strip() if isinstance(question_raw, str) and question_raw.strip() else (
-        "我需要你补充更具体的目标：是问答解释、单步修改，还是多步场景重建？"
+        "Please clarify your goal: are you asking for explanation only, a single edit, "
+        "or a multi-step scene build?"
     )
     return {
         "messages": [AIMessage(content=question)],

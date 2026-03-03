@@ -6,6 +6,7 @@ langchain-mcp-adapters  # Native MCP adapter - see https://github.com/langchain-
 langchain-openai
 langchain-anthropic
 langchain-google-genai
+langchain-qwq
 
 # API and interfaces
 fastapi

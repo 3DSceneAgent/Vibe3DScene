@@ -103,7 +103,13 @@ def test_verify_node_passes_todo_context_even_for_scene_observe(monkeypatch):
     )
 
     assert captured_kwargs["render_source"] == "scene_observe"
-    assert captured_kwargs["todo_context"] == ["Move the armchair closer to the floor lamp."]
+    assert captured_kwargs["todo_context"] == [
+        {
+            "todo_id": "todo-1",
+            "title": "Move the armchair closer to the floor lamp.",
+            "status": "in_progress",
+        }
+    ]
 
 
 def test_verify_node_passes_scene_context_to_verifier(monkeypatch):
@@ -163,12 +169,12 @@ def test_verify_node_auto_completes_todo_from_verification_assessment(monkeypatc
             "reason": "Dragon exists, but other objectives remain.",
             "todo_assessment": [
                 {
-                    "objective": "Import the low-poly dragon model",
+                    "todo_id": "todo-1",
                     "status": "done",
                     "reason": "Dragon is clearly present in the scene.",
                 },
                 {
-                    "objective": "Add a pot of gold",
+                    "todo_id": "todo-2",
                     "status": "not_done",
                     "reason": "Pot of gold is missing.",
                 },
@@ -208,11 +214,13 @@ def test_verify_node_auto_completes_todo_from_verification_assessment(monkeypatc
     result = verify_node(state)
 
     assert result["last_verified_path"] == "/tmp/auto_todo_render.png"
-    updates = result.get("todos") or []
-    assert len(updates) == 1
-    assert updates[0]["id"] == "todo-1"
-    assert updates[0]["status"] == "completed"
-    assert isinstance(updates[0]["completed_at"], str) and updates[0]["completed_at"]
+    todos = result.get("todos") or []
+    assert len(todos) == 2
+    todo_by_id = {todo["id"]: todo for todo in todos}
+    assert todo_by_id["todo-1"]["status"] == "completed"
+    assert isinstance(todo_by_id["todo-1"]["completed_at"], str) and todo_by_id["todo-1"]["completed_at"]
+    assert todo_by_id["todo-2"]["status"] == "pending"
+    assert todo_by_id["todo-2"]["completed_at"] is None
 
     message = result["messages"][0]
     payload = message.content if isinstance(message.content, dict) else ast.literal_eval(message.content)

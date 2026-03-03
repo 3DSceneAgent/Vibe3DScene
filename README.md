@@ -106,8 +106,8 @@ Minimum required environment variables:
 
 | Variable | Description |
 | --- | --- |
-| `VLM_PROVIDER` | Default model provider (`openai`, `anthropic`, `gemini`). |
-| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` | Provider API key. You can also use `VLM_API_KEY` as fallback. |
+| `VLM_PROVIDER` | Default model provider (`openai`, `anthropic`, `gemini`, `qwen`). |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `QWEN_API_KEY` | Provider API key. You can also use `VLM_API_KEY` as fallback. |
 | `BLENDER_MODE` | `local-client` or `headless`. |
 | `API_PORT` | API bind port (default `8000`). |
 
@@ -166,6 +166,37 @@ python scripts/smoke_multiprocess_local.py --gateway-url http://127.0.0.1:8000 -
 # include /chat
 python scripts/smoke_multiprocess_local.py --gateway-url http://127.0.0.1:8000 --worker1-url http://127.0.0.1:18001 --worker2-url http://127.0.0.1:18002
 ```
+
+### 2.6 Validate single vs dual workflow from one script
+Use `scripts/validate_prompt.py` to force `single_agent`, force `dual_agent`, or compare both in one run.
+
+```bash
+# invoke mode: force single-agent
+python scripts/validate_prompt.py \
+  --mode invoke \
+  --prompt "Recreate a cozy reading corner with chair, lamp, and side table." \
+  --topology-run single
+
+# invoke mode: force dual-agent
+python scripts/validate_prompt.py \
+  --mode invoke \
+  --prompt "Recreate a cozy reading corner with chair, lamp, and side table." \
+  --topology-run dual
+
+# api mode: compare single vs dual in one command
+python scripts/validate_prompt.py \
+  --mode api \
+  --base-url http://127.0.0.1:8000 \
+  --prompt "Build a living room scene from the reference style." \
+  --topology-run compare
+```
+
+Useful flags:
+- `--topology-run {auto,single,dual,compare}`: choose topology scenario.
+- `--memory-profile {auto,thread_shared_only,shared_plus_role_private}`: pass memory profile hint.
+- `--mode {invoke,api}`: direct graph invocation vs API SSE path.
+
+The output includes `requested_topology`, `effective_topology`, `effective_task_mode`, and `topology_mismatch` so you can verify whether routing behaved as expected.
 
 
 ## 3. Supported Tools and Tool Servers

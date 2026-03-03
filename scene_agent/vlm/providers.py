@@ -1,6 +1,8 @@
 """
-VLM provider implementations for OpenAI, Anthropic, and Gemini.
+VLM provider implementations for OpenAI, Anthropic, Gemini, and Qwen.
 """
+import os
+from importlib import import_module
 from typing import Any
 from scene_agent.vlm.base import BaseVLMProvider
 
@@ -53,6 +55,25 @@ class GeminiProvider(BaseVLMProvider):
         )
 
 
+class QwenProvider(BaseVLMProvider):
+    """Qwen provider (DashScope) with vision support"""
+
+    def get_default_model(self) -> str:
+        return "qwen-vl-max-latest"
+
+    def get_chat_model(self) -> Any:
+        chat_qwen_cls = getattr(import_module("langchain_qwq"), "ChatQwen")
+
+        # langchain-qwq primarily reads DASHSCOPE_API_KEY from environment.
+        # Keep this provider-level key authoritative for current runtime.
+        os.environ["DASHSCOPE_API_KEY"] = self.api_key
+        return chat_qwen_cls(
+            model=self.model,
+            temperature=0.7,
+            streaming=True,
+        )
+
+
 def get_vlm_provider(
     provider_name: str,
     api_key: str,
@@ -62,7 +83,7 @@ def get_vlm_provider(
     Factory function to get a VLM provider by name.
     
     Args:
-        provider_name: "openai", "anthropic", or "gemini"
+        provider_name: "openai", "anthropic", "gemini", or "qwen"
         api_key: API key for the provider
         model: Optional model override
         
@@ -76,6 +97,7 @@ def get_vlm_provider(
         "openai": OpenAIProvider,
         "anthropic": AnthropicProvider,
         "gemini": GeminiProvider,
+        "qwen": QwenProvider,
     }
     
     provider_name = provider_name.lower()

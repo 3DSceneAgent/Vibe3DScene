@@ -67,6 +67,7 @@ _RETRYABLE_TOOL_ERROR_MARKERS = (
     "429",
     "503",
 )
+_SUPPORTED_VLM_PROVIDERS = frozenset({"openai", "anthropic", "gemini", "qwen"})
 
 
 def _extract_tool_hint(tool: object) -> str | None:
@@ -127,6 +128,33 @@ def _build_context_summary_helper_model(
         except Exception:
             return helper_model
     return helper_model
+
+
+def _resolve_dual_agent_verifier_runtime(
+    *,
+    settings: Any,
+    default_provider: str,
+    default_model: str,
+    default_api_key: str,
+) -> tuple[str, str, str]:
+    raw_provider = getattr(settings, "dual_agent_verifier_vlm_provider", None)
+    verifier_provider = default_provider
+    if isinstance(raw_provider, str):
+        candidate = raw_provider.strip().lower()
+        if candidate in _SUPPORTED_VLM_PROVIDERS:
+            verifier_provider = candidate
+
+    raw_model = getattr(settings, "dual_agent_verifier_vlm_model", None)
+    if isinstance(raw_model, str) and raw_model.strip():
+        verifier_model = raw_model.strip()
+    elif verifier_provider == default_provider:
+        verifier_model = default_model
+    else:
+        verifier_model = settings.get_vlm_default_model(verifier_provider)
+    verifier_api_key = settings.get_vlm_api_key(verifier_provider)
+    if not verifier_api_key:
+        return default_provider, default_model, default_api_key
+    return verifier_provider, verifier_model, verifier_api_key
 
 
 def _task_mode(state: AgentState) -> str:
@@ -637,12 +665,43 @@ async def create_agent_graph(
         api_key=selected_api_key,
         model=selected_model,
     )
-    model = vlm_provider.get_chat_model()
+    primary_chat_model = vlm_provider.get_chat_model()
     context_summary_model = _build_context_summary_helper_model(
         provider_name=selected_provider,
         api_key=selected_api_key,
         settings=settings,
     )
+    verifier_provider_name, verifier_model_name, verifier_api_key = _resolve_dual_agent_verifier_runtime(
+        settings=settings,
+        default_provider=selected_provider,
+        default_model=selected_model,
+        default_api_key=selected_api_key,
+    )
+    verifier_chat_model = primary_chat_model
+    verifier_context_summary_model = context_summary_model
+    if (
+        verifier_provider_name != selected_provider
+        or verifier_model_name != selected_model
+        or verifier_api_key != selected_api_key
+    ):
+        try:
+            verifier_provider = get_vlm_provider(
+                provider_name=verifier_provider_name,
+                api_key=verifier_api_key,
+                model=verifier_model_name,
+            )
+            verifier_chat_model = verifier_provider.get_chat_model()
+            verifier_context_summary_model = _build_context_summary_helper_model(
+                provider_name=verifier_provider_name,
+                api_key=verifier_api_key,
+                settings=settings,
+            )
+        except Exception:
+            verifier_provider_name = selected_provider
+            verifier_model_name = selected_model
+            verifier_api_key = selected_api_key
+            verifier_chat_model = primary_chat_model
+            verifier_context_summary_model = context_summary_model
     
     # Load tools from Blender MCP server
     tools = await get_blender_tools(session_id=session_id)
@@ -668,7 +727,8 @@ async def create_agent_graph(
     }
     
     # Bind tools to model
-    llm_with_tools = model.bind_tools(tools)
+    llm_with_tools = primary_chat_model.bind_tools(tools)
+    verifier_llm_with_tools = verifier_chat_model.bind_tools(tools)
     
     # Define agent node with bound tools
     def call_model(state: AgentState) -> dict:
@@ -690,13 +750,13 @@ async def create_agent_graph(
     def call_verifier_camera_model(state: AgentState) -> dict:
         return verifier_camera_agent_node(
             state,
-            llm_with_tools,
+            verifier_llm_with_tools,
             available_tool_names,
-            summary_model=context_summary_model,
+            summary_model=verifier_context_summary_model,
         )
 
     def call_route_mode(state: AgentState) -> dict:
-        return route_mode_llm_node(state, router_model=model)
+        return route_mode_llm_node(state, router_model=primary_chat_model)
 
     def call_prepare_reference_context(state: AgentState) -> dict:
         return prepare_reference_context_node(
@@ -739,13 +799,13 @@ async def create_agent_graph(
         checkpoint_finalize_node=lambda state: checkpoint_gate_node(state, stage="finalize"),
         verify_node=lambda state: verify_node(
             state,
-            provider_name=selected_provider,
-            api_key=selected_api_key,
-            model=selected_model,
+            provider_name=verifier_provider_name if _is_dual_plan_mode(state) else selected_provider,
+            api_key=verifier_api_key if _is_dual_plan_mode(state) else selected_api_key,
+            model=verifier_model_name if _is_dual_plan_mode(state) else selected_model,
         ),
         transition_resolver_node=transition_resolver_node,
         planner_refresh_node=planner_refresh_node,
-        finalize_node=lambda state: finalize_node(state, finalizer_model=model),
+        finalize_node=lambda state: finalize_node(state, finalizer_model=primary_chat_model),
         route_after_mode=_route_after_mode,
         route_after_sync_reference_catalog=_route_after_sync_reference_catalog,
         route_after_prepare_reference_context=_route_after_prepare_reference_context,
@@ -767,6 +827,8 @@ async def create_agent_graph(
     setattr(app, "_public_tool_hints", public_tool_hints)
     setattr(app, "_vlm_provider", selected_provider)
     setattr(app, "_vlm_model", selected_model)
+    setattr(app, "_verifier_vlm_provider", verifier_provider_name)
+    setattr(app, "_verifier_vlm_model", verifier_model_name)
     
     return app
 

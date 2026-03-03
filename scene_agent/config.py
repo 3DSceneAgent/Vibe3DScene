@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     # VLM Configuration
     vlm_provider: str = Field(
         default="gemini",
-        description="VLM provider: openai, anthropic, or gemini"
+        description="VLM provider: openai, anthropic, gemini, or qwen"
     )
     vlm_api_key: str | None = Field(
         default=None,
@@ -26,6 +26,20 @@ class Settings(BaseSettings):
     vlm_model: str | None = Field(
         default=None,
         description="Optional model override (uses provider default if not set)"
+    )
+    dual_agent_verifier_vlm_provider: str | None = Field(
+        default=None,
+        description=(
+            "Optional dedicated verifier provider for dual-agent plan mode; "
+            "falls back to VLM_PROVIDER when unset or invalid"
+        ),
+    )
+    dual_agent_verifier_vlm_model: str | None = Field(
+        default=None,
+        description=(
+            "Optional dedicated verifier model for dual-agent plan mode; "
+            "falls back to the selected provider default model when unset"
+        ),
     )
     openai_api_key: str | None = Field(
         default=None,
@@ -39,6 +53,10 @@ class Settings(BaseSettings):
         default=None,
         description="Google Gemini API key override"
     )
+    qwen_api_key: str | None = Field(
+        default=None,
+        description="Qwen (DashScope) API key override"
+    )
     vlm_openai_models: str = Field(
         default="gpt-4o,gpt-4.1,gpt-4.1-mini,gpt-4o-mini",
         description="Comma-separated OpenAI model names exposed to clients"
@@ -50,6 +68,10 @@ class Settings(BaseSettings):
     vlm_gemini_models: str = Field(
         default="gemini-2.5-pro,gemini-2.5-flash",
         description="Comma-separated Gemini model names exposed to clients"
+    )
+    vlm_qwen_models: str = Field(
+        default="qwen-vl-max-latest,qwen-vl-plus-latest,qwen-plus-latest",
+        description="Comma-separated Qwen model names exposed to clients"
     )
     
     # Blender addon socket (local-client/headless)
@@ -207,6 +229,10 @@ class Settings(BaseSettings):
         default="claude-3-5-haiku-20241022",
         description="Lightweight Anthropic model for reference-image naming and retrieval decisions"
     )
+    reference_image_helper_qwen_model: str = Field(
+        default="qwen-vl-plus-latest",
+        description="Lightweight Qwen model for reference-image naming and retrieval decisions"
+    )
     context_summary_helper_openai_model: str = Field(
         default="gpt-4.1-mini",
         description="Lightweight OpenAI model for context compression summaries"
@@ -218,6 +244,10 @@ class Settings(BaseSettings):
     context_summary_helper_anthropic_model: str = Field(
         default="claude-3-5-haiku-20241022",
         description="Lightweight Anthropic model for context compression summaries"
+    )
+    context_summary_helper_qwen_model: str = Field(
+        default="qwen-plus-latest",
+        description="Lightweight Qwen model for context compression summaries"
     )
     
     # 3D Asset Retrieval API
@@ -256,7 +286,7 @@ class Settings(BaseSettings):
     @classmethod
     def validate_provider(cls, v: str) -> str:
         """Validate that provider is supported"""
-        valid_providers = {"openai", "anthropic", "gemini"}
+        valid_providers = {"openai", "anthropic", "gemini", "qwen"}
         v_lower = v.lower()
         if v_lower not in valid_providers:
             raise ValueError(
@@ -264,6 +294,30 @@ class Settings(BaseSettings):
                 f"Must be one of: {', '.join(valid_providers)}"
             )
         return v_lower
+
+    @field_validator("dual_agent_verifier_vlm_provider")
+    @classmethod
+    def validate_optional_verifier_provider(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        normalized = v.strip().lower()
+        if not normalized:
+            return None
+        valid_providers = {"openai", "anthropic", "gemini", "qwen"}
+        if normalized not in valid_providers:
+            raise ValueError(
+                f"Invalid dual-agent verifier VLM provider: {v}. "
+                f"Must be one of: {', '.join(valid_providers)}"
+            )
+        return normalized
+
+    @field_validator("dual_agent_verifier_vlm_model")
+    @classmethod
+    def normalize_optional_verifier_model(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        normalized = v.strip()
+        return normalized or None
 
     @field_validator("blender_mode")
     @classmethod
@@ -305,11 +359,13 @@ class Settings(BaseSettings):
             "openai": ["gpt-4o"],
             "anthropic": ["claude-3-5-sonnet-20241022"],
             "gemini": ["gemini-2.5-pro"],
+            "qwen": ["qwen-vl-max-latest"],
         }
         raw_by_provider = {
             "openai": self.vlm_openai_models,
             "anthropic": self.vlm_anthropic_models,
             "gemini": self.vlm_gemini_models,
+            "qwen": self.vlm_qwen_models,
         }
         raw = raw_by_provider.get(provider_lower, "")
         models: list[str] = []
@@ -332,6 +388,7 @@ class Settings(BaseSettings):
             "openai": "gpt-4o",
             "anthropic": "claude-3-5-sonnet-20241022",
             "gemini": "gemini-2.5-pro",
+            "qwen": "qwen-vl-max-latest",
         }
         return fallback.get(provider_lower, "gpt-4o")
 
@@ -341,6 +398,7 @@ class Settings(BaseSettings):
             "openai": self.openai_api_key,
             "anthropic": self.anthropic_api_key,
             "gemini": self.gemini_api_key,
+            "qwen": self.qwen_api_key,
         }
         return provider_keys.get(provider_lower) or self.vlm_api_key
 
@@ -350,6 +408,7 @@ class Settings(BaseSettings):
             "openai": self.reference_image_helper_openai_model,
             "anthropic": self.reference_image_helper_anthropic_model,
             "gemini": self.reference_image_helper_gemini_model,
+            "qwen": self.reference_image_helper_qwen_model,
         }
         return helper_models.get(provider_lower) or helper_models["openai"]
 
@@ -359,6 +418,7 @@ class Settings(BaseSettings):
             "openai": self.context_summary_helper_openai_model,
             "anthropic": self.context_summary_helper_anthropic_model,
             "gemini": self.context_summary_helper_gemini_model,
+            "qwen": self.context_summary_helper_qwen_model,
         }
         return helper_models.get(provider_lower) or helper_models["openai"]
 

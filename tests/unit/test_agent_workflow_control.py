@@ -240,6 +240,7 @@ def test_route_mode_node_sets_dual_topology_for_plan_mode_when_requested():
     assert result["task_mode"] == "plan_mode"
     assert result["workflow_topology"] == "dual_agent"
     assert result["active_role"] == "builder"
+    assert result["memory_profile"] == "shared_plus_role_private"
 
 
 def test_route_mode_node_downgrades_dual_request_for_conversation_mode():
@@ -960,3 +961,45 @@ def test_planner_refresh_node_adds_replan_todo():
     assert result["plan_replan_count"] == 1
     assert result["builder_stall_count"] == 0
     assert len(result["todos"]) >= 1
+
+
+def test_planner_refresh_node_supersedes_open_todos_and_sets_new_active_todo():
+    result = planner_refresh_node(
+        {
+            "verifier_feedback": {
+                "reason": "layout mismatch",
+                "fix_instructions": [
+                    "Move chair closer to table",
+                    "Rotate lamp toward sofa",
+                ],
+            },
+            "plan_replan_count": 0,
+            "max_plan_replans": 3,
+            "active_todo_id": "todo-open-1",
+            "todos": [
+                _todo("todo-open-1", "Place chair", "in_progress"),
+                _todo("todo-open-2", "Adjust lamp", "pending"),
+            ],
+        }
+    )
+    assert result["plan_replan_count"] == 1
+    assert result["builder_stall_count"] == 0
+    assert result["role_private_memory"]["builder"]["last_replan_superseded"] == 2
+    assert result["role_private_memory"]["builder"]["last_replan_new_tasks"] == 2
+
+    todos = result["todos"]
+    todo_by_id = {todo["id"]: todo for todo in todos}
+    assert todo_by_id["todo-open-1"]["status"] == "superseded"
+    assert todo_by_id["todo-open-2"]["status"] == "superseded"
+
+    pending_titles = [
+        todo["description"]
+        for todo in todos
+        if todo.get("status") == "pending"
+    ]
+    assert any(title.startswith("Replan fix: Move chair closer to table") for title in pending_titles)
+    assert any(title.startswith("Replan fix: Rotate lamp toward sofa") for title in pending_titles)
+    assert isinstance(result.get("active_todo_id"), str) and result["active_todo_id"] not in {
+        "todo-open-1",
+        "todo-open-2",
+    }

@@ -93,11 +93,12 @@ _thread_client_lock = threading.Lock()
 _thread_frontend_clients: Dict[str, str] = {}
 _FRONTEND_CLIENT_HEADER = "x-frontend-client-id"
 _DEFAULT_FRONTEND_CLIENT_ID = "default"
-_SUPPORTED_VLM_PROVIDERS = ("gemini", "openai", "anthropic")
+_SUPPORTED_VLM_PROVIDERS = ("gemini", "openai", "anthropic", "qwen")
 _VLM_PROVIDER_DISPLAY_NAMES = {
     "gemini": "Gemini",
     "openai": "OpenAI",
     "anthropic": "Anthropic",
+    "qwen": "Qwen",
 }
 _SCENE_LEVEL_RENDER_CAMERA_CONFIGS: tuple[tuple[str, float, float], ...] = (
     ("SceneCamera_NE", 45.0, 30.0),

@@ -94,7 +94,7 @@ def test_route_mode_node_routes_plan_from_llm_router():
     assert result["workflow_topology"] == "dual_agent"
 
 
-def test_route_mode_node_requires_clarification_on_low_confidence():
+def test_route_mode_node_allows_low_confidence_action_when_router_is_decisive():
     result = route_mode_node(
         {"messages": [HumanMessage(content="Make it better.")]},
         router_model=_StubRouterModel(
@@ -105,6 +105,48 @@ def test_route_mode_node_requires_clarification_on_low_confidence():
                 "need_clarification": False,
                 "clarification_question": "",
                 "requires_scene_mutation": True,
+            }
+        ),
+    )
+
+    assert result["router_need_clarification"] is False
+
+
+def test_route_mode_node_allows_low_confidence_plan_when_router_is_decisive():
+    result = route_mode_node(
+        {
+            "messages": [
+                HumanMessage(
+                    content="Create a low poly dungeon with a dragon guarding a pot of gold."
+                )
+            ]
+        },
+        router_model=_StubRouterModel(
+            {
+                "intent": "multi_step_scene_action",
+                "mode": "plan_mode",
+                "confidence": 0.44,
+                "need_clarification": False,
+                "clarification_question": "",
+                "requires_scene_mutation": True,
+            }
+        ),
+    )
+
+    assert result["router_need_clarification"] is False
+
+
+def test_route_mode_node_requires_clarification_on_low_confidence_conversation():
+    result = route_mode_node(
+        {"messages": [HumanMessage(content="What should I do?")]},
+        router_model=_StubRouterModel(
+            {
+                "intent": "qa",
+                "mode": "conversation_mode",
+                "confidence": 0.42,
+                "need_clarification": False,
+                "clarification_question": "",
+                "requires_scene_mutation": False,
             }
         ),
     )
