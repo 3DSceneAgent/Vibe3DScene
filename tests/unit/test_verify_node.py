@@ -343,6 +343,28 @@ def test_verify_node_skips_when_render_already_verified(monkeypatch):
     assert result == {"verify_forced_recovery": False}
 
 
+def test_verify_node_reports_error_status_when_verifier_call_fails(monkeypatch):
+    def fail_verify_render_with_references(**_kwargs):
+        raise RuntimeError("vlm backend timeout")
+
+    monkeypatch.setattr(
+        "scene_agent.agent.nodes.verification.verify_render_with_references",
+        fail_verify_render_with_references,
+    )
+
+    state = {
+        "messages": [HumanMessage(content="Verify this render.")],
+        "last_render_path": "/tmp/render.png",
+        "last_verified_path": None,
+    }
+
+    result = verify_node(state)
+    message = result["messages"][0]
+    payload = message.content if isinstance(message.content, dict) else ast.literal_eval(message.content)
+    assert payload["status"] == "error"
+    assert "vlm backend timeout" in payload["reason"]
+
+
 def test_verify_node_reports_catastrophic_without_forced_recovery(monkeypatch):
     def fail_verify_render_with_references(**_kwargs):
         raise AssertionError("verify_render_with_references should not be called for catastrophic precheck")

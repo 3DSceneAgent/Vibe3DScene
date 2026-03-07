@@ -46,7 +46,7 @@ router = APIRouter()
 _INTERNAL_NON_USER_MESSAGE_NODES = frozenset(
     {
         "verify",
-        "route_mode",
+        "initialize_request",
         "sync_reference_catalog",
         "prepare_reference_context",
     }

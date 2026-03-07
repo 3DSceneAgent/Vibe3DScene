@@ -25,7 +25,7 @@ from scene_agent.agent.nodes import (
     agent_node,
     builder_agent_node,
     budget_evaluator_node,
-    clarification_node,
+    initialize_request_node,
     prepare_reference_context_node,
     quality_evaluator_node,
     finalize_node,
@@ -33,7 +33,6 @@ from scene_agent.agent.nodes import (
     progress_evaluator_node,
     post_builder_node,
     post_verifier_node,
-    route_mode_llm_node,
     sync_reference_catalog_node,
     scene_observe_node,
     transition_resolver_node,
@@ -194,15 +193,13 @@ def _agent_turn_budget_exhausted(state: AgentState) -> bool:
     return max_turns >= 0 and turns >= max_turns
 
 
-def _route_after_mode(_state: AgentState) -> Literal["sync_reference_catalog"]:
+def _route_after_initialize_request(_state: AgentState) -> Literal["sync_reference_catalog"]:
     return "sync_reference_catalog"
 
 
 def _route_after_sync_reference_catalog(
-    state: AgentState,
-) -> Literal["clarification", "prepare_reference_context"]:
-    if bool(state.get("router_need_clarification")):
-        return "clarification"
+    _state: AgentState,
+) -> Literal["prepare_reference_context"]:
     return "prepare_reference_context"
 
 
@@ -755,9 +752,6 @@ async def create_agent_graph(
             summary_model=verifier_context_summary_model,
         )
 
-    def call_route_mode(state: AgentState) -> dict:
-        return route_mode_llm_node(state, router_model=primary_chat_model)
-
     def call_prepare_reference_context(state: AgentState) -> dict:
         return prepare_reference_context_node(
             state,
@@ -773,9 +767,8 @@ async def create_agent_graph(
         )
     
     builder = build_agent_state_graph(
-        route_mode_node=call_route_mode,
+        initialize_request_node=initialize_request_node,
         sync_reference_catalog_node=call_sync_reference_catalog,
-        clarification_node=clarification_node,
         prepare_reference_context_node=call_prepare_reference_context,
         agent_node=call_model,
         turn_dispatch_node=turn_dispatch_node,
@@ -806,7 +799,7 @@ async def create_agent_graph(
         transition_resolver_node=transition_resolver_node,
         planner_refresh_node=planner_refresh_node,
         finalize_node=lambda state: finalize_node(state, finalizer_model=primary_chat_model),
-        route_after_mode=_route_after_mode,
+        route_after_initialize_request=_route_after_initialize_request,
         route_after_sync_reference_catalog=_route_after_sync_reference_catalog,
         route_after_prepare_reference_context=_route_after_prepare_reference_context,
         route_after_turn_dispatch=_route_after_turn_dispatch,

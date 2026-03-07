@@ -7,13 +7,15 @@ from scene_agent.agent.todo_state import apply_todo_actions
 from scene_agent.config import get_settings
 from scene_agent.memory.reference_image_memory import get_reference_image_memory
 from scene_agent.vlm.verification import verify_render_with_references
-
-from .shared import (
+from scene_agent.utils.verification_helpers import (
     active_todo_context,
     build_todo_updates_from_verification,
     build_verification_guidance_message,
     build_verification_scene_context,
     detect_catastrophic_scene_state,
+)
+
+from .shared import (
     latest_human_message,
     resolve_verification_assets,
 )
@@ -122,8 +124,8 @@ def verify_node(
         )
     except Exception as exc:
         verification = {
-            "status": "mismatch",
-            "reason": f"Verification skipped due to render access error: {exc}",
+            "status": "error",
+            "reason": f"Verification failed due to render/VLM error: {exc}",
         }
     verification.update(
         {

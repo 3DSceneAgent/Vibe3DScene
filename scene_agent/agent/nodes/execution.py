@@ -8,29 +8,33 @@ from scene_agent.agent.state import AgentState, TodoItem, create_todo
 from scene_agent.agent.todo_protocol import TODO_UPDATE_TOOL_NAME
 from scene_agent.agent.todo_state import apply_todo_actions, project_latest_todos
 from scene_agent.memory.scene_memory import SceneMemory
-
-from .shared import (
+from scene_agent.utils.agent_messages import collect_latest_tool_batch_names
+from scene_agent.utils.render_refs import (
+    extract_render_path,
+    find_last_render_message,
+    infer_render_source,
+    normalize_render_reference,
+    payload_to_data_url,
+    resolve_render_message_to_data_url,
+)
+from scene_agent.utils.todo_helpers import (
+    coerce_non_negative_int,
+    coerce_todos,
+    is_milestone_tool_batch,
+)
+from .constants_runtime import (
     RENDER_VISION_MESSAGE_ID,
     SCENE_MUTATING_TOOLS,
     SCENE_OBSERVE_MESSAGE_ID,
     TODO_BLOCKED_RECOVERY_ACTION_MESSAGE_ID,
     TODO_BLOCKED_RECOVERY_ATTEMPTS,
+    TODO_BLOCKED_RECOVERY_MESSAGE_ID,
     TODO_CHECK_INTERVAL_ROUNDS,
     TODO_STAGNATION_LIMIT,
-    TODO_BLOCKED_RECOVERY_MESSAGE_ID,
 )
+
 from .shared import (
-    coerce_non_negative_int,
-    coerce_todos,
-    collect_latest_tool_batch_names,
-    extract_render_path,
-    find_last_render_message,
     get_logger,
-    infer_render_source,
-    is_milestone_tool_batch,
-    normalize_render_reference,
-    payload_to_data_url,
-    resolve_render_message_to_data_url,
     run_viewport_scene_observe,
     should_use_viewport_scene_observe,
 )
@@ -210,11 +214,14 @@ def scene_observe_node(state: AgentState) -> Dict[str, Any]:
         )
 
     if should_use_viewport_scene_observe(state):
-        return run_viewport_scene_observe(
+        viewport_result = run_viewport_scene_observe(
             state=state,
             thread_id=thread_id,
             send_blender_command=send_blender_command,
         )
+        if not viewport_result.get("last_render_path"):
+            return {"last_render_path": None}
+        return viewport_result
 
     try:
         from mcp_server.tools.multimodal.camera_tools import update_scene_cameras

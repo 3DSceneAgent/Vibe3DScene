@@ -20,9 +20,9 @@ from scene_agent.agent.nodes import (
     blocked_recovery_node,
     checkpoint_gate_node,
     finalize_node,
+    initialize_request_node,
     planner_refresh_node,
     post_builder_node,
-    route_mode_node,
     scene_observe_node,
     todo_commit_node,
     finalize_guard_node,
@@ -30,25 +30,6 @@ from scene_agent.agent.nodes import (
     transition_resolver_node,
     verifier_agent_node,
 )
-
-
-class _StubStructuredRouter:
-    def __init__(self, payload: dict):
-        self._payload = payload
-
-    def invoke(self, _messages):
-        return self._payload
-
-
-class _StubRouterModel:
-    def __init__(self, payload: dict):
-        self._payload = payload
-
-    def with_config(self, **_kwargs):
-        return self
-
-    def with_structured_output(self, _schema):
-        return _StubStructuredRouter(self._payload)
 
 
 def _todo(
@@ -169,45 +150,15 @@ def test_finalize_guard_keeps_finalize_guard_as_continue_when_todos_are_open():
     assert result["stagnation_count"] == 0
 
 
-def test_route_mode_node_classifies_conversation_mode_for_simple_qa():
-    result = route_mode_node(
-        {"messages": [HumanMessage(content="What is global illumination?")]},
-        router_model=_StubRouterModel(
-            {
-                "intent": "qa",
-                "mode": "conversation_mode",
-                "confidence": 0.95,
-                "need_clarification": False,
-                "clarification_question": "",
-                "requires_scene_mutation": False,
-            }
-        ),
-    )
-    assert result["task_mode"] == "conversation_mode"
-    assert result["max_request_tool_batches"] == 0
-    assert result["router_need_clarification"] is False
+def test_initialize_request_node_uses_plan_defaults_for_simple_qa():
+    result = initialize_request_node({"messages": [HumanMessage(content="What is global illumination?")]})
+    assert result["task_mode"] == "plan_mode"
+    assert result["max_request_tool_batches"] > 0
+    assert result["max_request_agent_turns"] > 0
 
 
-def test_route_mode_node_classifies_single_action_mode_for_single_edit():
-    result = route_mode_node(
-        {"messages": [HumanMessage(content="Add a wooden chair to the scene.")]},
-        router_model=_StubRouterModel(
-            {
-                "intent": "single_scene_action",
-                "mode": "single_action_mode",
-                "confidence": 0.9,
-                "need_clarification": False,
-                "clarification_question": "",
-                "requires_scene_mutation": True,
-            }
-        ),
-    )
-    assert result["task_mode"] == "single_action_mode"
-    assert result["max_request_tool_batches"] == 1
-
-
-def test_route_mode_node_forces_plan_mode_when_unfinished_todos_exist():
-    result = route_mode_node(
+def test_initialize_request_node_marks_continue_existing_plan_when_unfinished_todos_exist():
+    result = initialize_request_node(
         {
             "messages": [HumanMessage(content="continue")],
             "todos": [_todo("todo-1", "Arrange room layout", "in_progress")],
@@ -215,27 +166,14 @@ def test_route_mode_node_forces_plan_mode_when_unfinished_todos_exist():
     )
     assert result["task_mode"] == "plan_mode"
     assert result["task_intent"] == "continue_existing_plan"
-    assert result["max_request_agent_turns"] == 50
-    assert result["max_request_tool_batches"] == 40
-    assert result["max_plan_replans"] == 3
 
 
-def test_route_mode_node_sets_dual_topology_for_plan_mode_when_requested():
-    result = route_mode_node(
+def test_initialize_request_node_sets_dual_topology_when_requested():
+    result = initialize_request_node(
         {
             "messages": [HumanMessage(content="Create a chair and then add a lamp.")],
             "workflow_topology_request": "dual_agent",
-        },
-        router_model=_StubRouterModel(
-            {
-                "intent": "multi_step_scene_action",
-                "mode": "plan_mode",
-                "confidence": 0.93,
-                "need_clarification": False,
-                "clarification_question": "",
-                "requires_scene_mutation": True,
-            }
-        ),
+        }
     )
     assert result["task_mode"] == "plan_mode"
     assert result["workflow_topology"] == "dual_agent"
@@ -243,24 +181,14 @@ def test_route_mode_node_sets_dual_topology_for_plan_mode_when_requested():
     assert result["memory_profile"] == "shared_plus_role_private"
 
 
-def test_route_mode_node_downgrades_dual_request_for_conversation_mode():
-    result = route_mode_node(
+def test_initialize_request_node_preserves_single_topology_defaults():
+    result = initialize_request_node(
         {
             "messages": [HumanMessage(content="What is global illumination?")],
-            "workflow_topology_request": "dual_agent",
-        },
-        router_model=_StubRouterModel(
-            {
-                "intent": "qa",
-                "mode": "conversation_mode",
-                "confidence": 0.91,
-                "need_clarification": False,
-                "clarification_question": "",
-                "requires_scene_mutation": False,
-            }
-        ),
+            "workflow_topology_request": "single_agent",
+        }
     )
-    assert result["task_mode"] == "conversation_mode"
+    assert result["task_mode"] == "plan_mode"
     assert result["workflow_topology"] == "single_agent"
     assert result["active_role"] == "general"
 

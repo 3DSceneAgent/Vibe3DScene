@@ -86,7 +86,7 @@ async def fake_get_verify_message_agent(_thread_id=None):
     return VerifyNodeMessageAgent()
 
 
-class RouteModeInternalMessageAgent:
+class InitializeRequestInternalMessageAgent:
     async def astream(self, *_args, **_kwargs):
         yield (
             AIMessage(
@@ -94,7 +94,7 @@ class RouteModeInternalMessageAgent:
                     '{"intent":"multi_step_scene_action","mode":"plan_mode","confidence":1.0}'
                 )
             ),
-            {"langgraph_node": "route_mode"},
+            {"langgraph_node": "initialize_request"},
         )
         yield (
             AIMessage(content="Visible assistant response"),
@@ -102,8 +102,8 @@ class RouteModeInternalMessageAgent:
         )
 
 
-async def fake_get_route_mode_internal_agent(_thread_id=None):
-    return RouteModeInternalMessageAgent()
+async def fake_get_initialize_request_internal_agent(_thread_id=None):
+    return InitializeRequestInternalMessageAgent()
 
 
 class DuplicateAssistantFromUpdatesAgent:
@@ -215,11 +215,11 @@ def test_chat_stream_filters_verify_internal_message_stream(monkeypatch):
     assert tool_payloads[0]["messages"][0].get("name") == "verification"
 
 
-def test_chat_stream_filters_route_mode_internal_message_stream(monkeypatch):
-    monkeypatch.setattr(api_module, "get_agent", fake_get_route_mode_internal_agent)
+def test_chat_stream_filters_initialize_request_internal_message_stream(monkeypatch):
+    monkeypatch.setattr(api_module, "get_agent", fake_get_initialize_request_internal_agent)
     client = TestClient(api_module.app)
 
-    with client.stream("POST", "/chat/stream", json={"message": "hi", "thread_id": "t-route-mode-filter"}) as response:
+    with client.stream("POST", "/chat/stream", json={"message": "hi", "thread_id": "t-initialize-request-filter"}) as response:
         assert response.status_code == 200
         payloads = collect_sse_payloads(response.iter_lines())
 

@@ -32,7 +32,7 @@ def test_active_stream_session_sequences_events_and_builds_heartbeat() -> None:
         request_id="request-1",
     )
     session.note_task_mode("plan_mode")
-    session.note_graph_node("route_mode", 1)
+    session.note_graph_node("initialize_request", 1)
     session.note_todos(
         [
             {"id": "todo-1", "status": "completed"},
@@ -53,7 +53,7 @@ def test_active_stream_session_sequences_events_and_builds_heartbeat() -> None:
     progress = heartbeat["progress"]
     assert progress["task_mode"] == "plan_mode"
     assert progress["graph_steps"] == 1
-    assert progress["last_node"] == "route_mode"
+    assert progress["last_node"] == "initialize_request"
     assert progress["todo_total"] == 2
     assert progress["todo_completed"] == 1
     assert progress["scene_has_change"] is True

@@ -174,8 +174,9 @@ def test_get_agent_coalesces_concurrent_refreshes(monkeypatch):
     _reset_runtime_state(thread_id)
 
     class DummyGraph:
-        _vlm_provider = "gemini"
-        _vlm_model = "gemini-2.5-pro"
+        def __init__(self, provider: str, model: str):
+            self._vlm_provider = provider
+            self._vlm_model = model
 
     created: list[DummyGraph] = []
 
@@ -185,7 +186,7 @@ def test_get_agent_coalesces_concurrent_refreshes(monkeypatch):
         assert model is not None
         assert api_key
         await asyncio.sleep(0)
-        graph = DummyGraph()
+        graph = DummyGraph(provider=provider, model=model)
         created.append(graph)
         return graph
 

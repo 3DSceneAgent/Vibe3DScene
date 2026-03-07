@@ -5,13 +5,12 @@ from langchain_core.messages import ToolMessage
 from scene_agent.agent.memory_scope import merge_role_private_memory
 from scene_agent.agent.state import AgentState
 from scene_agent.agent.todo_protocol import TODO_UPDATE_TOOL_NAME, parse_todo_update_request
-from .shared import ROLE_BUILDER, ROLE_GENERAL, ROLE_VERIFIER
+from scene_agent.utils.agent_messages import find_last_ai_message, message_content_to_text
+from scene_agent.utils.todo_helpers import coerce_non_negative_int
+from .constants_workflow import ROLE_BUILDER, ROLE_GENERAL, ROLE_VERIFIER
 from .shared import (
     ai_message_has_tool_calls,
-    coerce_non_negative_int,
-    find_last_ai_message,
     invoke_role_agent,
-    message_content_to_text,
 )
 
 def agent_node(

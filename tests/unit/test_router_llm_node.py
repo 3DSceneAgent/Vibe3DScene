@@ -1,168 +1,43 @@
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 
-from scene_agent.agent.nodes import clarification_node, route_mode_node
-
-
-class _StubStructuredRouter:
-    def __init__(self, payload: dict):
-        self._payload = payload
-
-    def invoke(self, _messages):
-        return self._payload
+from scene_agent.agent.nodes import initialize_request_node
 
 
-class _StubRouterModel:
-    def __init__(self, payload: dict):
-        self._payload = payload
-
-    def with_config(self, **_kwargs):
-        return self
-
-    def with_structured_output(self, _schema):
-        return _StubStructuredRouter(self._payload)
-
-
-class _FailingRouterModel:
-    def with_config(self, **_kwargs):
-        return self
-
-    def with_structured_output(self, _schema):
-        class _Broken:
-            def invoke(self, _messages):
-                raise RuntimeError("router unavailable")
-
-        return _Broken()
-
-
-def test_route_mode_node_routes_conversation_from_llm_router():
-    result = route_mode_node(
-        {"messages": [HumanMessage(content="What is global illumination?")]},
-        router_model=_StubRouterModel(
-            {
-                "intent": "qa",
-                "mode": "conversation_mode",
-                "confidence": 0.91,
-                "need_clarification": False,
-                "clarification_question": "",
-                "requires_scene_mutation": False,
-            }
-        ),
+def test_initialize_request_node_defaults_to_plan_mode():
+    result = initialize_request_node(
+        {"messages": [HumanMessage(content="What is global illumination?")]}
     )
-
-    assert result["task_mode"] == "conversation_mode"
-    assert result["router_need_clarification"] is False
-
-
-def test_route_mode_node_routes_single_action_from_llm_router():
-    result = route_mode_node(
-        {"messages": [HumanMessage(content="Add one wooden chair.")]},
-        router_model=_StubRouterModel(
-            {
-                "intent": "single_scene_action",
-                "mode": "single_action_mode",
-                "confidence": 0.88,
-                "need_clarification": False,
-                "clarification_question": "",
-                "requires_scene_mutation": True,
-            }
-        ),
-    )
-
-    assert result["task_mode"] == "single_action_mode"
-    assert result["router_need_clarification"] is False
-
-
-def test_route_mode_node_routes_plan_from_llm_router():
-    result = route_mode_node(
-        {
-            "messages": [HumanMessage(content="Rebuild the full scene from references.")],
-            "workflow_topology_request": "dual_agent",
-        },
-        router_model=_StubRouterModel(
-            {
-                "intent": "scene_reconstruction",
-                "mode": "plan_mode",
-                "confidence": 0.94,
-                "need_clarification": False,
-                "clarification_question": "",
-                "requires_scene_mutation": True,
-            }
-        ),
-    )
-
     assert result["task_mode"] == "plan_mode"
-    assert result["workflow_topology"] == "dual_agent"
+    assert result["task_intent"] == "direct_request"
+    assert result["max_request_agent_turns"] > 0
+    assert result["max_request_tool_batches"] > 0
 
 
-def test_route_mode_node_allows_low_confidence_action_when_router_is_decisive():
-    result = route_mode_node(
-        {"messages": [HumanMessage(content="Make it better.")]},
-        router_model=_StubRouterModel(
-            {
-                "intent": "single_scene_action",
-                "mode": "single_action_mode",
-                "confidence": 0.42,
-                "need_clarification": False,
-                "clarification_question": "",
-                "requires_scene_mutation": True,
-            }
-        ),
-    )
-
-    assert result["router_need_clarification"] is False
-
-
-def test_route_mode_node_allows_low_confidence_plan_when_router_is_decisive():
-    result = route_mode_node(
+def test_initialize_request_node_resolves_dual_topology_request():
+    result = initialize_request_node(
         {
-            "messages": [
-                HumanMessage(
-                    content="Create a low poly dungeon with a dragon guarding a pot of gold."
-                )
-            ]
-        },
-        router_model=_StubRouterModel(
-            {
-                "intent": "multi_step_scene_action",
-                "mode": "plan_mode",
-                "confidence": 0.44,
-                "need_clarification": False,
-                "clarification_question": "",
-                "requires_scene_mutation": True,
-            }
-        ),
+            "messages": [HumanMessage(content="Build a full scene.")],
+            "workflow_topology_request": "dual_agent",
+        }
     )
+    assert result["workflow_topology"] == "dual_agent"
+    assert result["active_role"] == "builder"
+    assert result["memory_profile"] == "shared_plus_role_private"
 
-    assert result["router_need_clarification"] is False
 
-
-def test_route_mode_node_requires_clarification_on_low_confidence_conversation():
-    result = route_mode_node(
-        {"messages": [HumanMessage(content="What should I do?")]},
-        router_model=_StubRouterModel(
-            {
-                "intent": "qa",
-                "mode": "conversation_mode",
-                "confidence": 0.42,
-                "need_clarification": False,
-                "clarification_question": "",
-                "requires_scene_mutation": False,
-            }
-        ),
+def test_initialize_request_node_marks_continue_intent_with_unfinished_todos():
+    result = initialize_request_node(
+        {
+            "messages": [HumanMessage(content="continue")],
+            "todos": [
+                {
+                    "id": "todo-1",
+                    "description": "Arrange layout",
+                    "status": "in_progress",
+                    "created_at": "2026-01-01T00:00:00",
+                    "completed_at": None,
+                }
+            ],
+        }
     )
-
-    assert result["router_need_clarification"] is True
-    assert isinstance(result["router_clarification_question"], str)
-    assert result["router_clarification_question"].strip()
-
-
-def test_route_mode_node_requires_clarification_on_router_failure():
-    result = route_mode_node(
-        {"messages": [HumanMessage(content="Do something with this.")]},
-        router_model=_FailingRouterModel(),
-    )
-
-    assert result["router_need_clarification"] is True
-    clarification = clarification_node(result)
-    assert isinstance(clarification["messages"][0], AIMessage)
-    assert clarification["messages"][0].content.strip()
+    assert result["task_intent"] == "continue_existing_plan"

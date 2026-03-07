@@ -52,6 +52,23 @@ def test_quality_evaluator_maps_mismatch_status_and_increments_streak():
     assert result["verification_mismatch_streak"] == 2
 
 
+def test_quality_evaluator_treats_verification_error_as_skipped():
+    result = quality_evaluator_node(
+        {
+            "messages": [
+                ToolMessage(
+                    name="verification",
+                    content={"status": "error", "reason": "VLM timeout"},
+                    tool_call_id="verification_error",
+                )
+            ],
+            "verification_mismatch_streak": 3,
+        }
+    )
+    assert result["quality_eval"]["status"] == "skipped"
+    assert result["verification_mismatch_streak"] == 0
+
+
 def test_progress_evaluator_returns_continue_with_open_todos():
     result = progress_evaluator_node(
         {

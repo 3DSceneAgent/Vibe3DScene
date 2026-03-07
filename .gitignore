@@ -32,7 +32,8 @@ legacy
 # codex is only used for dev 
 AGENTS.md
 
-reference 
+# reference 
+
 
 # remove all legacy vibe coding files 
 .cursor 

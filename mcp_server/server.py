@@ -56,6 +56,8 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
     """Manage server startup and shutdown lifecycle."""
     try:
         logger.info("BlenderMCP server starting up")
+        # Ensure tools are registered for both direct Python entry and `mcp run/dev`.
+        register_mcp_tools(server, logger)
         try:
             record_startup()
         except Exception as exc:

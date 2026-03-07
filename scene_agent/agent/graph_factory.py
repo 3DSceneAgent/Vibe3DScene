@@ -12,9 +12,8 @@ from scene_agent.agent.state import AgentState
 
 def build_agent_state_graph(
     *,
-    route_mode_node: Callable[..., Any],
+    initialize_request_node: Callable[..., Any],
     sync_reference_catalog_node: Callable[..., Any],
-    clarification_node: Callable[..., Any],
     prepare_reference_context_node: Callable[..., Any],
     agent_node: Callable[..., Any],
     turn_dispatch_node: Callable[..., Any],
@@ -35,7 +34,7 @@ def build_agent_state_graph(
     transition_resolver_node: Callable[..., Any],
     planner_refresh_node: Callable[..., Any],
     finalize_node: Callable[..., Any],
-    route_after_mode: Callable[..., Any],
+    route_after_initialize_request: Callable[..., Any],
     route_after_sync_reference_catalog: Callable[..., Any],
     route_after_prepare_reference_context: Callable[..., Any],
     route_after_turn_dispatch: Callable[..., Any],
@@ -48,9 +47,8 @@ def build_agent_state_graph(
 ) -> StateGraph:
     builder = StateGraph(AgentState)
 
-    builder.add_node("route_mode", route_mode_node)
+    builder.add_node("initialize_request", initialize_request_node)
     builder.add_node("sync_reference_catalog", sync_reference_catalog_node)
-    builder.add_node("clarification", clarification_node)
     builder.add_node("prepare_reference_context", prepare_reference_context_node)
     builder.add_node("agent", agent_node)
     builder.add_node("turn_dispatch", turn_dispatch_node)
@@ -72,10 +70,9 @@ def build_agent_state_graph(
     builder.add_node("planner_refresh", planner_refresh_node)
     builder.add_node("finalize", finalize_node)
 
-    builder.add_edge(START, "route_mode")
-    builder.add_conditional_edges("route_mode", route_after_mode)
+    builder.add_edge(START, "initialize_request")
+    builder.add_conditional_edges("initialize_request", route_after_initialize_request)
     builder.add_conditional_edges("sync_reference_catalog", route_after_sync_reference_catalog)
-    builder.add_edge("clarification", END)
     builder.add_conditional_edges("prepare_reference_context", route_after_prepare_reference_context)
 
     builder.add_edge("agent", "turn_dispatch")

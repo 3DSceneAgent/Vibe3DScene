@@ -1,77 +1,39 @@
-"""Node implementations by category."""
+"""Request initialization node (router-free workflow entrypoint)."""
+
+from __future__ import annotations
+
 from typing import Any, Dict
-from langchain_core.messages import AIMessage
+
 from scene_agent.agent.memory_scope import resolve_memory_profile
 from scene_agent.agent.state import AgentState
-from scene_agent.config import get_settings
-from .shared import (
-    DEFAULT_MAX_PLAN_REPLANS,
-    MODE_CONVERSATION,
-    MODE_PLAN,
-    MODE_SINGLE_ACTION,
-    ROLE_BUILDER,
-    ROLE_GENERAL,
-    ROUTER_MIN_CONFIDENCE,
-    TOPOLOGY_DUAL,
-)
-from .shared import (
-    RouterDecision,
-)
-from .shared import (
-    build_router_clarification_question,
-    coerce_non_negative_int,
-    coerce_task_mode,
-    invoke_router_decision,
-    latest_human_message,
-    request_budget,
-    unfinished_todo_count,
-)
-
 from scene_agent.agent.workflow_profiles import (
     normalize_workflow_topology_request,
     resolve_workflow_topology,
 )
+from scene_agent.config import get_settings
+from scene_agent.utils.todo_helpers import coerce_non_negative_int
+
+from .constants_workflow import (
+    DEFAULT_MAX_PLAN_REPLANS,
+    MODE_PLAN,
+    ROLE_BUILDER,
+    ROLE_GENERAL,
+    TOPOLOGY_DUAL,
+)
+from .shared import request_budget, unfinished_todo_count
 
 
-def route_mode_node(
-    state: AgentState,
-    *,
-    router_model: Any | None = None,
-) -> Dict[str, Any]:
+def initialize_request_node(state: AgentState) -> Dict[str, Any]:
     """
-    LLM-based router for task mode / intent classification.
-    Low-confidence decisions require strict clarification before execution.
+    Initialize per-request workflow state without a dedicated router LLM call.
+
+    Design notes:
+    - Always start in plan_mode with generous default budgets.
+    - Let the main agent decide whether to answer directly or mutate scene/tools.
+    - Keep topology/memory requests honored from explicit API hints.
     """
-    latest_user_request = latest_human_message(state)
     unfinished_todos = unfinished_todo_count(state)
-
-    if unfinished_todos > 0:
-        decision = RouterDecision(
-            intent="continue_existing_plan",
-            mode=MODE_PLAN,
-            confidence=1.0,
-            need_clarification=False,
-            clarification_question="",
-            requires_scene_mutation=True,
-        )
-    elif router_model is None:
-        decision = RouterDecision(
-            intent="clarification_needed",
-            mode=MODE_CONVERSATION,
-            confidence=0.0,
-            need_clarification=True,
-            clarification_question=build_router_clarification_question(latest_user_request),
-            requires_scene_mutation=False,
-        )
-    else:
-        decision = invoke_router_decision(
-            state=state,
-            router_model=router_model,
-            latest_user_request=latest_user_request,
-        )
-
-    mode = coerce_task_mode(decision.mode)
-    intent = decision.intent
+    mode = MODE_PLAN
 
     raw_topology_request = state.get("workflow_topology_request")
     if raw_topology_request is None:
@@ -94,7 +56,7 @@ def route_mode_node(
             "shared_plus_role_private",
         }:
             memory_profile_request = normalized_memory_request
-    if memory_profile_request == "auto" and mode == MODE_PLAN and workflow_topology == TOPOLOGY_DUAL:
+    if memory_profile_request == "auto" and workflow_topology == TOPOLOGY_DUAL:
         memory_profile = "shared_plus_role_private"
     else:
         memory_profile = resolve_memory_profile(memory_profile_request)
@@ -103,32 +65,14 @@ def route_mode_node(
     if isinstance(current_task_id, str) and current_task_id.strip():
         normalized_task_id = current_task_id.strip()[:128]
     else:
-        if mode == MODE_CONVERSATION:
-            normalized_task_id = "conversation"
-        elif mode == MODE_SINGLE_ACTION:
-            normalized_task_id = "single_action"
-        else:
-            normalized_task_id = "plan"
+        normalized_task_id = "plan"
 
     budget = request_budget(mode)
-    tool_policy = "allow_mutation"
-    if mode == MODE_CONVERSATION:
-        tool_policy = "forbid_mutation"
-    elif mode == MODE_SINGLE_ACTION:
-        tool_policy = "allow_mutation_limited"
 
     active_role = ROLE_GENERAL
-    if mode == MODE_PLAN and workflow_topology == TOPOLOGY_DUAL:
+    if workflow_topology == TOPOLOGY_DUAL:
         active_role = ROLE_BUILDER
 
-    clarification_question = decision.clarification_question.strip()
-    if not clarification_question:
-        clarification_question = build_router_clarification_question(latest_user_request)
-    # Keep action workflows flowing unless router explicitly asks for clarification.
-    # Low-confidence auto-clarification is only enforced for conversation intents.
-    need_clarification = bool(decision.need_clarification)
-    if not need_clarification and mode == MODE_CONVERSATION and decision.confidence < ROUTER_MIN_CONFIDENCE:
-        need_clarification = True
     active_todo_id = state.get("active_todo_id")
     if not isinstance(active_todo_id, str):
         active_todo_id = None
@@ -143,15 +87,13 @@ def route_mode_node(
         default=max_plan_replans_default,
     )
 
+    task_intent = "continue_existing_plan" if unfinished_todos > 0 else "direct_request"
+
     return {
         "task_mode": mode,
-        "task_intent": intent,
+        "task_intent": task_intent,
         "task_id": normalized_task_id,
-        "router_decision": decision.model_dump(mode="json"),
-        "router_confidence": float(decision.confidence),
-        "router_need_clarification": need_clarification,
-        "router_clarification_question": clarification_question,
-        "tool_policy": tool_policy,
+        "tool_policy": "allow_mutation",
         "workflow_topology_request": requested_topology,
         "memory_profile_request": memory_profile_request,
         "workflow_topology": workflow_topology,
@@ -179,25 +121,11 @@ def route_mode_node(
         "context_summary_message_count": 0,
         "context_compaction_count": 0,
         "transition_next": None,
-        "transition_reason": "router_initialized",
+        "transition_reason": "workflow_initialized_without_router",
         "max_request_agent_turns": budget["max_request_agent_turns"],
         "max_request_tool_batches": budget["max_request_tool_batches"],
         "request_stop_reason": None,
     }
 
-def route_mode_llm_node(state: AgentState, router_model: Any) -> Dict[str, Any]:
-    """Explicit LLM router entrypoint used by graph wiring."""
-    return route_mode_node(state, router_model=router_model)
 
-def clarification_node(state: AgentState) -> Dict[str, Any]:
-    question_raw = state.get("router_clarification_question")
-    question = question_raw.strip() if isinstance(question_raw, str) and question_raw.strip() else (
-        "Please clarify your goal: are you asking for explanation only, a single edit, "
-        "or a multi-step scene build?"
-    )
-    return {
-        "messages": [AIMessage(content=question)],
-        "request_stop_reason": "clarification_required",
-        "transition_next": "finalize",
-        "transition_reason": "router_low_confidence_clarification_required",
-    }
+__all__ = ["initialize_request_node"]

@@ -29,16 +29,15 @@ from .execution import (
     update_memory_node,
 )
 from .finalize import finalize_node
-from .router import clarification_node, route_mode_llm_node, route_mode_node
-from .shared import (
+from .router import initialize_request_node
+from .constants_runtime import (
     RENDER_VISION_MESSAGE_ID,
     SCENE_OBSERVE_MESSAGE_ID,
 )
+from scene_agent.utils.render_refs import extract_render_path, resolve_render_message_to_data_url
 from .shared import (
-    extract_render_path,
     prepare_reference_context_node,
     latest_human_message,
-    resolve_render_message_to_data_url,
     sync_reference_catalog_node,
     get_reference_image_memory,
     get_settings,
@@ -46,9 +45,7 @@ from .shared import (
 from .verification import verify_node, verify_render_with_references
 
 __all__ = [
-    "route_mode_node",
-    "route_mode_llm_node",
-    "clarification_node",
+    "initialize_request_node",
     "agent_node",
     "builder_agent_node",
     "verifier_camera_agent_node",

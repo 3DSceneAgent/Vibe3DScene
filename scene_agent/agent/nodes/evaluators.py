@@ -8,7 +8,14 @@ from scene_agent.agent.convergence import (
 from scene_agent.agent.memory_scope import merge_role_private_memory
 from scene_agent.agent.state import AgentState
 from scene_agent.agent.todo_state import apply_todo_actions
-from .shared import (
+from scene_agent.utils.todo_helpers import coerce_non_negative_int
+from scene_agent.utils.verification_helpers import (
+    coerce_verification_dict,
+    extract_verifier_fix_instructions,
+    latest_verification_payload,
+    replan_budget_remaining,
+)
+from .constants_workflow import (
     DEFAULT_MAX_PLAN_REPLANS,
     MODE_CONVERSATION,
     MODE_PLAN,
@@ -17,14 +24,9 @@ from .shared import (
     TOPOLOGY_DUAL,
 )
 from .shared import (
-    coerce_non_negative_int,
     coerce_task_mode,
     effective_todo_snapshot,
-    coerce_verification_dict,
     coerce_workflow_topology,
-    extract_verifier_fix_instructions,
-    latest_verification_payload,
-    replan_budget_remaining,
     unfinished_todo_count,
 )
 
@@ -52,11 +54,10 @@ def verifier_agent_node(state: AgentState) -> Dict[str, Any]:
         should_replan = replan_budget_remaining(state) and (stall_count >= 2 or len(fix_instructions) == 0)
 
     ready_to_finalize = feedback_status == "pass" and unfinished_todos == 0
-    confidence = 0.55
-    if feedback_status == "pass":
-        confidence = 0.9
-    elif feedback_status == "catastrophic":
-        confidence = 0.4
+    confidence: float | None = None
+    raw_confidence = verification.get("confidence")
+    if isinstance(raw_confidence, (int, float)):
+        confidence = max(0.0, min(1.0, float(raw_confidence)))
 
     verifier_feedback = {
         "status": feedback_status,
@@ -65,8 +66,9 @@ def verifier_agent_node(state: AgentState) -> Dict[str, Any]:
         "should_replan": should_replan,
         "focus_objects": [],
         "fix_instructions": fix_instructions,
-        "confidence": confidence,
     }
+    if confidence is not None:
+        verifier_feedback["confidence"] = confidence
 
     if isinstance(verification.get("reason"), str) and verification["reason"].strip():
         verifier_feedback["reason"] = verification["reason"].strip()
@@ -82,7 +84,7 @@ def verifier_agent_node(state: AgentState) -> Dict[str, Any]:
         patch={
             "last_feedback_status": verifier_feedback["status"],
             "last_feedback_reason": verifier_feedback["reason"],
-            "last_feedback_confidence": verifier_feedback["confidence"],
+            "last_feedback_confidence": confidence,
         },
     )
 
@@ -114,6 +116,9 @@ def quality_evaluator_node(state: AgentState) -> Dict[str, Any]:
     elif normalized_status == "catastrophic":
         status = "catastrophic"
         reason = str(verification.get("reason") or "Catastrophic scene signal detected.")
+    elif normalized_status in {"error", "skipped"}:
+        status = "skipped"
+        reason = str(verification.get("reason") or "Verification execution error.")
 
     streak = coerce_non_negative_int(state.get("verification_mismatch_streak"))
     if status in {"mismatch", "catastrophic"}:

@@ -17,7 +17,7 @@ def test_settings_accept_qwen_provider_and_key(monkeypatch):
     assert settings.vlm_provider == "qwen"
     assert settings.get_vlm_api_key("qwen") == "qwen-key"
     assert settings.get_vlm_default_model("qwen") == "qwen-vl-max-latest"
-    assert settings.get_vlm_provider_models("qwen")[0] == "qwen-vl-max-latest"
+    assert settings.get_vlm_provider_models("qwen")[0] == "qwen-vl-latest"
 
 
 def test_qwen_provider_factory_returns_provider():

@@ -240,7 +240,7 @@ def test_reference_image_name_helper_falls_back_to_filename(monkeypatch):
     assert caption == ""
 
 
-def test_reference_image_selection_helper_falls_back_to_token_overlap(monkeypatch):
+def test_reference_image_selection_helper_failure_does_not_auto_attach(monkeypatch):
     monkeypatch.setattr(
         "scene_agent.agent.nodes.shared._resolve_reference_image_helper_model",
         lambda **_kwargs: None,
@@ -256,6 +256,6 @@ def test_reference_image_selection_helper_falls_back_to_token_overlap(monkeypatc
         api_key="test-key",
     )
 
-    assert should_attach is True
-    assert selected_name == "chair_ref"
-    assert reason.startswith("fallback_token_overlap:")
+    assert should_attach is False
+    assert selected_name is None
+    assert reason == "helper_unavailable_no_auto_attach"
