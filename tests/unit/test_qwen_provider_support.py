@@ -3,7 +3,7 @@ import sys
 import types
 
 from scene_agent.config import get_settings, reload_settings
-from scene_agent.vlm.providers import QwenProvider, get_vlm_provider
+from scene_agent.vlm.providers import GeminiProvider, QwenProvider, get_vlm_provider
 
 
 def test_settings_accept_qwen_provider_and_key(monkeypatch):
@@ -17,7 +17,7 @@ def test_settings_accept_qwen_provider_and_key(monkeypatch):
     assert settings.vlm_provider == "qwen"
     assert settings.get_vlm_api_key("qwen") == "qwen-key"
     assert settings.get_vlm_default_model("qwen") == "qwen-vl-max-latest"
-    assert settings.get_vlm_provider_models("qwen")[0] == "qwen-vl-latest"
+    assert settings.get_vlm_provider_models("qwen")[0] == "qwen3-vl-flash"
 
 
 def test_qwen_provider_factory_returns_provider():
@@ -33,9 +33,16 @@ def test_qwen_provider_chat_model_uses_dashscope_env(monkeypatch):
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
+    class DummySettings:
+        qwen_enable_thinking = True
+        qwen_thinking_budget = 128
+        gemini_include_thoughts = True
+        gemini_thinking_budget = None
+
     fake_module = types.SimpleNamespace(ChatQwen=DummyChatQwen)
     monkeypatch.setitem(sys.modules, "langchain_qwq", fake_module)
     monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.setattr("scene_agent.vlm.providers.get_settings", lambda: DummySettings())
 
     provider = QwenProvider(api_key="dashscope-key", model="qwen-vl-plus-latest")
     model = provider.get_chat_model()
@@ -43,4 +50,35 @@ def test_qwen_provider_chat_model_uses_dashscope_env(monkeypatch):
     assert isinstance(model, DummyChatQwen)
     assert os.environ["DASHSCOPE_API_KEY"] == "dashscope-key"
     assert captured["model"] == "qwen-vl-plus-latest"
+    assert captured["api_key"] == "dashscope-key"
     assert captured["streaming"] is True
+    assert captured["enable_thinking"] is True
+    assert captured["thinking_budget"] == 128
+
+
+def test_gemini_provider_chat_model_includes_thoughts(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class DummyChatGoogleGenerativeAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    class DummySettings:
+        gemini_include_thoughts = True
+        gemini_thinking_budget = 256
+        qwen_enable_thinking = True
+        qwen_thinking_budget = None
+
+    fake_module = types.SimpleNamespace(ChatGoogleGenerativeAI=DummyChatGoogleGenerativeAI)
+    monkeypatch.setitem(sys.modules, "langchain_google_genai", fake_module)
+    monkeypatch.setattr("scene_agent.vlm.providers.get_settings", lambda: DummySettings())
+
+    provider = GeminiProvider(api_key="gemini-key", model="gemini-2.5-flash")
+    model = provider.get_chat_model()
+
+    assert isinstance(model, DummyChatGoogleGenerativeAI)
+    assert captured["model"] == "gemini-2.5-flash"
+    assert captured["google_api_key"] == "gemini-key"
+    assert captured["streaming"] is True
+    assert captured["include_thoughts"] is True
+    assert captured["thinking_budget"] == 256

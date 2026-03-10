@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ApiRequestError,
   streamChat,
+  getTodos,
   getSceneRenders,
   getSceneGltf,
   getSceneBlend,
@@ -35,6 +36,7 @@ import type { Message, SceneHierarchyNode, Thread } from './state/types'
 import {
   applyStreamingDeltaWithId,
   extractMessageContent,
+  extractMessageThinking,
   extractToolPayload,
   isHumanMessage,
   isToolMessage,
@@ -611,6 +613,34 @@ function App() {
       window.clearTimeout(timeoutId)
     }
   }, [activeThread?.id, settings.backendUrl, backendStatus, updateThread, VLM_REQUEST_TIMEOUT_MS])
+
+  useEffect(() => {
+    let cancelled = false
+    const threadId = activeThread?.id
+    if (!threadId || !settings.backendUrl || backendStatus !== 'online') {
+      return () => {
+        cancelled = true
+      }
+    }
+
+    const fetchThreadTodos = async () => {
+      try {
+        const todos = await getTodos(settings.backendUrl, threadId)
+        if (cancelled) return
+        updateThread(threadId, (thread) => ({
+          ...thread,
+          todos
+        }))
+      } catch {
+        // Keep existing local todo state if the background refresh fails.
+      }
+    }
+
+    void fetchThreadTodos()
+    return () => {
+      cancelled = true
+    }
+  }, [activeThread?.id, backendStatus, settings.backendUrl, updateThread])
 
   const createThread = async () => {
     if (creatingThread || releasingThreadId !== null) {
@@ -1227,6 +1257,16 @@ function App() {
         }
       }
 
+      if (event.thinking_delta) {
+        const targetAssistantId = getOrCreateAssistantMessage(event.message_id ?? null)
+        updateAssistantById(targetAssistantId, (message) => ({
+          ...message,
+          thinking: `${message.thinking ?? ''}${event.thinking_delta ?? ''}`,
+          streamId: event.message_id ?? message.streamId ?? null,
+          status: 'streaming'
+        }))
+      }
+
       if (event.delta) {
         receivedDeltaRef.current = true
         if (event.message_id) {
@@ -1308,8 +1348,9 @@ function App() {
         }
         if (!selected) return
         const raw = extractMessageContent(selected)
-        if (!raw) return
-        const parsed = parseThinking(raw)
+        const providerThinking = extractMessageThinking(selected)
+        if (!raw && !providerThinking) return
+        const parsed = raw ? parseThinking(raw) : { text: '', thinking: undefined }
         const streamId =
           typeof selected === 'object' && selected !== null && 'id' in selected
             ? (selected as { id?: string | null }).id ?? null
@@ -1327,7 +1368,7 @@ function App() {
         updateAssistantById(targetAssistantId, (message) => ({
           ...message,
           content: parsed.text,
-          thinking: parsed.thinking,
+          thinking: providerThinking || parsed.thinking || message.thinking,
           raw,
           streamId,
           status: 'streaming'
@@ -1769,6 +1810,7 @@ function App() {
                   vlmLocked={Boolean(activeThread.vlmLocked)}
                   onVlmSelectionChange={handleVlmSelectionChange}
                   graphEvents={activeThread.graphEvents ?? []}
+                  todos={activeThread.todos ?? []}
                   runtimeClaimHint={runtimeClaimHint}
                 />
               </section>

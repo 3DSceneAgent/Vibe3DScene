@@ -106,7 +106,7 @@ _SCENE_LEVEL_RENDER_CAMERA_CONFIGS: tuple[tuple[str, float, float], ...] = (
     ("SceneCamera_TopDown", 0.0, 89.0),
 )
 _SCENE_LEVEL_RENDER_FOCAL_MM = 42.0
-_DEFAULT_API_LOG_PATH = Path(__file__).resolve().parents[2] / "logs" / "api_server.log"
+_DEFAULT_API_LOG_PATH = Path(__file__).resolve().parents[3] / "logs" / "api_server.log"
 _API_LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
 
 
@@ -871,9 +871,15 @@ def serialize_message(message: Any) -> Dict[str, Any]:
         return {
             "type": getattr(message, "type", None),
             "content": getattr(message, "content", None),
+            "content_blocks": getattr(message, "content_blocks", None),
+            "text": getattr(message, "text", None),
             "additional_kwargs": getattr(message, "additional_kwargs", None),
             "response_metadata": getattr(message, "response_metadata", None),
             "tool_calls": getattr(message, "tool_calls", None),
+            "tool_call_chunks": getattr(message, "tool_call_chunks", None),
+            "invalid_tool_calls": getattr(message, "invalid_tool_calls", None),
+            "chunk_position": getattr(message, "chunk_position", None),
+            "usage_metadata": getattr(message, "usage_metadata", None),
             "name": getattr(message, "name", None),
             "id": getattr(message, "id", None),
         }
@@ -929,7 +935,126 @@ def _sanitize_stream_value(value: Any, *, depth: int = 0) -> Any:
 def sanitize_message_for_stream(serialized: Dict[str, Any]) -> Dict[str, Any]:
     sanitized = dict(serialized)
     sanitized["content"] = _sanitize_stream_value(serialized.get("content"))
+    if "content_blocks" in serialized:
+        sanitized["content_blocks"] = _sanitize_stream_value(serialized.get("content_blocks"))
+    if "text" in serialized:
+        sanitized["text"] = _sanitize_stream_value(serialized.get("text"))
     return sanitized
+
+
+_TOOL_LIKE_CONTENT_TYPES = frozenset(
+    {
+        "tool_use",
+        "tool_call",
+        "tool_call_chunk",
+        "server_tool_call",
+        "server_tool_result",
+        "tool_result",
+        "function_call",
+        "function",
+    }
+)
+_REASONING_LIKE_CONTENT_TYPES = frozenset(
+    {
+        "reasoning",
+        "thinking",
+        "reasoning_content",
+        "summary_text",
+    }
+)
+_IMAGE_LIKE_CONTENT_TYPES = frozenset(
+    {
+        "image",
+        "image_url",
+        "input_image",
+        "output_image",
+        "media",
+        "file",
+        "document",
+    }
+)
+
+
+def _content_block_type(item: Dict[str, Any]) -> str:
+    raw_type = item.get("type")
+    if isinstance(raw_type, str):
+        return raw_type.strip().lower()
+    return ""
+
+
+def _looks_like_image_block(item: Dict[str, Any]) -> bool:
+    if "image_url" in item and isinstance(item["image_url"], dict):
+        return True
+    return _content_block_type(item) in _IMAGE_LIKE_CONTENT_TYPES
+
+
+def _content_block_has_thought_signature(item: Dict[str, Any]) -> bool:
+    if item.get("thought") is True:
+        return True
+    for key in ("thought_signature", "signature"):
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            return True
+    extras = item.get("extras")
+    if isinstance(extras, dict):
+        signature = extras.get("signature")
+        if isinstance(signature, str) and signature:
+            return True
+    return False
+
+
+def _extract_text_from_content_item(item: Any) -> str | None:
+    if isinstance(item, str):
+        return item
+    if not isinstance(item, dict):
+        return str(item)
+
+    if _looks_like_image_block(item):
+        image_url = item.get("image_url")
+        if isinstance(image_url, dict):
+            url = image_url.get("url", "")
+            if isinstance(url, str) and url and not url.startswith("data:"):
+                return f"![image]({url})"
+        direct_url = item.get("url")
+        if isinstance(direct_url, str) and direct_url and not direct_url.startswith("data:"):
+            return f"![image]({direct_url})"
+        return ""
+
+    item_type = _content_block_type(item)
+    if item_type in _TOOL_LIKE_CONTENT_TYPES:
+        return ""
+    if item_type in _REASONING_LIKE_CONTENT_TYPES:
+        return ""
+    if _content_block_has_thought_signature(item):
+        return ""
+
+    if item_type == "non_standard":
+        nested_value = item.get("value")
+        if isinstance(nested_value, dict):
+            nested_type = _content_block_type(nested_value)
+            if nested_type in _TOOL_LIKE_CONTENT_TYPES:
+                return ""
+            if nested_type in _REASONING_LIKE_CONTENT_TYPES:
+                return ""
+            nested_text = _extract_text_from_content_item(nested_value)
+            if nested_text is not None:
+                return nested_text
+
+    text = item.get("text")
+    if isinstance(text, str):
+        return text
+
+    content = item.get("content")
+    if isinstance(content, str):
+        return content
+
+    nested_value = item.get("value")
+    if isinstance(nested_value, (str, list, dict)):
+        nested_text = message_content_to_text(nested_value)
+        if nested_text:
+            return nested_text
+
+    return None
 
 
 def message_content_to_text(content: Any) -> str:
@@ -940,31 +1065,182 @@ def message_content_to_text(content: Any) -> str:
     if isinstance(content, list):
         parts = []
         for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                # Check if it's an image_url object
-                if "image_url" in item and isinstance(item["image_url"], dict):
-                    url = item["image_url"].get("url", "")
-                    # Convert image_url to markdown if it's not a data URL
-                    if url and not url.startswith("data:"):
-                        parts.append(f"![image]({url})")
-                    # Skip data URLs to avoid including base64 in text
-                    continue
-                elif isinstance(item.get("text"), str):
-                    parts.append(item["text"])
-                elif isinstance(item.get("content"), str):
-                    parts.append(item["content"])
-                else:
-                    # Don't serialize large base64 data
+            extracted = _extract_text_from_content_item(item)
+            if extracted is None:
+                if isinstance(item, dict):
                     if "base64" not in str(item):
                         parts.append(json.dumps(item, ensure_ascii=False, default=str))
-            else:
+                    continue
                 parts.append(str(item))
+                continue
+            if extracted:
+                parts.append(extracted)
         return "".join(parts)
     if isinstance(content, dict):
+        extracted = _extract_text_from_content_item(content)
+        if extracted is not None:
+            return extracted
         return json.dumps(_sanitize_stream_value(content), ensure_ascii=False, default=str)
     return str(content)
+
+
+def _extract_tool_call_name(tool_call: Any) -> str | None:
+    if isinstance(tool_call, dict):
+        raw_name = tool_call.get("name")
+        if isinstance(raw_name, str) and raw_name.strip():
+            return raw_name.strip()
+        function_value = tool_call.get("function")
+        if isinstance(function_value, dict):
+            function_name = function_value.get("name")
+            if isinstance(function_name, str) and function_name.strip():
+                return function_name.strip()
+        return None
+    raw_name = getattr(tool_call, "name", None)
+    if isinstance(raw_name, str) and raw_name.strip():
+        return raw_name.strip()
+    return None
+
+
+def _extract_reasoning_from_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            reasoning_text = _extract_reasoning_from_value(item)
+            if reasoning_text:
+                parts.append(reasoning_text)
+        return "".join(parts)
+    if not isinstance(value, dict):
+        return ""
+
+    item_type = _content_block_type(value)
+    if item_type in _REASONING_LIKE_CONTENT_TYPES or _content_block_has_thought_signature(value):
+        if item_type == "reasoning":
+            reasoning = value.get("reasoning")
+            if isinstance(reasoning, str):
+                return reasoning
+            summary = value.get("summary")
+            summary_text = _extract_reasoning_from_value(summary)
+            if summary_text:
+                return summary_text
+        thinking = value.get("thinking")
+        if isinstance(thinking, str):
+            return thinking
+        text = value.get("text")
+        if isinstance(text, str):
+            return text
+        content = value.get("content")
+        if isinstance(content, str):
+            return content
+        value_field = value.get("value")
+        return _extract_reasoning_from_value(value_field)
+
+    nested_value = value.get("value")
+    if item_type == "non_standard" and nested_value is not None:
+        return _extract_reasoning_from_value(nested_value)
+
+    if isinstance(nested_value, (dict, list, str)):
+        nested_text = _extract_reasoning_from_value(nested_value)
+        if nested_text:
+            return nested_text
+
+    summary = value.get("summary")
+    if isinstance(summary, list):
+        summary_text = _extract_reasoning_from_value(summary)
+        if summary_text:
+            return summary_text
+
+    return ""
+
+
+def extract_message_reasoning_text(serialized: Dict[str, Any]) -> str:
+    additional_kwargs = serialized.get("additional_kwargs")
+    if isinstance(additional_kwargs, dict):
+        reasoning_content = additional_kwargs.get("reasoning_content")
+        if isinstance(reasoning_content, str) and reasoning_content != "":
+            return reasoning_content
+        reasoning = additional_kwargs.get("reasoning")
+        reasoning_text = _extract_reasoning_from_value(reasoning)
+        if reasoning_text:
+            return reasoning_text
+
+    top_level_reasoning = serialized.get("reasoning_content")
+    if isinstance(top_level_reasoning, str) and top_level_reasoning != "":
+        return top_level_reasoning
+
+    for key in ("content", "content_blocks"):
+        reasoning_text = _extract_reasoning_from_value(serialized.get(key))
+        if reasoning_text:
+            return reasoning_text
+    return ""
+
+
+def extract_message_tool_call_names(serialized: Dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def add_name(raw_name: str | None) -> None:
+        if not isinstance(raw_name, str):
+            return
+        name = raw_name.strip()
+        if not name or name in seen:
+            return
+        seen.add(name)
+        names.append(name)
+
+    def add_tool_calls(raw_calls: Any) -> None:
+        if not isinstance(raw_calls, list):
+            return
+        for tool_call in raw_calls:
+            add_name(_extract_tool_call_name(tool_call))
+
+    add_tool_calls(serialized.get("tool_calls"))
+    add_tool_calls(serialized.get("tool_call_chunks"))
+
+    additional_kwargs = serialized.get("additional_kwargs")
+    if isinstance(additional_kwargs, dict):
+        add_tool_calls(additional_kwargs.get("tool_calls"))
+
+    def scan_content_blocks(raw_content: Any) -> None:
+        if isinstance(raw_content, list):
+            for item in raw_content:
+                scan_content_blocks(item)
+            return
+        if not isinstance(raw_content, dict):
+            return
+
+        item_type = _content_block_type(raw_content)
+        if item_type in _TOOL_LIKE_CONTENT_TYPES:
+            add_name(_extract_tool_call_name(raw_content))
+            return
+
+        nested_value = raw_content.get("value")
+        if isinstance(nested_value, dict):
+            nested_type = _content_block_type(nested_value)
+            if nested_type in _TOOL_LIKE_CONTENT_TYPES:
+                add_name(_extract_tool_call_name(nested_value))
+                return
+
+    scan_content_blocks(serialized.get("content"))
+    scan_content_blocks(serialized.get("content_blocks"))
+    return names
+
+
+def assistant_message_display_text(
+    serialized: Dict[str, Any],
+) -> str:
+    raw_text = serialized.get("text")
+    if isinstance(raw_text, str) and raw_text != "":
+        return raw_text
+
+    for key in ("content", "content_blocks"):
+        text = message_content_to_text(serialized.get(key))
+        if text != "":
+            return text
+    return ""
 
 
 def normalize_stream_event(event: Any) -> tuple[str | None, Any]:
@@ -982,7 +1258,10 @@ def message_has_tool_calls(serialized: Dict[str, Any]) -> bool:
     tool_calls = serialized.get("tool_calls")
     if isinstance(tool_calls, list) and len(tool_calls) > 0:
         return True
-    return False
+    tool_call_chunks = serialized.get("tool_call_chunks")
+    if isinstance(tool_call_chunks, list) and len(tool_call_chunks) > 0:
+        return True
+    return len(extract_message_tool_call_names(serialized)) > 0
 
 
 def message_is_tool(serialized: Dict[str, Any]) -> bool:

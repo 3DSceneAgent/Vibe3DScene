@@ -1,11 +1,15 @@
 """API routes."""
 
 from importlib import import_module
+from typing import Any
 from fastapi import APIRouter, HTTPException, UploadFile, File, Request
 from fastapi.responses import Response
-from scene_agent.blender.session_manager import SessionResourceError
+from scene_agent.agent.redis_checkpointer import get_graph_checkpointer
+from scene_agent.agent.todo_state import project_latest_todos
+from scene_agent.blender.session_manager import SessionResourceError, get_session_manager
 from scene_agent.config import get_settings
 from scene_agent.memory.reference_image_memory import get_image_asset_memory
+from scene_agent.session import get_session_coordinator
 
 from .models import ImageAssetListResponse, serialize_image_asset
 from .shared import (
@@ -23,6 +27,62 @@ def resolve_api_module():
 async def get_agent(thread_id: str | None = None):
     api_module = resolve_api_module()
     return await api_module.get_agent(thread_id)
+
+
+def _safe_int_optional(raw: object) -> int | None:
+    try:
+        if raw is None or raw == "":
+            return None
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _thread_runtime_occupies_resources(thread_id: str) -> bool:
+    session = get_session_manager().get(thread_id)
+    if session is not None and session.mode == "headless":
+        process_running = session.process is not None and session.process.poll() is None
+        mcp_running = session.mcp_process is not None and session.mcp_process.poll() is None
+        return bool(
+            session.port is not None
+            or session.mcp_port is not None
+            or process_running
+            or mcp_running
+        )
+
+    meta = get_session_coordinator().get_session_meta(thread_id) or {}
+    return (
+        _safe_int_optional(meta.get("blender_port")) is not None
+        or _safe_int_optional(meta.get("mcp_port")) is not None
+    )
+
+
+def _load_persisted_thread_todos(thread_id: str) -> list[dict[str, Any]]:
+    try:
+        checkpointer = get_graph_checkpointer()
+        get_tuple = getattr(checkpointer, "get_tuple", None)
+        if not callable(get_tuple):
+            return []
+        snapshot = get_tuple({"configurable": {"thread_id": thread_id}})
+    except Exception:
+        return []
+
+    checkpoint = getattr(snapshot, "checkpoint", None)
+    if checkpoint is None and isinstance(snapshot, dict):
+        checkpoint = snapshot.get("checkpoint")
+    if not isinstance(checkpoint, dict):
+        return []
+
+    channel_values = checkpoint.get("channel_values")
+    if not isinstance(channel_values, dict):
+        return []
+
+    return list(
+        project_latest_todos(
+            channel_values.get("todo_versions"),
+            fallback_todos_raw=channel_values.get("todos"),
+        )
+    )
 
 
 router = APIRouter()
@@ -108,6 +168,14 @@ async def get_todos(thread_id: str, request: Request, response: Response):
     resolution, proxied = await claim_or_proxy_request(request=request, thread_id=thread_id)
     if proxied is not None:
         return proxied
+    settings = get_settings()
+    if settings.blender_mode == "headless" and not _thread_runtime_occupies_resources(thread_id):
+        payload = {
+            "thread_id": thread_id,
+            "todos": _load_persisted_thread_todos(thread_id),
+        }
+        set_owner_headers(response, resolution)
+        return payload
     try:
         agent = await get_agent(thread_id)
         config = {"configurable": {"thread_id": thread_id}}

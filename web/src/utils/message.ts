@@ -1,7 +1,7 @@
 import type { ToolMedia } from '../state/types'
 
 export type TodoItem = {
-  status: 'pending' | 'in_progress' | 'completed' | 'failed'
+  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'skipped'
   description: string
 }
 
@@ -33,6 +33,8 @@ export function parseTodos(raw: string): TodoItem[] {
           status = 'completed'
         } else if (statusRaw === 'failed' || statusRaw === 'error') {
           status = 'failed'
+        } else if (statusRaw === 'skipped') {
+          status = 'skipped'
         }
         
         if (description) {
@@ -107,66 +109,145 @@ function parseInlineImages(text: string): string {
   })
 }
 
+const TOOL_LIKE_CONTENT_TYPES = new Set([
+  'tool_use',
+  'tool_call',
+  'tool_call_chunk',
+  'server_tool_call',
+  'server_tool_result',
+  'tool_result',
+  'function_call',
+  'function'
+])
+const REASONING_LIKE_CONTENT_TYPES = new Set([
+  'reasoning',
+  'thinking',
+  'reasoning_content',
+  'summary_text'
+])
+
+function hasThoughtSignature(content: unknown): boolean {
+  if (!content || typeof content !== 'object') return false
+  const maybe = content as {
+    thought?: unknown
+    thought_signature?: unknown
+    signature?: unknown
+    extras?: { signature?: unknown }
+  }
+  if (maybe.thought === true) return true
+  if (typeof maybe.thought_signature === 'string' && maybe.thought_signature) return true
+  if (typeof maybe.signature === 'string' && maybe.signature) return true
+  if (maybe.extras && typeof maybe.extras.signature === 'string' && maybe.extras.signature) return true
+  return false
+}
+
+function normalizeContentItem(content: unknown): string {
+  if (typeof content === 'string') return parseInlineImages(content)
+  if (!content || typeof content !== 'object') {
+    return content == null ? '' : parseInlineImages(String(content))
+  }
+
+  const maybe = content as {
+    text?: unknown
+    content?: unknown
+    content_blocks?: unknown
+    value?: unknown
+    type?: string
+    base64?: string
+    url?: string
+    image_url?: { url?: string }
+  }
+
+  const type = typeof maybe.type === 'string' ? maybe.type.toLowerCase() : ''
+  if (TOOL_LIKE_CONTENT_TYPES.has(type)) {
+    return ''
+  }
+  if (REASONING_LIKE_CONTENT_TYPES.has(type) || hasThoughtSignature(content)) {
+    return ''
+  }
+
+  if (type === 'non_standard' && maybe.value && typeof maybe.value === 'object') {
+    const nestedType = (maybe.value as { type?: unknown }).type
+    if (typeof nestedType === 'string' && TOOL_LIKE_CONTENT_TYPES.has(nestedType.toLowerCase())) {
+      return ''
+    }
+    return normalizeContent(maybe.value)
+  }
+
+  if (type === 'image') {
+    const directUrl = typeof maybe.url === 'string' ? maybe.url : undefined
+    const nestedUrl =
+      maybe.image_url && typeof maybe.image_url.url === 'string'
+        ? maybe.image_url.url
+        : undefined
+    const imageUrl = directUrl || nestedUrl
+    if (imageUrl && !imageUrl.startsWith('data:')) {
+      return `![image](${imageUrl})`
+    }
+    if (maybe.base64) {
+      return '[image data omitted]'
+    }
+    return ''
+  }
+
+  if (typeof maybe.text === 'string') return maybe.text
+  if (typeof maybe.content === 'string') return maybe.content
+  if (maybe.content_blocks !== undefined) return normalizeContent(maybe.content_blocks)
+  if (maybe.value !== undefined) return normalizeContent(maybe.value)
+  return parseInlineImages(JSON.stringify(content))
+}
+
+function normalizeThinkingItem(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content.map((item) => normalizeThinkingItem(item)).filter((item) => item.length > 0).join('')
+  }
+  if (!content || typeof content !== 'object') return ''
+
+  const maybe = content as {
+    type?: string
+    thinking?: unknown
+    reasoning?: unknown
+    text?: unknown
+    content?: unknown
+    value?: unknown
+    extras?: { signature?: unknown }
+    additional_kwargs?: { reasoning_content?: unknown; reasoning?: unknown }
+  }
+
+  const type = typeof maybe.type === 'string' ? maybe.type.toLowerCase() : ''
+  if (REASONING_LIKE_CONTENT_TYPES.has(type) || hasThoughtSignature(content)) {
+    if (typeof maybe.thinking === 'string') return maybe.thinking
+    if (typeof maybe.reasoning === 'string') return maybe.reasoning
+    if (typeof maybe.text === 'string') return maybe.text
+    if (typeof maybe.content === 'string') return maybe.content
+  }
+
+  if (type === 'non_standard' && maybe.value !== undefined) {
+    return normalizeThinkingItem(maybe.value)
+  }
+
+  if (maybe.additional_kwargs) {
+    if (typeof maybe.additional_kwargs.reasoning_content === 'string') {
+      return maybe.additional_kwargs.reasoning_content
+    }
+    if (maybe.additional_kwargs.reasoning !== undefined) {
+      return normalizeThinkingItem(maybe.additional_kwargs.reasoning)
+    }
+  }
+
+  if (maybe.value !== undefined) return normalizeThinkingItem(maybe.value)
+  return ''
+}
+
 function normalizeContent(content: unknown): string {
   if (typeof content === 'string') return parseInlineImages(content)
   if (Array.isArray(content)) {
-    const parts = content.map((item) => {
-      if (typeof item === 'string') return item
-      if (item && typeof item === 'object') {
-        const maybe = item as {
-          text?: unknown
-          content?: unknown
-          type?: string
-          base64?: string
-          url?: string
-          image_url?: { url?: string }
-        }
-        // Handle image objects directly
-        if (maybe.type === 'image') {
-          const directUrl = typeof maybe.url === 'string' ? maybe.url : undefined
-          const nestedUrl =
-            maybe.image_url && typeof maybe.image_url.url === 'string'
-              ? maybe.image_url.url
-              : undefined
-          const imageUrl = directUrl || nestedUrl
-          if (imageUrl && !imageUrl.startsWith('data:')) {
-            return `![image](${imageUrl})`
-          }
-          if (maybe.base64) {
-            return '[image data omitted]'
-          }
-        }
-        if (typeof maybe.text === 'string') return maybe.text
-        if (typeof maybe.content === 'string') return maybe.content
-        return JSON.stringify(item)
-      }
-      return String(item)
-    })
+    const parts = content.map((item) => normalizeContentItem(item)).filter((item) => item.length > 0)
     return parseInlineImages(parts.join('\n'))
   }
   if (content && typeof content === 'object') {
-    const maybe = content as {
-      type?: string
-      base64?: string
-      url?: string
-      image_url?: { url?: string }
-    }
-    // Handle image objects directly
-    if (maybe.type === 'image') {
-      const directUrl = typeof maybe.url === 'string' ? maybe.url : undefined
-      const nestedUrl =
-        maybe.image_url && typeof maybe.image_url.url === 'string'
-          ? maybe.image_url.url
-          : undefined
-      const imageUrl = directUrl || nestedUrl
-      if (imageUrl && !imageUrl.startsWith('data:')) {
-        return `![image](${imageUrl})`
-      }
-      if (maybe.base64) {
-        return '[image data omitted]'
-      }
-    }
-    return parseInlineImages(JSON.stringify(content))
+    return normalizeContentItem(content)
   }
   return content == null ? '' : parseInlineImages(String(content))
 }
@@ -175,11 +256,50 @@ export function extractMessageContent(message: unknown): string {
   if (typeof message === 'string') return message
   if (Array.isArray(message)) return normalizeContent(message)
   if (typeof message === 'object' && message !== null) {
-    const maybe = message as { content?: unknown; text?: unknown }
-    if (maybe.content !== undefined) return normalizeContent(maybe.content)
-    if (maybe.text !== undefined) return normalizeContent(maybe.text)
+    const maybe = message as { content?: unknown; text?: unknown; content_blocks?: unknown }
+    if (maybe.content !== undefined) {
+      const normalized = normalizeContent(maybe.content)
+      if (normalized) return normalized
+    }
+    if (maybe.text !== undefined) {
+      const normalized = normalizeContent(maybe.text)
+      if (normalized) return normalized
+    }
+    if (maybe.content_blocks !== undefined) {
+      const normalized = normalizeContent(maybe.content_blocks)
+      if (normalized) return normalized
+    }
   }
   return normalizeContent(message)
+}
+
+export function extractMessageThinking(message: unknown): string {
+  if (!message || typeof message !== 'object') return ''
+  const maybe = message as {
+    reasoning_content?: unknown
+    additional_kwargs?: { reasoning_content?: unknown; reasoning?: unknown }
+    content?: unknown
+    content_blocks?: unknown
+  }
+  if (typeof maybe.reasoning_content === 'string' && maybe.reasoning_content) {
+    return maybe.reasoning_content
+  }
+  if (maybe.additional_kwargs) {
+    if (typeof maybe.additional_kwargs.reasoning_content === 'string' && maybe.additional_kwargs.reasoning_content) {
+      return maybe.additional_kwargs.reasoning_content
+    }
+    if (maybe.additional_kwargs.reasoning !== undefined) {
+      const normalized = normalizeThinkingItem(maybe.additional_kwargs.reasoning)
+      if (normalized) return normalized
+    }
+  }
+  for (const value of [maybe.content_blocks, maybe.content]) {
+    if (value !== undefined) {
+      const normalized = normalizeThinkingItem(value)
+      if (normalized) return normalized
+    }
+  }
+  return ''
 }
 
 export function isHumanMessage(message: unknown): boolean {

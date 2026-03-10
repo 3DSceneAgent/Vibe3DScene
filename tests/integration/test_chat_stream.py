@@ -5,7 +5,7 @@ import json
 import pytest
 import requests
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 from scene_agent.interfaces import api as api_module
 from scene_agent.interfaces.api import routes_chat
 from scene_agent.session.session_coordinator import OwnerResolution
@@ -126,6 +126,178 @@ class DuplicateAssistantFromUpdatesAgent:
 
 async def fake_get_duplicate_assistant_agent(_thread_id=None):
     return DuplicateAssistantFromUpdatesAgent()
+
+
+class ToolCallAssistantFallbackAgent:
+    async def astream(self, *_args, **_kwargs):
+        yield (
+            AIMessage(
+                id="assistant-tool",
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_scene_info",
+                        "args": {},
+                        "id": "tool-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            {"langgraph_node": "agent"},
+        )
+        yield (
+            "updates",
+            {
+                "agent": {
+                    "messages": [
+                        AIMessage(
+                            id="assistant-tool",
+                            content="<thinking>Inspecting scene before edit.</thinking>Inspecting scene before edit.",
+                            tool_calls=[
+                                {
+                                    "name": "get_scene_info",
+                                    "args": {},
+                                    "id": "tool-1",
+                                    "type": "tool_call",
+                                }
+                            ],
+                        )
+                    ],
+                },
+            },
+        )
+
+
+async def fake_get_tool_call_assistant_fallback_agent(_thread_id=None):
+    return ToolCallAssistantFallbackAgent()
+
+
+class ToolCallOnlyAssistantAgent:
+    async def astream(self, *_args, **_kwargs):
+        yield (
+            AIMessage(
+                id="assistant-tool-only",
+                content="",
+                tool_calls=[
+                    {
+                        "name": "clear_scene",
+                        "args": {},
+                        "id": "tool-1",
+                        "type": "tool_call",
+                    },
+                    {
+                        "name": "execute_blender_code",
+                        "args": {"code": "print('hi')"},
+                        "id": "tool-2",
+                        "type": "tool_call",
+                    },
+                ],
+            ),
+            {"langgraph_node": "agent"},
+        )
+        yield (
+            "updates",
+            {
+                "agent": {
+                    "messages": [
+                        AIMessage(
+                            id="assistant-tool-only",
+                            content="",
+                            tool_calls=[
+                                {
+                                    "name": "clear_scene",
+                                    "args": {},
+                                    "id": "tool-1",
+                                    "type": "tool_call",
+                                },
+                                {
+                                    "name": "execute_blender_code",
+                                    "args": {"code": "print('hi')"},
+                                    "id": "tool-2",
+                                    "type": "tool_call",
+                                },
+                            ],
+                        )
+                    ],
+                },
+            },
+        )
+
+
+async def fake_get_tool_call_only_assistant_agent(_thread_id=None):
+    return ToolCallOnlyAssistantAgent()
+
+
+class QwenReasoningStreamAgent:
+    async def astream(self, *_args, **_kwargs):
+        yield (
+            AIMessageChunk(
+                id="assistant-qwen",
+                content="",
+                additional_kwargs={"reasoning_content": "Need to inspect the scene first. "},
+            ),
+            {"langgraph_node": "agent"},
+        )
+        yield (
+            AIMessageChunk(
+                id="assistant-qwen",
+                content="",
+                additional_kwargs={"reasoning_content": "Then I can call the scene tool."},
+            ),
+            {"langgraph_node": "agent"},
+        )
+        yield (
+            AIMessageChunk(
+                id="assistant-qwen",
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_scene_info",
+                        "args": {},
+                        "id": "tool-1",
+                        "type": "tool_call",
+                    }
+                ],
+                tool_call_chunks=[
+                    {
+                        "name": "get_scene_info",
+                        "args": "{}",
+                        "id": "tool-1",
+                        "index": 0,
+                        "type": "tool_call_chunk",
+                    }
+                ],
+            ),
+            {"langgraph_node": "agent"},
+        )
+        yield (
+            "updates",
+            {
+                "agent": {
+                    "messages": [
+                        AIMessage(
+                            id="assistant-qwen",
+                            content="",
+                            additional_kwargs={
+                                "reasoning_content": "Need to inspect the scene first. Then I can call the scene tool."
+                            },
+                            tool_calls=[
+                                {
+                                    "name": "get_scene_info",
+                                    "args": {},
+                                    "id": "tool-1",
+                                    "type": "tool_call",
+                                }
+                            ],
+                        )
+                    ],
+                },
+            },
+        )
+
+
+async def fake_get_qwen_reasoning_stream_agent(_thread_id=None):
+    return QwenReasoningStreamAgent()
 
 
 class ResumableAgent:
@@ -252,6 +424,75 @@ def test_chat_stream_skips_non_tool_update_messages_after_message_stream(monkeyp
         if "messages" in payload and payload["messages"][0].get("type") == "ai"
     ]
     assert not assistant_messages
+
+
+def test_chat_stream_emits_update_assistant_message_when_message_stream_only_carried_tool_calls(monkeypatch):
+    monkeypatch.setattr(api_module, "get_agent", fake_get_tool_call_assistant_fallback_agent)
+    client = TestClient(api_module.app)
+
+    with client.stream("POST", "/chat/stream", json={"message": "hi", "thread_id": "t-tool-fallback"}) as response:
+        assert response.status_code == 200
+        payloads = collect_sse_payloads(response.iter_lines())
+
+    deltas = [payload["delta"] for payload in payloads if "delta" in payload]
+    assert deltas == []
+
+    assistant_messages = [
+        payload
+        for payload in payloads
+        if "messages" in payload and payload["messages"][0].get("type") == "ai"
+    ]
+    assert len(assistant_messages) == 1
+    assert assistant_messages[0]["messages"][0].get("id") == "assistant-tool"
+    assert (
+        "Inspecting scene before edit."
+        in str(assistant_messages[0]["messages"][0].get("content", ""))
+    )
+
+
+def test_chat_stream_skips_tool_only_assistant_message_when_no_text_exists(monkeypatch):
+    monkeypatch.setattr(api_module, "get_agent", fake_get_tool_call_only_assistant_agent)
+    client = TestClient(api_module.app)
+
+    with client.stream("POST", "/chat/stream", json={"message": "hi", "thread_id": "t-tool-only"}) as response:
+        assert response.status_code == 200
+        payloads = collect_sse_payloads(response.iter_lines())
+
+    assistant_messages = [
+        payload
+        for payload in payloads
+        if "messages" in payload and payload["messages"][0].get("type") == "ai"
+    ]
+    assert assistant_messages == []
+
+
+def test_chat_stream_emits_qwen_reasoning_chunks_without_fake_tool_summary(monkeypatch):
+    monkeypatch.setattr(api_module, "get_agent", fake_get_qwen_reasoning_stream_agent)
+    client = TestClient(api_module.app)
+
+    with client.stream("POST", "/chat/stream", json={"message": "hi", "thread_id": "t-qwen-thinking"}) as response:
+        assert response.status_code == 200
+        payloads = collect_sse_payloads(response.iter_lines())
+
+    thinking_deltas = [payload["thinking_delta"] for payload in payloads if "thinking_delta" in payload]
+    assert thinking_deltas == [
+        "Need to inspect the scene first. ",
+        "Then I can call the scene tool.",
+    ]
+
+    deltas = [payload["delta"] for payload in payloads if "delta" in payload]
+    assert deltas == []
+
+    assistant_messages = [
+        payload
+        for payload in payloads
+        if "messages" in payload and payload["messages"][0].get("type") == "ai"
+    ]
+    assert len(assistant_messages) == 1
+    assert assistant_messages[0]["messages"][0].get("reasoning_content") == (
+        "Need to inspect the scene first. Then I can call the scene tool."
+    )
+    assert assistant_messages[0]["messages"][0].get("content") == ""
 
 
 def test_chat_stream_emits_done(monkeypatch):

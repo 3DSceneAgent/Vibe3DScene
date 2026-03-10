@@ -78,7 +78,12 @@ const MessageItem = memo(
     return (
       <div className={`message-row ${message.role} ${isAssistantError ? 'error' : ''}`}>
         <div className={`message-bubble ${message.role} ${isAssistantError ? 'error' : ''}`}>
-          {message.thinking && <ThinkingBlock thinking={message.thinking} />}
+          {message.thinking && (
+            <ThinkingBlock
+              thinking={message.thinking}
+              autoOpen={showSpinner || !message.content.trim()}
+            />
+          )}
           {todos.length > 0 && <TodosBlock todos={todos} />}
           <div className="message-content">
             <MarkdownMessage content={message.content || ' '} backendUrl={backendUrl} />
@@ -91,8 +96,8 @@ const MessageItem = memo(
   (prev, next) => prev.message === next.message && prev.backendUrl === next.backendUrl
 )
 
-function ThinkingBlock({ thinking }: { thinking: string }) {
-  const [open, setOpen] = useState(false)
+function ThinkingBlock({ thinking, autoOpen = false }: { thinking: string; autoOpen?: boolean }) {
+  const [open, setOpen] = useState(autoOpen)
 
   return (
     <div className="thinking-block">
@@ -109,12 +114,7 @@ function TodosBlock({ todos }: { todos: Array<{ status: string; description: str
     <div className="message-todos">
       {todos.map((todo, index) => (
         <div key={index} className={`message-todo-item status-${todo.status}`}>
-          <span className="todo-status-icon">
-            {todo.status === 'pending' && '○'}
-            {todo.status === 'in_progress' && '⟳'}
-            {todo.status === 'completed' && '✓'}
-            {todo.status === 'failed' && '✗'}
-          </span>
+          <span className="todo-status-icon" aria-hidden="true" />
           <span className={todo.status === 'completed' ? 'todo-text-completed' : 'todo-text'}>
             {todo.description}
           </span>

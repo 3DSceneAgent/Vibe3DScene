@@ -1,7 +1,7 @@
 export type TodoItem = {
   id: string
   description: string
-  status: 'pending' | 'in_progress' | 'completed' | 'failed'
+  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'skipped'
   created_at?: string
   completed_at?: string | null
 }
@@ -79,6 +79,7 @@ export type StreamEvent = {
   reason?: string
   status_code?: number
   delta?: string
+  thinking_delta?: string
   message_id?: string | null
   event?: 'done' | 'graph_node' | 'heartbeat'
   graph_node?: GraphNodeStream

@@ -3,7 +3,8 @@ import { MessageList } from './MessageList'
 import { ChatComposer } from './ChatComposer'
 import { ReferenceImageStrip } from './ReferenceImageStrip'
 import { GraphTimeline } from './GraphTimeline'
-import type { GraphNodeStream, ImageAsset, VlmProviderOption } from '../api/types'
+import { TodoPanel } from './TodoPanel'
+import type { GraphNodeStream, ImageAsset, TodoItem, VlmProviderOption } from '../api/types'
 
 type ChatTabProps = {
   thread: Thread | null
@@ -27,6 +28,7 @@ type ChatTabProps = {
   vlmLocked?: boolean
   onVlmSelectionChange?: (provider: string, model: string) => void
   graphEvents?: GraphNodeStream[]
+  todos?: TodoItem[]
   runtimeClaimHint?: string | null
 }
 
@@ -69,6 +71,7 @@ export function ChatTab({
   vlmLocked = false,
   onVlmSelectionChange,
   graphEvents = [],
+  todos = [],
   runtimeClaimHint = null
 }: ChatTabProps) {
   const selectionOptions: VlmSelectionOption[] = vlmProviders
@@ -115,6 +118,20 @@ export function ChatTab({
     }
     return `Workflow: ${taskMode ?? 'unknown'} / ${topology ?? 'unknown'}`
   })()
+  const activeTodoId = (() => {
+    for (let index = graphEvents.length - 1; index >= 0; index -= 1) {
+      const patchRaw = graphEvents[index]?.state_patch
+      if (!patchRaw || typeof patchRaw !== 'object' || Array.isArray(patchRaw)) {
+        continue
+      }
+      const patch = patchRaw as Record<string, unknown>
+      const candidate = normalizeWorkflowValue(patch.active_todo_id)
+      if (candidate) {
+        return candidate
+      }
+    }
+    return null
+  })()
 
   if (!thread) {
     return <div className="empty-state">Create a conversation to begin.</div>
@@ -138,6 +155,7 @@ export function ChatTab({
         </div>
       </div>
       <GraphTimeline events={graphEvents} isStreaming={streamStatus === 'streaming'} />
+      <TodoPanel todos={todos} activeTodoId={activeTodoId} />
       <div className="chat-scroll-area">
         <MessageList messages={thread.messages} backendUrl={backendUrl} />
       </div>

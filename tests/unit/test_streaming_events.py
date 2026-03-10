@@ -1,6 +1,8 @@
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
 from scene_agent.interfaces.api import (
+    assistant_message_display_text,
+    extract_message_reasoning_text,
     message_has_tool_calls,
     message_is_tool,
     serialize_event,
@@ -75,3 +77,48 @@ def test_message_has_tool_calls_from_top_level_field() -> None:
     data = serialize_message(message)
     assert isinstance(data.get("tool_calls"), list)
     assert message_has_tool_calls(data) is True
+
+
+def test_assistant_message_display_text_skips_tool_use_json_noise() -> None:
+    message = AIMessage(
+        content=[
+            {"type": "text", "text": "Inspecting scene before edit."},
+            {"type": "tool_use", "name": "get_scene_info", "input": {}, "id": "tool-1"},
+        ],
+        tool_calls=[{"name": "get_scene_info", "args": {}, "id": "tool-1", "type": "tool_call"}],
+    )
+    data = serialize_message(message)
+    assert assistant_message_display_text(data) == "Inspecting scene before edit."
+
+
+def test_assistant_message_display_text_returns_empty_when_content_empty() -> None:
+    message = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "clear_scene", "args": {}, "id": "tool-1", "type": "tool_call"},
+            {"name": "execute_blender_code", "args": {}, "id": "tool-2", "type": "tool_call"},
+        ],
+    )
+    data = serialize_message(message)
+    assert assistant_message_display_text(data) == ""
+
+
+def test_extract_message_reasoning_text_from_qwen_reasoning_content() -> None:
+    message = AIMessageChunk(
+        id="assistant-qwen",
+        content="",
+        additional_kwargs={"reasoning_content": "Need to inspect the scene first."},
+    )
+    data = serialize_message(message)
+    assert extract_message_reasoning_text(data) == "Need to inspect the scene first."
+
+
+def test_extract_message_reasoning_text_from_gemini_thinking_block() -> None:
+    message = AIMessage(
+        content=[
+            {"type": "thinking", "thinking": "Compare layout before calling the tool.", "signature": "abc"},
+            {"type": "text", "text": "", "extras": {"signature": "abc"}},
+        ],
+    )
+    data = serialize_message(message)
+    assert extract_message_reasoning_text(data) == "Compare layout before calling the tool."

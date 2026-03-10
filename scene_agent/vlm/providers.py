@@ -4,6 +4,7 @@ VLM provider implementations for OpenAI, Anthropic, Gemini, and Qwen.
 import os
 from importlib import import_module
 from typing import Any
+from scene_agent.config import get_settings
 from scene_agent.vlm.base import BaseVLMProvider
 
 
@@ -47,11 +48,18 @@ class GeminiProvider(BaseVLMProvider):
     
     def get_chat_model(self) -> Any:
         from langchain_google_genai import ChatGoogleGenerativeAI
+        settings = get_settings()
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "google_api_key": self.api_key,
+            "temperature": 0.7,
+            "streaming": True,
+            "include_thoughts": settings.gemini_include_thoughts,
+        }
+        if settings.gemini_thinking_budget is not None:
+            kwargs["thinking_budget"] = settings.gemini_thinking_budget
         return ChatGoogleGenerativeAI(
-            model=self.model,
-            google_api_key=self.api_key,
-            temperature=0.7,
-            streaming=True,
+            **kwargs,
         )
 
 
@@ -63,15 +71,21 @@ class QwenProvider(BaseVLMProvider):
 
     def get_chat_model(self) -> Any:
         chat_qwen_cls = getattr(import_module("langchain_qwq"), "ChatQwen")
+        settings = get_settings()
 
         # langchain-qwq primarily reads DASHSCOPE_API_KEY from environment.
         # Keep this provider-level key authoritative for current runtime.
         os.environ["DASHSCOPE_API_KEY"] = self.api_key
-        return chat_qwen_cls(
-            model=self.model,
-            temperature=0.7,
-            streaming=True,
-        )
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "api_key": self.api_key,
+            "temperature": 0.7,
+            "streaming": True,
+            "enable_thinking": settings.qwen_enable_thinking,
+        }
+        if settings.qwen_thinking_budget is not None:
+            kwargs["thinking_budget"] = settings.qwen_thinking_budget
+        return chat_qwen_cls(**kwargs)
 
 
 def get_vlm_provider(

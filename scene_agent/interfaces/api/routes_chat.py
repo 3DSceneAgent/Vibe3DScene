@@ -16,11 +16,12 @@ from typing import Any
 
 from .models import ChatRequest, ChatResponse
 from .shared import (
+    assistant_message_display_text,
     build_graph_node_event_payload,
     claim_or_proxy_request,
+    extract_message_reasoning_text,
     extract_graph_step_events,
     log_event,
-    message_content_to_text,
     message_has_tool_calls,
     message_is_tool,
     normalize_requested_tool_names,
@@ -49,6 +50,10 @@ _INTERNAL_NON_USER_MESSAGE_NODES = frozenset(
         "initialize_request",
         "sync_reference_catalog",
         "prepare_reference_context",
+        "router",
+        "plan_node",
+        "evaluator",
+        "verifier_feedback",
     }
 )
 _STREAM_REQUEST_ID_HEADER = "X-Stream-Request-Id"
@@ -398,6 +403,8 @@ async def _produce_stream_events(
     graph_step_index = 0
     existing_message_ids: set[str] = set()
     last_assistant_text: str | None = None
+    streamed_assistant_message_ids: set[str] = set()
+    saw_unidentified_assistant_delta = False
     scene_has_change = False
     done_payload: dict[str, Any] | None = None
     next_event_task: asyncio.Task | None = None
@@ -451,7 +458,10 @@ async def _produce_stream_events(
                     message_id = serialized.get("id")
                     if isinstance(message_id, str) and message_id:
                         existing_message_ids.add(message_id)
-                    content_text = message_content_to_text(serialized.get("content"))
+                    reasoning_text = extract_message_reasoning_text(serialized)
+                    content_text = assistant_message_display_text(serialized)
+                    if not content_text and reasoning_text:
+                        content_text = reasoning_text
                     if content_text:
                         last_assistant_text = content_text
         except Exception:
@@ -600,13 +610,31 @@ async def _produce_stream_events(
                             update_mode_non_tool_messages.append(node_message)
 
             messages = None
+            filtered_update_non_tool_messages: list[Any] = []
+            if update_mode_non_tool_messages:
+                for node_message in update_mode_non_tool_messages:
+                    serialized_node_message = serialize_message(node_message)
+                    content_text = assistant_message_display_text(serialized_node_message)
+                    reasoning_text = extract_message_reasoning_text(serialized_node_message)
+                    if not content_text and not reasoning_text:
+                        continue
+                    node_message_id = serialized_node_message.get("id")
+                    if (
+                        isinstance(node_message_id, str)
+                        and node_message_id
+                        and node_message_id in streamed_assistant_message_ids
+                    ):
+                        continue
+                    if (
+                        (not isinstance(node_message_id, str) or not node_message_id)
+                        and saw_unidentified_assistant_delta
+                    ):
+                        continue
+                    filtered_update_non_tool_messages.append(node_message)
             if is_message_stream:
                 messages = stream_payload if mode == "messages" else [mode]
-            elif update_mode_tool_messages:
-                messages = update_mode_tool_messages
-            elif update_mode_non_tool_messages and not saw_message_stream:
-                # Fallback only when token streaming is unavailable.
-                messages = update_mode_non_tool_messages
+            elif update_mode_tool_messages or filtered_update_non_tool_messages:
+                messages = [*update_mode_tool_messages, *filtered_update_non_tool_messages]
             elif isinstance(payload, dict) and "messages" in payload:
                 if not saw_message_stream:
                     messages = payload["messages"]
@@ -627,6 +655,13 @@ async def _produce_stream_events(
                         continue
                     serialized_stream = sanitize_message_for_stream(serialized)
                     message_type = serialized_stream.get("type")
+                    reasoning_text = extract_message_reasoning_text(serialized_stream)
+                    if reasoning_text:
+                        serialized_stream["reasoning_content"] = reasoning_text
+                    display_text = assistant_message_display_text(serialized_stream)
+                    if message_type not in {"human", "system", "tool"} and display_text:
+                        serialized_stream["content"] = display_text
+                        serialized_stream["text"] = display_text
                     if message_has_tool_calls(serialized) or is_tool_message:
                         scene_has_change = True
                         session.set_scene_has_change(True)
@@ -643,8 +678,16 @@ async def _produce_stream_events(
                     message_id = serialized_stream.get("id")
                     if isinstance(message_id, str) and message_id in existing_message_ids:
                         continue
-                    delta = message_content_to_text(serialized_stream.get("content"))
-                    if not delta:
+                    if is_message_stream and reasoning_text:
+                        session.note_assistant_chunk()
+                        session.publish(
+                            {
+                                "thinking_delta": reasoning_text,
+                                "message_id": message_id,
+                            }
+                        )
+                    delta = display_text
+                    if not delta and not (reasoning_text and not is_message_stream):
                         continue
                     if (
                         not message_id
@@ -654,11 +697,16 @@ async def _produce_stream_events(
                     ):
                         continue
                     saw_new_message = True
-                    session.note_assistant_chunk()
                     if is_message_stream:
+                        session.note_assistant_chunk()
+                        if isinstance(message_id, str) and message_id:
+                            streamed_assistant_message_ids.add(message_id)
+                        else:
+                            saw_unidentified_assistant_delta = True
                         event_payload = {"delta": delta, "message_id": message_id}
                         session.publish(event_payload)
                     else:
+                        session.note_assistant_chunk()
                         message_event_payload = {"messages": [serialized_stream]}
                         session.publish(message_event_payload)
 
@@ -773,9 +821,12 @@ async def chat(request: ChatRequest, request_http: Request, response: Response):
         # Extract response as plain text (LangChain message content can be list/dict blocks).
         last_message = result["messages"][-1]
         serialized_last = serialize_message(last_message)
-        response_text = message_content_to_text(serialized_last.get("content")).strip()
+        reasoning_text = extract_message_reasoning_text(serialized_last).strip()
+        response_text = assistant_message_display_text(serialized_last).strip()
+        if not response_text and reasoning_text:
+            response_text = reasoning_text
         if not response_text:
-            response_text = str(last_message)
+            response_text = ""
         
         payload = ChatResponse(
             response=response_text,

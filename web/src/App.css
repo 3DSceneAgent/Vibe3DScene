@@ -735,7 +735,7 @@ a.sidebar-icon-btn {
 
 .graph-timeline-list {
   margin-top: 8px;
-  max-height: 110px;
+  max-height: 180px;
   min-height: 72px;
   overflow-y: auto;
   display: grid;
@@ -794,6 +794,17 @@ a.sidebar-icon-btn {
   color: var(--color-text);
 }
 
+.graph-timeline-collapsed-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.graph-timeline-collapsed-meta {
+  font-size: 11px;
+  color: var(--color-muted);
+}
+
 .graph-timeline-item {
   border: 1px solid var(--color-border);
   border-radius: 10px;
@@ -835,6 +846,76 @@ a.sidebar-icon-btn {
   color: var(--color-muted);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.graph-timeline-todos {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  display: grid;
+  gap: 6px;
+}
+
+.graph-timeline-todos-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #d8e8ff;
+}
+
+.graph-timeline-todo-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.todo-panel {
+  margin-top: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: rgba(13, 16, 24, 0.68);
+  padding: 10px 12px;
+}
+
+.todo-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.todo-panel-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.todo-panel-toggle {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.todo-panel-meta {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--color-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.todo-panel-list {
+  margin-top: 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.todo-panel-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .chat-scroll-area {
@@ -900,17 +981,34 @@ a.sidebar-icon-btn {
 }
 
 .markdown-body {
-  line-height: 1.6;
+  line-height: 1.45;
+  white-space: normal;
 }
 
 .markdown-body p {
-  margin: 0.5em 0;
+  margin: 0.32em 0;
 }
 
 .markdown-body ul,
 .markdown-body ol {
-  margin: 0.5em 0;
-  padding-left: 2em;
+  margin: 0.3em 0;
+  padding-left: 1.35em;
+}
+
+.markdown-body li {
+  margin: 0.16em 0;
+}
+
+.markdown-body li > p {
+  margin: 0.16em 0;
+}
+
+.markdown-body li > p:first-child {
+  margin-top: 0;
+}
+
+.markdown-body li > p:last-child {
+  margin-bottom: 0;
 }
 
 .markdown-image {
@@ -1032,29 +1130,58 @@ a.sidebar-icon-btn {
 
 .todo-status-icon {
   flex-shrink: 0;
-  width: 16px;
-  height: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: bold;
+  width: 14px;
+  height: 14px;
+  margin-top: 4px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  background: transparent;
+  box-sizing: border-box;
+  display: inline-block;
+  position: relative;
 }
 
-.message-todo-item.status-pending .todo-status-icon {
+.message-todo-item.status-pending .todo-status-icon,
+.todo-panel-item.status-pending .todo-status-icon,
+.graph-timeline-todo-item.status-pending .todo-status-icon {
   color: var(--color-muted);
+  opacity: 0.9;
 }
 
-.message-todo-item.status-in_progress .todo-status-icon {
+.message-todo-item.status-in_progress .todo-status-icon,
+.todo-panel-item.status-in_progress .todo-status-icon,
+.graph-timeline-todo-item.status-in_progress .todo-status-icon {
   color: #f59e0b;
-  animation: spin 2s linear infinite;
+  background: rgba(245, 158, 11, 0.05);
+  border-color: rgba(245, 158, 11, 0.35);
+  border-top-color: #f59e0b;
+  border-right-color: rgba(245, 158, 11, 0.16);
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2);
+  animation: spin 0.75s linear infinite;
 }
 
-.message-todo-item.status-completed .todo-status-icon {
+.message-todo-item.status-completed .todo-status-icon,
+.todo-panel-item.status-completed .todo-status-icon,
+.graph-timeline-todo-item.status-completed .todo-status-icon {
   color: #10b981;
+  background: currentColor;
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.14);
 }
 
-.message-todo-item.status-failed .todo-status-icon {
+.message-todo-item.status-failed .todo-status-icon,
+.todo-panel-item.status-failed .todo-status-icon,
+.graph-timeline-todo-item.status-failed .todo-status-icon {
   color: #ef4444;
+  background: currentColor;
+  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.14);
+}
+
+.todo-panel-item.status-skipped .todo-status-icon,
+.graph-timeline-todo-item.status-skipped .todo-status-icon,
+.message-todo-item.status-skipped .todo-status-icon {
+  color: #94a3b8;
+  border-color: #94a3b8;
+  background: rgba(148, 163, 184, 0.22);
 }
 
 @keyframes spin {

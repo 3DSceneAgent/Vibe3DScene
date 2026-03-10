@@ -53,9 +53,25 @@ class Settings(BaseSettings):
         default=None,
         description="Google Gemini API key override"
     )
+    gemini_include_thoughts: bool = Field(
+        default=True,
+        description="Whether Gemini responses should include provider thinking summaries"
+    )
+    gemini_thinking_budget: int | None = Field(
+        default=None,
+        description="Optional Gemini thinking budget; unset keeps provider defaults"
+    )
     qwen_api_key: str | None = Field(
         default=None,
         description="Qwen (DashScope) API key override"
+    )
+    qwen_enable_thinking: bool = Field(
+        default=False,
+        description="Whether Qwen should emit hidden reasoning_content while thinking; enabling this may reduce visible pre-tool text"
+    )
+    qwen_thinking_budget: int | None = Field(
+        default=None,
+        description="Optional Qwen thinking budget; unset keeps provider defaults"
     )
     vlm_openai_models: str = Field(
         default="gpt-4o,gpt-4.1,gpt-4.1-mini,gpt-4o-mini",
