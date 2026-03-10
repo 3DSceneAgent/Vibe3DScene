@@ -174,6 +174,20 @@ def test_strategy_requires_blend_import_for_sam_reconstruct_workflow():
     assert "SAM3D full-scene reconstruction (image-only)" not in prompt
 
 
+def test_strategy_includes_imported_hierarchy_guidance_without_exposing_extra_tool():
+    prompt = get_full_system_prompt(
+        [
+            "get_scene_info",
+            "get_object_info",
+            "delete_objects",
+        ]
+    )
+
+    assert "compare world_scale vs local scale" in prompt
+    assert "detach_keep_world" in prompt
+    assert "flatten_hierarchy(" not in prompt
+
+
 def test_mcp_strategy_includes_sam_reconstruct_when_runtime_ready(monkeypatch):
     monkeypatch.setattr(
         strategy_module.runtime,
@@ -198,3 +212,30 @@ def test_mcp_strategy_includes_sam_reconstruct_when_runtime_ready(monkeypatch):
     prompt = strategy_module.asset_creation_strategy_text()
 
     assert "SAM3D full-scene reconstruction (image-only)" in prompt
+
+
+def test_mcp_strategy_omits_sketchfab_when_api_unreachable(monkeypatch):
+    monkeypatch.setattr(
+        strategy_module.runtime,
+        "probe_conditional_services",
+        lambda _logger: {
+            "trellis2": False,
+            "retrieval": False,
+            "pcg_integrator": False,
+            "sam_reconstruct": False,
+        },
+    )
+    monkeypatch.setattr(strategy_module.runtime, "is_sketchfab_tool_enabled", lambda: True)
+    monkeypatch.setattr(strategy_module.runtime, "get_sketchfab_api_key", lambda: "configured")
+    monkeypatch.setattr(strategy_module.runtime, "probe_sketchfab_api", lambda _logger: False)
+    monkeypatch.setattr(strategy_module.runtime, "is_infinigen_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "is_trellis2_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "is_rodin_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "get_rodin_api_key", lambda: "")
+    monkeypatch.setattr(strategy_module.runtime, "is_hunyuan_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "is_retrieval_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "is_sam_reconstruct_tool_enabled", lambda: False)
+
+    prompt = strategy_module.asset_creation_strategy_text()
+
+    assert "Sketchfab (server-side)" not in prompt

@@ -65,6 +65,7 @@ def register_mcp_tools(mcp, logger) -> list[str]:
     enable_retrieval = runtime.is_retrieval_tool_enabled()
     enable_infinigen = runtime.is_infinigen_tool_enabled()
     enable_sketchfab = runtime.is_sketchfab_tool_enabled()
+    sketchfab_api_reachable = runtime.probe_sketchfab_api(logger) if enable_sketchfab else None
     has_rodin_key = bool(runtime.get_rodin_api_key())
     has_sketchfab_key = bool(runtime.get_sketchfab_api_key())
     generator_switches = {
@@ -77,7 +78,11 @@ def register_mcp_tools(mcp, logger) -> list[str]:
         return runtime.is_rodin_tool_enabled() and bool(runtime.get_rodin_api_key())
 
     def _is_sketchfab_fully_enabled() -> bool:
-        return runtime.is_sketchfab_tool_enabled() and bool(runtime.get_sketchfab_api_key())
+        return (
+            runtime.is_sketchfab_tool_enabled()
+            and bool(runtime.get_sketchfab_api_key())
+            and bool(sketchfab_api_reachable)
+        )
 
     def _is_local_client_mode() -> bool:
         return runtime.get_blender_mode() == "local-client"
@@ -104,7 +109,8 @@ def register_mcp_tools(mcp, logger) -> list[str]:
         (
             "Tool-gating context: BLENDER_MODE=%s ENABLE_HUNYUAN=%s "
             "ENABLE_RODIN=%s ENABLE_TRELLIS2=%s ENABLE_RETRIEVAL=%s "
-            "ENABLE_INFINIGEN=%s ENABLE_SKETCHFAB=%s RODIN_API_KEY_SET=%s SKETCHFAB_API_KEY_SET=%s"
+            "ENABLE_INFINIGEN=%s ENABLE_SKETCHFAB=%s RODIN_API_KEY_SET=%s "
+            "SKETCHFAB_API_KEY_SET=%s SKETCHFAB_API_REACHABLE=%s"
         ),
         mode_name,
         enable_hunyuan,
@@ -115,6 +121,7 @@ def register_mcp_tools(mcp, logger) -> list[str]:
         enable_sketchfab,
         has_rodin_key,
         has_sketchfab_key,
+        sketchfab_api_reachable,
     )
 
     tool_specs: list[
@@ -188,19 +195,19 @@ def register_mcp_tools(mcp, logger) -> list[str]:
             search_sketchfab_models,
             None,
             _is_sketchfab_fully_enabled,
-            "requires ENABLE_SKETCHFAB=true and SKETCHFAB_API_KEY configured",
+            "requires ENABLE_SKETCHFAB=true, SKETCHFAB_API_KEY configured, and reachable Sketchfab API",
         ),
         (
             get_sketchfab_model_preview,
             None,
             _is_sketchfab_fully_enabled,
-            "requires ENABLE_SKETCHFAB=true and SKETCHFAB_API_KEY configured",
+            "requires ENABLE_SKETCHFAB=true, SKETCHFAB_API_KEY configured, and reachable Sketchfab API",
         ),
         (
             download_sketchfab_model,
             None,
             _is_sketchfab_fully_enabled,
-            "requires ENABLE_SKETCHFAB=true and SKETCHFAB_API_KEY configured",
+            "requires ENABLE_SKETCHFAB=true, SKETCHFAB_API_KEY configured, and reachable Sketchfab API",
         ),
         (
             generate_hunyuan3d_model,

@@ -16,7 +16,6 @@ from mcp_server import runtime
 
 logger = logging.getLogger("BlenderMCPServer")
 
-SKETCHFAB_API_BASE_URL = "https://api.sketchfab.com/v3"
 _SKETCHFAB_IMPORT_MARKER = "MCP_SKETCHFAB_IMPORT_RESULT::"
 _SKETCHFAB_MIN_SEARCH_COUNT = 1
 _SKETCHFAB_MAX_SEARCH_COUNT = 5
@@ -29,9 +28,18 @@ def _sketchfab_disabled_message() -> str:
     )
 
 
+def _sketchfab_api_base_url() -> str:
+    return runtime.get_sketchfab_api_base_url()
+
+
 def _get_sketchfab_api_key_or_error() -> tuple[Optional[str], Optional[str]]:
     if not runtime.is_sketchfab_tool_enabled():
         return None, _sketchfab_disabled_message()
+    if runtime.get_cached_sketchfab_api_reachability() is False:
+        return None, (
+            "Sketchfab tools are disabled because the Sketchfab API is unreachable "
+            "from the current server."
+        )
     api_key = runtime.get_sketchfab_api_key()
     if not api_key:
         return None, (
@@ -95,8 +103,132 @@ def _build_blender_import_code(import_path: str, target_size: float) -> str:
         if not imported_objects:
             raise RuntimeError("No objects were imported from Sketchfab file")
 
-        imported_names = [obj.name for obj in imported_objects]
-        root_objects = [obj for obj in imported_objects if obj.parent is None]
+        def _safe_name(obj):
+            try:
+                name = getattr(obj, "name", "")
+            except ReferenceError:
+                return ""
+            return name if isinstance(name, str) else ""
+
+        def _existing_objects(candidates):
+            existing = []
+            seen = set()
+            for candidate in candidates:
+                name = _safe_name(candidate)
+                if not name or name in seen:
+                    continue
+                current = bpy.data.objects.get(name)
+                if current is None:
+                    continue
+                seen.add(name)
+                existing.append(current)
+            return existing
+
+        def _has_armature_ancestor(obj):
+            current = getattr(obj, "parent", None)
+            visited = set()
+            while current is not None:
+                current_name = _safe_name(current)
+                if not current_name or current_name in visited:
+                    break
+                visited.add(current_name)
+                if getattr(current, "type", None) == "ARMATURE":
+                    return True
+                current = getattr(current, "parent", None)
+            return False
+
+        def _collect_empty_ancestors(obj):
+            ancestors = []
+            current = getattr(obj, "parent", None)
+            visited = set()
+            while current is not None:
+                current_name = _safe_name(current)
+                if not current_name or current_name in visited:
+                    break
+                visited.add(current_name)
+                if getattr(current, "type", None) == "ARMATURE":
+                    break
+                if getattr(current, "type", None) == "EMPTY":
+                    ancestors.append(current)
+                current = getattr(current, "parent", None)
+            return ancestors
+
+        def _flatten_imported_hierarchy(objects):
+            def _hierarchy_depth(obj):
+                depth = 0
+                current = getattr(obj, "parent", None)
+                visited = set()
+                while current is not None:
+                    current_name = _safe_name(current)
+                    if not current_name or current_name in visited:
+                        break
+                    visited.add(current_name)
+                    depth += 1
+                    current = getattr(current, "parent", None)
+                return depth
+
+            mesh_objects = []
+            candidate_empties = []
+            skipped_armature_meshes = []
+
+            for obj in _existing_objects(objects):
+                if obj.type == "EMPTY":
+                    candidate_empties.append(obj)
+                if obj.type != "MESH":
+                    continue
+                if _has_armature_ancestor(obj):
+                    skipped_armature_meshes.append(_safe_name(obj))
+                    continue
+                mesh_objects.append(obj)
+                candidate_empties.extend(_collect_empty_ancestors(obj))
+
+            mesh_objects = _existing_objects(mesh_objects)
+            candidate_empties = _existing_objects(candidate_empties)
+            processed_meshes = [_safe_name(obj) for obj in mesh_objects if _safe_name(obj)]
+            unparented_meshes = []
+
+            for obj in mesh_objects:
+                mesh_data = getattr(obj, "data", None)
+                if mesh_data is not None and getattr(mesh_data, "users", 1) > 1:
+                    obj.data = mesh_data.copy()
+
+                parent = getattr(obj, "parent", None)
+                if parent is None or getattr(parent, "type", None) == "ARMATURE":
+                    continue
+
+                world_matrix = obj.matrix_world.copy()
+                obj.parent = None
+                obj.matrix_world = world_matrix
+                if _safe_name(obj):
+                    unparented_meshes.append(_safe_name(obj))
+
+            if mesh_objects:
+                bpy.ops.object.select_all(action="DESELECT")
+                for obj in mesh_objects:
+                    obj.select_set(True)
+                bpy.context.view_layer.objects.active = mesh_objects[0]
+                bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+
+            bpy.context.view_layer.update()
+
+            removed_empties = []
+            for empty in sorted(candidate_empties, key=_hierarchy_depth, reverse=True):
+                current = bpy.data.objects.get(_safe_name(empty))
+                if current is None or current.children:
+                    continue
+                empty_name = _safe_name(current)
+                bpy.data.objects.remove(current, do_unlink=True)
+                if empty_name:
+                    removed_empties.append(empty_name)
+
+            return dict(
+                processed_meshes=processed_meshes,
+                unparented_meshes=list(dict.fromkeys(unparented_meshes)),
+                removed_empties=list(dict.fromkeys(removed_empties)),
+                skipped_armature_meshes=list(dict.fromkeys(skipped_armature_meshes)),
+            )
+
+        root_objects = [obj for obj in _existing_objects(imported_objects) if obj.parent is None]
 
         def _collect_mesh_children(obj):
             meshes = []
@@ -171,6 +303,10 @@ def _build_blender_import_code(import_path: str, target_size: float) -> str:
                 [all_max.x, all_max.y, all_max.z],
             ]
 
+        flatten_summary = _flatten_imported_hierarchy(imported_objects)
+        imported_objects = _existing_objects(imported_objects)
+        imported_names = [obj.name for obj in imported_objects]
+
         result = dict(
             success=True,
             imported_objects=imported_names,
@@ -181,6 +317,7 @@ def _build_blender_import_code(import_path: str, target_size: float) -> str:
             scale_applied=round(scale_applied, 6),
             target_size=target_size,
             import_path=import_path,
+            flatten_summary=flatten_summary,
         )
         print(marker + json.dumps(result, ensure_ascii=False))
         """
@@ -190,7 +327,13 @@ def _build_blender_import_code(import_path: str, target_size: float) -> str:
 def _import_sketchfab_asset_into_blender(import_path: Path, target_size: float) -> dict[str, Any]:
     blender = runtime.get_blender_connection(logger)
     code = _build_blender_import_code(str(import_path), target_size)
-    result = blender.send_command("execute_code", {"code": code})
+    result = blender.send_command(
+        "execute_code",
+        {
+            "code": code,
+            "allow_internal_object_delete": True,
+        },
+    )
     raw_output = result.get("result", "") if isinstance(result, dict) else ""
 
     parsed = _extract_marked_json(raw_output, _SKETCHFAB_IMPORT_MARKER)
@@ -235,7 +378,7 @@ def search_sketchfab_models(
 
     try:
         response = requests.get(
-            f"{SKETCHFAB_API_BASE_URL}/search",
+            f"{_sketchfab_api_base_url()}/search",
             headers=_sketchfab_headers(api_key),
             params=params,
             timeout=30,
@@ -304,7 +447,7 @@ def get_sketchfab_model_preview(
 
     try:
         response = requests.get(
-            f"{SKETCHFAB_API_BASE_URL}/models/{uid}",
+            f"{_sketchfab_api_base_url()}/models/{uid}",
             headers=_sketchfab_headers(api_key),
             timeout=30,
         )
@@ -373,7 +516,7 @@ def download_sketchfab_model(
 
     try:
         metadata_response = requests.get(
-            f"{SKETCHFAB_API_BASE_URL}/models/{uid}/download",
+            f"{_sketchfab_api_base_url()}/models/{uid}/download",
             headers=_sketchfab_headers(api_key),
             timeout=30,
         )

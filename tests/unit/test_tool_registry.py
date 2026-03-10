@@ -16,6 +16,7 @@ class FakeMCP:
 def _reset_registry_state(monkeypatch) -> None:
     monkeypatch.setattr(tool_registry, "_tools_registered", False)
     monkeypatch.setattr(tool_registry, "_enabled_tool_names", [])
+    tool_registry.runtime.reset_sketchfab_api_probe_cache()
 
 
 def _configure_runtime(
@@ -32,6 +33,7 @@ def _configure_runtime(
     sam_reconstruct_service: bool = True,
     sketchfab: bool = False,
     sketchfab_key: str = "",
+    sketchfab_reachable: bool = True,
 ) -> None:
     switch_values = {
         "ENABLE_HUNYUAN": hunyuan,
@@ -59,6 +61,9 @@ def _configure_runtime(
     monkeypatch.setattr(tool_registry.runtime, "is_sketchfab_tool_enabled", lambda: sketchfab)
     monkeypatch.setattr(tool_registry.runtime, "get_rodin_api_key", lambda: rodin_key)
     monkeypatch.setattr(tool_registry.runtime, "get_sketchfab_api_key", lambda: sketchfab_key)
+    monkeypatch.setattr(
+        tool_registry.runtime, "probe_sketchfab_api", lambda _logger: sketchfab_reachable
+    )
     monkeypatch.setattr(
         tool_registry.runtime,
         "probe_conditional_services",
@@ -118,6 +123,41 @@ def test_register_mcp_tools_skips_sketchfab_without_key(monkeypatch):
     assert "search_sketchfab_models" not in enabled
     assert "get_sketchfab_model_preview" not in enabled
     assert "download_sketchfab_model" not in enabled
+
+
+def test_register_mcp_tools_skips_sketchfab_when_api_unreachable(monkeypatch):
+    _reset_registry_state(monkeypatch)
+    _configure_runtime(
+        monkeypatch,
+        sketchfab=True,
+        sketchfab_key="configured",
+        sketchfab_reachable=False,
+    )
+    mcp = FakeMCP()
+
+    enabled = tool_registry.register_mcp_tools(mcp, logging.getLogger(__name__))
+
+    assert "search_sketchfab_models" not in enabled
+    assert "get_sketchfab_model_preview" not in enabled
+    assert "download_sketchfab_model" not in enabled
+
+
+def test_register_mcp_tools_allows_retrieval_when_sketchfab_api_unreachable(monkeypatch):
+    _reset_registry_state(monkeypatch)
+    _configure_runtime(
+        monkeypatch,
+        retrieval=True,
+        sketchfab=True,
+        sketchfab_key="configured",
+        sketchfab_reachable=False,
+    )
+    mcp = FakeMCP()
+
+    enabled = tool_registry.register_mcp_tools(mcp, logging.getLogger(__name__))
+
+    assert "search_3d_assets_by_text" in enabled
+    assert "import_retrieved_asset" in enabled
+    assert "search_sketchfab_models" not in enabled
 
 
 def test_register_mcp_tools_respects_retrieval_and_infinigen_switches(monkeypatch):

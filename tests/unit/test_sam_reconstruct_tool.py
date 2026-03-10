@@ -71,7 +71,7 @@ def test_reconstruct_full_scene_success(monkeypatch, tmp_path):
                 content=_make_zip(
                     {
                         "object_transforms.json": json.dumps(
-                            [{"glb_path": str(output_dir / "chair.glb")}]
+                            [{"glb_path": "/mnt/afs/tool-server/job-123/chair.glb"}]
                         ).encode("utf-8"),
                         "chair.glb": b"glb-bytes",
                         "chair.json": b"{}",
@@ -82,6 +82,9 @@ def test_reconstruct_full_scene_success(monkeypatch, tmp_path):
 
     def fake_run(cmd, **kwargs):
         del kwargs
+        transforms_path = Path(cmd[-2])
+        payload = json.loads(transforms_path.read_text(encoding="utf-8"))
+        assert payload == [{"glb_path": str(output_dir / "chair.glb")}]
         Path(cmd[-1]).write_bytes(b"blend")
 
     monkeypatch.setattr(sam_reconstruct.requests, "post", fake_post)
@@ -103,6 +106,14 @@ def test_reconstruct_full_scene_success(monkeypatch, tmp_path):
     assert result["num_masks"] == 5
     assert result["partial_errors"] == [{"object": "chair", "error": "minor"}]
     assert result["recommended_next_tool"] == "import_blend_contents"
+    assert "output_dir" not in result
+    assert "glb_paths" not in result
+    assert "json_paths" not in result
+    assert {
+        key
+        for key in result
+        if key.endswith("_path") or key.endswith("_paths") or key.endswith("_dir")
+    } == {"blend_file_path"}
 
 
 def test_reconstruct_full_scene_returns_failed_status(monkeypatch, tmp_path):
@@ -284,4 +295,5 @@ def test_reconstruct_full_scene_generates_fallback_transforms(monkeypatch, tmp_p
     )
 
     assert result["success"] is True
-    assert str(output_dir / "object_transforms.json") in result["json_paths"]
+    assert (output_dir / "object_transforms.json").exists()
+    assert "json_paths" not in result

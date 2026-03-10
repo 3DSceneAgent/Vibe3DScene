@@ -21,8 +21,10 @@ DEFAULT_CLIENT_HOST = "localhost"
 DEFAULT_CLIENT_PORT = 9876
 REQ_HEADERS = {"User-Agent": "blender-mcp-vision"}
 POLYHAVEN_META_URL = "https://fishwowater.oss-cn-shenzhen.aliyuncs.com/polyhaven_meta.json"
+DEFAULT_SKETCHFAB_API_BASE_URL = "https://api.sketchfab.com/v3"
 
 _blender_connection: BlenderConnection | None = None
+_sketchfab_api_reachable: bool | None = None
 
 
 def load_polyhaven_meta_info(logger) -> dict[str, Any]:
@@ -119,6 +121,55 @@ def is_sketchfab_tool_enabled() -> bool:
 
 def get_sketchfab_api_key() -> str:
     return os.getenv("SKETCHFAB_API_KEY", "").strip()
+
+
+def get_sketchfab_api_base_url() -> str:
+    return (
+        os.getenv("SKETCHFAB_API_BASE_URL", DEFAULT_SKETCHFAB_API_BASE_URL).strip()
+        or DEFAULT_SKETCHFAB_API_BASE_URL
+    )
+
+
+def get_cached_sketchfab_api_reachability() -> bool | None:
+    return _sketchfab_api_reachable
+
+
+def reset_sketchfab_api_probe_cache() -> None:
+    global _sketchfab_api_reachable
+    _sketchfab_api_reachable = None
+
+
+def probe_sketchfab_api(logger, *, force_refresh: bool = False) -> bool:
+    global _sketchfab_api_reachable
+    if _sketchfab_api_reachable is not None and not force_refresh:
+        return _sketchfab_api_reachable
+
+    timeout_raw = (
+        os.getenv("SKETCHFAB_API_PROBE_TIMEOUT_SECONDS")
+        or os.getenv("MCP_TOOL_HEALTH_TIMEOUT_SECONDS", "2.0")
+    )
+    try:
+        timeout = float(timeout_raw)
+    except ValueError:
+        timeout = 2.0
+
+    api_url = get_sketchfab_api_base_url()
+    probe_details: dict[str, Any] = {"url": api_url, "ok": False}
+
+    try:
+        response = requests.get(api_url, headers=REQ_HEADERS, timeout=timeout)
+        probe_details["status_code"] = response.status_code
+        probe_details["ok"] = response.status_code < 500
+    except requests.RequestException as exc:
+        probe_details["error"] = str(exc)
+
+    _sketchfab_api_reachable = bool(probe_details["ok"])
+    if _sketchfab_api_reachable:
+        logger.info("Sketchfab API reachability probe: %s", json.dumps(probe_details))
+    else:
+        logger.warning("Sketchfab API reachability probe failed: %s", json.dumps(probe_details))
+    print(f"[mcp_server] sketchfab_api_probe={json.dumps(probe_details)}", flush=True)
+    return _sketchfab_api_reachable
 
 
 def process_bbox(original_bbox: Optional[list[float] | list[int]]) -> Optional[list[int]]:

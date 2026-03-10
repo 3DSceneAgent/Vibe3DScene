@@ -34,7 +34,11 @@ def asset_creation_strategy_text(
 
     service_status = runtime.probe_conditional_services(logger)
 
-    sketchfab_ready = runtime.is_sketchfab_tool_enabled() and bool(runtime.get_sketchfab_api_key())
+    sketchfab_ready = (
+        runtime.is_sketchfab_tool_enabled()
+        and bool(runtime.get_sketchfab_api_key())
+        and runtime.probe_sketchfab_api(logger)
+    )
     infinigen_ready = runtime.is_infinigen_tool_enabled() and service_status.get("pcg_integrator", False)
     trellis2_ready = runtime.is_trellis2_tool_enabled() and service_status.get("trellis2", False)
     rodin_ready = runtime.is_rodin_tool_enabled() and bool(runtime.get_rodin_api_key())

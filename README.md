@@ -348,6 +348,7 @@ npm run lint
 | `BLENDER_HEADLESS_BASE_PORT` | `9876` | Base port for headless session allocation. |
 | `BLENDER_MCP_BASE_PORT` | `9877` | Base port for per-session MCP allocation. |
 | `BLENDER_MCP_CMD` / `BLENDER_MCP_ARGS` | `python` / `mcp_server/server.py` | Headless MCP startup command. |
+| `SCENE_AGENT_RENDER_DEFAULT_LIGHTING` | enabled | Toggle temporary neutral render-time fill lighting for scenes without explicit lights/HDRI. Set `0`/`false`/`off` to disable. |
 | `SESSION_SHARED_STORAGE_ROOT` | `/tmp/scene_agent_sessions` | Persistent `.blend` storage root. |
 | `SESSION_IDLE_TIMEOUT_SECONDS` | `600` | Auto-stop idle session timeout. |
 | `SESSION_MAX_SNAPSHOTS` | `20` | Snapshot retention for undo. |

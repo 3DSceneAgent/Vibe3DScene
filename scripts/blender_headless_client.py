@@ -206,6 +206,28 @@ def _prepare_scene(bpy: Any, blend_path: str | None) -> None:
         print(f"Failed to remove default Camera: {exc}")
 
     try:
+        default_lights = [
+            obj
+            for obj in list(getattr(bpy.data, "objects", []))
+            if getattr(obj, "type", "") == "LIGHT"
+        ]
+        removed_light_names: list[str] = []
+        for light_obj in default_lights:
+            light_name = getattr(light_obj, "name", "") or "<unnamed>"
+            light_data = getattr(light_obj, "data", None)
+            bpy.data.objects.remove(light_obj, do_unlink=True)
+            removed_light_names.append(light_name)
+            if light_data is not None and hasattr(bpy.data, "lights") and getattr(light_data, "users", 0) == 0:
+                try:
+                    bpy.data.lights.remove(light_data)
+                except Exception:
+                    pass
+        if removed_light_names:
+            print(f"Removed default Light objects: {removed_light_names}")
+    except Exception as exc:
+        print(f"Failed to remove default Light objects: {exc}")
+
+    try:
         scene = bpy.context.scene
         world = scene.world
         if world is None:

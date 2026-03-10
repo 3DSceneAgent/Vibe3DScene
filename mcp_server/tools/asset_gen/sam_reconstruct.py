@@ -54,7 +54,7 @@ def reconstruct_full_scene(
     vlm_model: str = "gpt-4o",
     seed: int = 42,
 ) -> dict[str, Any]:
-    """Reconstruct a full scene from a local reference image via the standalone SAM3D service."""
+    """Reconstruct a scene and return a local .blend path ready for import_blend_contents()."""
     del ctx
 
     job_id: str | None = None
@@ -134,6 +134,8 @@ def reconstruct_full_scene(
                 json.dumps([{"glb_path": path} for path in glb_paths], indent=2),
                 encoding="utf-8",
             )
+        else:
+            _rewrite_transforms_glb_paths(transforms_path=transforms_path, glb_paths=glb_paths)
 
         blend_file_path = output_root / "scene.blend"
         _run_blender_import(
@@ -153,15 +155,13 @@ def reconstruct_full_scene(
         except (TypeError, ValueError):
             num_masks = 0
 
-        json_paths = sorted(str(path) for path in output_root.glob("*.json"))
+        # Keep downloaded artifacts local for Blender assembly and debugging, but expose only the
+        # MCP-hosted .blend path that the next tool can consume directly.
         return {
             "success": True,
             "job_id": job_id,
             "status": "succeeded",
             "blend_file_path": str(blend_file_path),
-            "output_dir": str(output_root),
-            "glb_paths": glb_paths,
-            "json_paths": json_paths,
             "num_objects": len(glb_paths),
             "num_masks": num_masks,
             "partial_errors": partial_errors,
@@ -397,6 +397,38 @@ def _download_artifacts_individually(*, job_id: str, base_url: str, output_dir: 
             for chunk in download_response.iter_content(chunk_size=1024 * 1024):
                 if chunk:
                     handle.write(chunk)
+
+
+def _rewrite_transforms_glb_paths(*, transforms_path: Path, glb_paths: list[str]) -> None:
+    local_glb_map = {Path(path).name: path for path in glb_paths}
+    if not local_glb_map:
+        return
+
+    try:
+        payload = json.loads(transforms_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("Failed to read transforms file %s for GLB path rewrite: %s", transforms_path, exc)
+        return
+
+    if not isinstance(payload, list):
+        logger.warning("Transforms file %s did not contain a list; skipping GLB path rewrite", transforms_path)
+        return
+
+    rewritten = False
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        for key in ("glb_path", "glb"):
+            raw_path = item.get(key)
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                continue
+            local_path = local_glb_map.get(Path(raw_path).name)
+            if local_path and raw_path != local_path:
+                item[key] = local_path
+                rewritten = True
+
+    if rewritten:
+        transforms_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def _run_blender_import(*, transforms_path: Path, blend_file_path: Path, output_dir: Path) -> None:
