@@ -7,9 +7,14 @@ import os
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from scene_agent.config import get_settings
+from scene_agent.utils.logging import log_event
+from scene_agent.verification_result import (
+    VerificationResult,
+    normalize_verification_payload,
+)
 from scene_agent.vlm import get_vlm_provider
 
 
@@ -55,7 +60,7 @@ def _content_to_text(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = []
+        parts: list[str] = []
         for item in content:
             if isinstance(item, str):
                 parts.append(item)
@@ -78,93 +83,31 @@ def _extract_json(text: str) -> dict[str, Any] | None:
         return None
     snippet = text[start : end + 1]
     try:
-        return json.loads(snippet)
+        parsed = json.loads(snippet)
     except json.JSONDecodeError:
         return None
+    return parsed if isinstance(parsed, dict) else None
 
 
-def _format_todo_context(todo_context: list[dict[str, str]] | None) -> str:
-    if not todo_context:
-        return ""
-    normalized_items: list[dict[str, str]] = []
-    for item in todo_context[:5]:
-        if not isinstance(item, dict):
-            continue
-        todo_id = " ".join(str(item.get("todo_id", "")).strip().split())
-        title = " ".join(str(item.get("title", "")).strip().split())
-        status = " ".join(str(item.get("status", "")).strip().split())
-        if not todo_id or not title:
-            continue
-        normalized_items.append(
-            {
-                "todo_id": todo_id,
-                "title": title,
-                "status": status or "unknown",
-            }
-        )
-    if not normalized_items:
-        return ""
-    lines = ["Current active todos (primary verification target):"]
-    for item in normalized_items:
-        lines.append(f"- {item['todo_id']} [{item['status']}] {item['title']}")
-    return "\n".join(lines)
-
-
-def _format_scene_context(scene_context: dict[str, Any] | None) -> str:
-    if not scene_context or not isinstance(scene_context, dict):
-        return ""
-    try:
-        serialized = json.dumps(scene_context, ensure_ascii=False, default=str)
-    except Exception:
-        return ""
-    if len(serialized) > 12000:
-        serialized = f"{serialized[:12000]}...[truncated]"
-    return (
-        "Structured scene context from get_scene_info / observation tools "
-        "(supplemental to the render):\n"
-        f"{serialized}"
-    )
-
-
-_SCENE_LEVEL_VERIFY_PROMPT = """\
-Analyze the rendered 3D scene image(s) against the target description (and reference images if provided).
-Report on each category:
-1) Objects: Are all requested objects present? Any missing, extraneous, or incorrect objects?
-2) Layout: Does the spatial arrangement match the description? Suggest concrete transforms if not.
-3) Scale: Are proportions realistic? Is any object too large or too small relative to others?
-4) Environment: Is the lighting, background, and material/texture treatment correct?
-5) Overall: match | partial | mismatch.
-
-Return JSON only:
-{
-  "status": "match|partial|mismatch",
-  "object_feedback": "...",
-  "layout_feedback": "...",
-  "scale_feedback": "...",
-  "environment_feedback": "...",
-  "edit_suggestions": ["concrete actionable fix 1", "concrete actionable fix 2"],
-  "reason": "short summary"
-}"""
-
-_OBJECT_LEVEL_VERIFY_PROMPT = """\
-Analyze the rendered image of specific object(s) against the target description (and reference images if provided).
-Focus on fine details since this is a close-up / object-level view:
-1) Geometry: Is the object shape correct? Any visible mesh artifacts, holes, or distortion?
-2) Placement: Is the object at the correct position? Any clipping with other objects or floating?
-3) Material: Are textures, colors, and material properties correct? Any UV issues?
-4) Scale: Is the object sized correctly relative to nearby objects and real-world expectations?
-5) Overall: match | partial | mismatch.
-
-Return JSON only:
-{
-  "status": "match|partial|mismatch",
-  "object_feedback": "...",
-  "placement_feedback": "...",
-  "material_feedback": "...",
-  "scale_feedback": "...",
-  "edit_suggestions": ["concrete actionable fix 1", "concrete actionable fix 2"],
-  "reason": "short summary"
-}"""
+def _format_objective_context(
+    *,
+    user_request: str,
+    todo_context: list[dict[str, str]] | None,
+) -> str:
+    if isinstance(todo_context, list):
+        for todo in todo_context:
+            if not isinstance(todo, dict):
+                continue
+            todo_title = str(todo.get("title", "")).strip()
+            todo_status = str(todo.get("status", "")).strip()
+            todo_id = str(todo.get("todo_id", "")).strip()
+            if todo_title:
+                return (
+                    "Active objective (primary): "
+                    f"[{todo_id or 'todo'}|{todo_status or 'unknown'}] {todo_title}\n"
+                    f"Full request context: {user_request}"
+                )
+    return f"Objective: {user_request}"
 
 
 def verify_render_with_references(
@@ -188,73 +131,70 @@ def verify_render_with_references(
             f"No API key configured for provider '{selected_provider}'. "
             "Set provider-specific API key or VLM_API_KEY."
         )
+
     provider = get_vlm_provider(
         provider_name=selected_provider,
         api_key=selected_api_key,
         model=selected_model,
     )
-    model = provider.get_chat_model()
+    chat_model = provider.get_chat_model()
+    invoke_model = chat_model
+    if hasattr(chat_model, "with_config"):
+        try:
+            invoke_model = chat_model.with_config(
+                tags=["nostream"],
+                run_name="verification_internal",
+            )
+        except Exception:
+            invoke_model = chat_model
 
+    objective_text = _format_objective_context(
+        user_request=user_request,
+        todo_context=todo_context,
+    )
     has_references = bool(reference_paths)
+    scene_context_text = ""
+    if isinstance(scene_context, dict) and scene_context:
+        try:
+            scene_context_text = json.dumps(scene_context, ensure_ascii=False, default=str)
+        except Exception:
+            scene_context_text = ""
+    if len(scene_context_text) > 12000:
+        scene_context_text = scene_context_text[:12000] + "...[truncated]"
 
-    if render_source == "scene_observe":
-        base_prompt = _SCENE_LEVEL_VERIFY_PROMPT
-    else:
-        base_prompt = _OBJECT_LEVEL_VERIFY_PROMPT
-
-    todo_text = _format_todo_context(todo_context)
-    has_todo_focus = bool(todo_text)
-    scene_context_text = _format_scene_context(scene_context)
-    has_scene_context = bool(scene_context_text)
-
-    if has_references:
-        prompt = (
-            base_prompt
-            + "\n\nReference images are provided — also check style/appearance consistency."
-        )
-    else:
-        prompt = (
-            base_prompt
-            + "\n\nNo reference images provided — judge solely based on the text description."
-        )
-
-    if has_todo_focus:
-        prompt += (
-            "\n\nIf current todo objectives are provided, treat them as the primary verification target. "
-            "Use the full user request only as background context."
-            "\nYou MUST include a `todo_assessment` JSON array with exactly one item per provided todo."
-            "\nEach item format: {\"todo_id\": \"...\", \"status\": \"done|not_done|uncertain\", \"reason\": \"...\"}."
-            "\nOnly mark status as `done` when there is clear visual evidence in the current render."
-        )
-
-    if has_scene_context:
-        prompt += (
-            "\n\nStructured scene context is provided below (objects/cameras/bounds from Blender tools). "
-            "Use it to improve object/layout/scale checks; if it conflicts with direct visual evidence, "
-            "prioritize what is visible in the render."
-        )
+    prompt = (
+        "You verify whether a 3D render satisfies the current objective.\n"
+        "Output only structured fields.\n"
+        "Judgment rules:\n"
+        "- status=done only when the objective is visually satisfied.\n"
+        "- status=working when objective is partially met, unmet, or uncertain.\n"
+        "- Keep reason concise and concrete.\n"
+        "- Provide 0-4 actionable edit suggestions when status=working."
+    )
 
     content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-    if has_todo_focus:
-        content.append({"type": "text", "text": todo_text})
-        if user_request.strip():
-            content.append(
-                {
-                    "type": "text",
-                    "text": f"Original full user request (background context only): {user_request}",
-                }
-            )
-    else:
-        content.append({"type": "text", "text": f"User request: {user_request}"})
+    content.append({"type": "text", "text": objective_text})
+    content.append(
+        {
+            "type": "text",
+            "text": (
+                f"render_source={render_source}; reference_images_present={has_references}; "
+                f"reference_count={len(reference_paths)}"
+            ),
+        }
+    )
+    if scene_context_text:
+        content.append(
+            {
+                "type": "text",
+                "text": f"scene_context:\n{scene_context_text}",
+            }
+        )
 
-    if has_scene_context:
-        content.append({"type": "text", "text": scene_context_text})
-
-    render_data_url = _image_to_data_url(render_path)
     content.append(
         {
             "type": "image_url",
-            "image_url": {"url": render_data_url},
+            "image_url": {"url": _image_to_data_url(render_path)},
         }
     )
     for path in reference_paths:
@@ -265,25 +205,51 @@ def verify_render_with_references(
             }
         )
 
-    # Prevent internal verification-model tokens from leaking into the
-    # outer agent stream (`stream_mode=["messages"]`).
-    invoke_model = model
-    if hasattr(model, "with_config"):
-        try:
-            invoke_model = model.with_config(
-                tags=["nostream"],
-                run_name="verification_internal",
-            )
-        except Exception:
-            invoke_model = model
-    response = invoke_model.invoke([HumanMessage(content=content)])
+    messages = [
+        SystemMessage(content="Structured visual verification for 3D scene workflow."),
+        HumanMessage(content=content),
+    ]
+
+    # Primary path: provider-supported structured output.
+    structured_output_error: Exception | None = None
+    try:
+        structured_model = invoke_model.with_structured_output(VerificationResult)
+        structured_raw = structured_model.invoke(messages)
+        structured = (
+            structured_raw
+            if isinstance(structured_raw, VerificationResult)
+            else VerificationResult.model_validate(structured_raw)
+        )
+        normalized = normalize_verification_payload(structured.model_dump(mode="json"))
+        normalized["verification_mode"] = "reference_comparison" if has_references else "text_only"
+        normalized["render_source"] = render_source
+        normalized["structured_output_fallback"] = False
+        return normalized
+    except Exception as exc:
+        structured_output_error = exc
+
+    log_event(
+        "warning",
+        "verification_structured_output_fallback",
+        {
+            "provider": selected_provider,
+            "model": selected_model,
+            "render_source": render_source,
+            "has_references": has_references,
+            "error_type": type(structured_output_error).__name__ if structured_output_error else "unknown",
+            "error": str(structured_output_error or ""),
+        },
+    )
+
+    # Fallback path: raw output + JSON extraction.
+    response = invoke_model.invoke(messages)
     response_text = _content_to_text(getattr(response, "content", response))
-    parsed = _extract_json(response_text)
-    if not isinstance(parsed, dict) or "status" not in parsed:
-        return {
-            "status": "mismatch",
-            "reason": response_text.strip() or "Verification response could not be parsed.",
-        }
-    parsed["verification_mode"] = "reference_comparison" if has_references else "text_only"
-    parsed["render_source"] = render_source
-    return parsed
+    parsed = _extract_json(response_text) or {}
+    normalized = normalize_verification_payload(
+        parsed,
+        fallback_reason=response_text.strip() or "Verification response could not be parsed.",
+    )
+    normalized["verification_mode"] = "reference_comparison" if has_references else "text_only"
+    normalized["render_source"] = render_source
+    normalized["structured_output_fallback"] = True
+    return normalized

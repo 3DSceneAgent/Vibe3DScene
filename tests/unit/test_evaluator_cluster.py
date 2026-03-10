@@ -1,11 +1,4 @@
-from langchain_core.messages import ToolMessage
-
-from scene_agent.agent.nodes import (
-    budget_evaluator_node,
-    progress_evaluator_node,
-    quality_evaluator_node,
-    transition_resolver_node,
-)
+from scene_agent.agent.nodes import evaluator_node
 
 
 def _todo(todo_id: str, description: str, status: str) -> dict:
@@ -18,146 +11,115 @@ def _todo(todo_id: str, description: str, status: str) -> dict:
     }
 
 
-def test_quality_evaluator_maps_match_status():
-    result = quality_evaluator_node(
+def test_evaluator_pure_qa_routes_to_end_without_finalize():
+    result = evaluator_node(
         {
-            "messages": [
-                ToolMessage(
-                    name="verification",
-                    content={"status": "match", "reason": "Looks good."},
-                    tool_call_id="verification_match",
-                )
-            ],
-            "verification_mismatch_streak": 2,
-        }
-    )
-    assert result["quality_eval"]["status"] == "match"
-    assert result["verification_mismatch_streak"] == 0
-
-
-def test_quality_evaluator_maps_mismatch_status_and_increments_streak():
-    result = quality_evaluator_node(
-        {
-            "messages": [
-                ToolMessage(
-                    name="verification",
-                    content={"status": "mismatch", "reason": "Object missing."},
-                    tool_call_id="verification_mismatch",
-                )
-            ],
-            "verification_mismatch_streak": 1,
-        }
-    )
-    assert result["quality_eval"]["status"] == "mismatch"
-    assert result["verification_mismatch_streak"] == 2
-
-
-def test_quality_evaluator_treats_verification_error_as_skipped():
-    result = quality_evaluator_node(
-        {
-            "messages": [
-                ToolMessage(
-                    name="verification",
-                    content={"status": "error", "reason": "VLM timeout"},
-                    tool_call_id="verification_error",
-                )
-            ],
-            "verification_mismatch_streak": 3,
-        }
-    )
-    assert result["quality_eval"]["status"] == "skipped"
-    assert result["verification_mismatch_streak"] == 0
-
-
-def test_progress_evaluator_returns_continue_with_open_todos():
-    result = progress_evaluator_node(
-        {
-            "task_mode": "plan_mode",
-            "quality_eval": {"status": "mismatch", "reason": "Need fixes."},
-            "todos": [_todo("todo-1", "Move chair", "in_progress")],
-            "verification_mismatch_streak": 2,
-        }
-    )
-    assert result["progress_eval"]["status"] == "continue"
-    assert result["progress_eval"]["should_replan"] is True
-
-
-def test_progress_evaluator_returns_blocked_for_catastrophic_without_open_todos():
-    result = progress_evaluator_node(
-        {
-            "task_mode": "plan_mode",
-            "quality_eval": {"status": "catastrophic", "reason": "Scene exploded."},
+            "routed_to_plan": False,
+            "request_tool_batches": 0,
             "todos": [],
+            "verification_result": None,
         }
     )
-    assert result["progress_eval"]["status"] == "blocked"
+    assert result["transition_next"] == "__end__"
+    assert result["transition_reason"] == "pure_qa"
 
 
-def test_budget_evaluator_detects_agent_turn_exhaustion():
-    result = budget_evaluator_node(
+def test_evaluator_marks_active_todo_completed_on_done():
+    result = evaluator_node(
         {
-            "request_agent_turns": 8,
-            "max_request_agent_turns": 8,
+            "routed_to_plan": True,
             "request_tool_batches": 1,
-            "max_request_tool_batches": 6,
-        }
-    )
-    assert result["budget_eval"]["budget_ok"] is False
-    assert result["budget_eval"]["stop_reason"] == "agent_turn_budget_exhausted"
-
-
-def test_budget_evaluator_accepts_unlimited_budgets():
-    result = budget_evaluator_node(
-        {
-            "task_mode": "plan_mode",
-            "request_agent_turns": 999,
-            "max_request_agent_turns": -1,
-            "request_tool_batches": 999,
-            "max_request_tool_batches": -1,
-            "plan_replan_count": 999,
-            "max_plan_replans": -1,
-        }
-    )
-    assert result["budget_eval"]["budget_ok"] is True
-    assert result["budget_eval"]["stop_reason"] is None
-
-
-def test_transition_resolver_routes_to_agent_for_single_continue():
-    result = transition_resolver_node(
-        {
-            "task_mode": "single_action_mode",
             "workflow_topology": "single_agent",
-            "budget_eval": {"budget_ok": True, "stop_reason": None},
-            "quality_eval": {"status": "mismatch", "reason": "Need one more edit."},
-            "progress_eval": {"status": "continue", "should_replan": False},
+            "active_todo_id": "todo-1",
+            "todos": [_todo("todo-1", "Place sofa", "in_progress")],
+            "verification_result": {
+                "status": "done",
+                "reason": "Sofa placement looks correct.",
+                "edit_suggestions": [],
+            },
         }
     )
+    assert result["todos"][0]["status"] == "completed"
+    assert result["transition_next"] == "finalize"
+
+
+def test_evaluator_skips_stalled_todo_after_threshold():
+    result = evaluator_node(
+        {
+            "routed_to_plan": True,
+            "request_tool_batches": 1,
+            "workflow_topology": "single_agent",
+            "active_todo_id": "todo-1",
+            "current_todo_stall_count": 4,
+            "todos": [
+                _todo("todo-1", "Adjust chair", "in_progress"),
+                _todo("todo-2", "Add lamp", "pending"),
+            ],
+            "verification_result": {
+                "status": "working",
+                "reason": "Chair position still off.",
+                "edit_suggestions": [],
+            },
+        }
+    )
+    todo_by_id = {todo["id"]: todo for todo in result["todos"]}
+    assert todo_by_id["todo-1"]["status"] == "skipped"
     assert result["transition_next"] == "agent"
 
 
-def test_transition_resolver_routes_to_builder_for_dual_catastrophic():
-    result = transition_resolver_node(
+def test_evaluator_does_not_increment_todo_stall_without_fresh_verification():
+    result = evaluator_node(
         {
-            "task_mode": "plan_mode",
-            "workflow_topology": "dual_agent",
-            "budget_eval": {"budget_ok": True, "stop_reason": None},
-            "quality_eval": {"status": "catastrophic", "reason": "Catastrophic"},
-            "progress_eval": {"status": "continue", "should_replan": True},
+            "routed_to_plan": True,
+            "request_tool_batches": 1,
+            "workflow_topology": "single_agent",
+            "active_todo_id": "todo-1",
+            "current_todo_stall_count": 4,
+            "todos": [_todo("todo-1", "Adjust chair", "in_progress")],
+            "verification_result": None,
         }
     )
-    assert result["transition_next"] == "builder_agent"
+    assert result["current_todo_stall_count"] == 4
+    assert result["transition_next"] == "agent"
+    assert result["transition_reason"] == "todo_waiting_for_fresh_verification"
 
 
-def test_transition_resolver_routes_to_planner_refresh_for_dual_replan_signal():
-    result = transition_resolver_node(
+def test_evaluator_routes_dual_stall_to_planner_refresh():
+    result = evaluator_node(
         {
-            "task_mode": "plan_mode",
+            "routed_to_plan": True,
+            "request_tool_batches": 2,
             "workflow_topology": "dual_agent",
-            "budget_eval": {"budget_ok": True, "stop_reason": None},
-            "quality_eval": {"status": "mismatch", "reason": "Needs replan"},
-            "progress_eval": {"status": "continue", "should_replan": True},
+            "active_todo_id": "todo-1",
+            "current_todo_stall_count": 1,
             "plan_replan_count": 0,
-            "max_plan_replans": 2,
+            "max_plan_replans": 3,
+            "todos": [_todo("todo-1", "Fix scale", "in_progress")],
+            "verification_result": {
+                "status": "working",
+                "reason": "Scale still mismatched.",
+                "edit_suggestions": ["Shrink chair by 15%"],
+            },
         }
     )
     assert result["transition_next"] == "planner_refresh"
+
+
+def test_evaluator_uses_verification_result_only_not_messages():
+    result = evaluator_node(
+        {
+            "routed_to_plan": False,
+            "request_tool_batches": 1,
+            "workflow_topology": "single_agent",
+            "messages": [
+                # Should be ignored by evaluator contract.
+                {"name": "verification", "content": {"status": "done"}}
+            ],
+            "verification_result": {
+                "status": "working",
+                "reason": "Still not complete.",
+                "edit_suggestions": [],
+            },
+        }
+    )
+    assert result["transition_next"] == "agent"

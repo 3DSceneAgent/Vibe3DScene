@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 
 TODO_UPDATE_TOOL_NAME = "todo_update"
 TODO_ACTIVE_STATUSES: frozenset[str] = frozenset({"pending", "in_progress"})
-TODO_TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "failed", "superseded"})
+TODO_TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "failed", "superseded", "skipped"})
 TODO_MUTABLE_STATUSES: frozenset[str] = TODO_ACTIVE_STATUSES | TODO_TERMINAL_STATUSES
 
 
@@ -18,7 +18,7 @@ class TodoActionModel(BaseModel):
     action: Literal["create", "revise", "set_status", "supersede"]
     todo_id: str | None = None
     title: str | None = None
-    status: Literal["pending", "in_progress", "completed", "failed"] | None = None
+    status: Literal["pending", "in_progress", "completed", "failed", "skipped"] | None = None
     reason: str = ""
     set_active: bool = False
 
@@ -41,7 +41,7 @@ class TodoActionModel(BaseModel):
         elif self.action == "set_status":
             if not isinstance(self.todo_id, str) or not self.todo_id.strip():
                 raise ValueError("set_status action requires todo_id")
-            if self.status not in {"pending", "in_progress", "completed", "failed"}:
+            if self.status not in {"pending", "in_progress", "completed", "failed", "skipped"}:
                 raise ValueError("set_status action requires a valid status")
             if self.title is not None:
                 raise ValueError("set_status action must not include title")

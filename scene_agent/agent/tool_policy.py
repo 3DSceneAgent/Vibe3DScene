@@ -6,7 +6,6 @@ from __future__ import annotations
 from typing import Any
 
 from scene_agent.agent.state import TaskMode
-from scene_agent.agent.todo_protocol import TODO_UPDATE_TOOL_NAME
 from scene_agent.agent.workflow_profiles import AgentRole, ToolProfile
 
 VERIFIER_CAMERA_TOOLS: frozenset[str] = frozenset(
@@ -88,8 +87,8 @@ def _default_profile_for_role(mode: TaskMode, role: AgentRole) -> ToolProfile:
         return "verifier_default"
     if role == "builder":
         return "builder_default"
-    if mode == "conversation_mode":
-        return "read_only"
+    if mode == "direct_mode":
+        return "all_tools"
     return "all_tools"
 
 
@@ -117,18 +116,9 @@ def resolve_effective_tool_names(
     if selected is None:
         return None, None
 
-    if max_request_tool_batches >= 0 and request_tool_batches >= max_request_tool_batches:
-        return [], "request_tool_budget_exhausted"
-
     profile = explicit_profile or _default_profile_for_role(mode, role)
     filtered = _filter_for_profile(selected, profile)
 
-    if mode != "plan_mode" or role != "general":
-        filtered = [name for name in filtered if name != TODO_UPDATE_TOOL_NAME]
-
-    if mode == "conversation_mode":
-        filtered = _filter_for_profile(filtered, "read_only")
-        return filtered, "conversation_mode_read_only"
     if role == "verifier":
         return filtered, "verifier_role_camera_tools"
     return filtered, None

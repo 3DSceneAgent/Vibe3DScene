@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import ast
 import json
-import os
 import re
 from typing import Any
-from urllib.parse import unquote, urlparse
 
 from langchain_core.messages import ToolMessage
 from scene_agent.agent.nodes.constants_workflow import DEFAULT_MAX_PLAN_REPLANS
@@ -15,15 +13,6 @@ from scene_agent.utils.todo_helpers import (
     coerce_non_negative_int,
     normalize_todo_description as _normalize_todo_description,
 )
-
-_CATASTROPHIC_SCENE_DIMENSION_THRESHOLD = 5000.0
-_CATASTROPHIC_OBJECT_COORD_THRESHOLD = 5000.0
-_CATASTROPHIC_OBJECT_DIMENSION_THRESHOLD = 2000.0
-_CATASTROPHIC_RENDER_STDDEV_THRESHOLD = 2.0
-_CATASTROPHIC_RENDER_GRAY_DRIFT_THRESHOLD = 3.0
-_CATASTROPHIC_RENDER_BLACK_MEAN_THRESHOLD = 4.0
-_CATASTROPHIC_RENDER_WHITE_MEAN_THRESHOLD = 251.0
-
 
 def coerce_verification_dict(payload: Any) -> dict[str, Any]:
     if isinstance(payload, dict):
@@ -429,173 +418,6 @@ def build_verification_scene_context(state: AgentState) -> dict[str, Any] | None
     return context or None
 
 
-def _coerce_numeric_triplet(raw_value: Any) -> list[float]:
-    if not isinstance(raw_value, (list, tuple)):
-        return []
-    values: list[float] = []
-    for item in raw_value[:3]:
-        if isinstance(item, (int, float)):
-            values.append(float(item))
-    return values
-
-
-def _bbox_dimensions_from_bounds(raw_bbox: Any) -> list[float]:
-    if (
-        not isinstance(raw_bbox, (list, tuple))
-        or len(raw_bbox) != 2
-        or not isinstance(raw_bbox[0], (list, tuple))
-        or not isinstance(raw_bbox[1], (list, tuple))
-    ):
-        return []
-    min_corner = _coerce_numeric_triplet(raw_bbox[0])
-    max_corner = _coerce_numeric_triplet(raw_bbox[1])
-    if len(min_corner) != 3 or len(max_corner) != 3:
-        return []
-    return [
-        abs(max_corner[0] - min_corner[0]),
-        abs(max_corner[1] - min_corner[1]),
-        abs(max_corner[2] - min_corner[2]),
-    ]
-
-
-def _resolve_render_path_for_analysis(render_reference: Any) -> str | None:
-    if not isinstance(render_reference, str):
-        return None
-    normalized = render_reference.strip()
-    if not normalized or normalized.startswith("data:"):
-        return None
-    if normalized.startswith("file://"):
-        normalized = normalized.replace("file://", "", 1)
-
-    parsed = urlparse(normalized)
-    candidate_path = parsed.path if parsed.scheme and parsed.netloc else normalized
-    if candidate_path.startswith("/renders/"):
-        filename = unquote(candidate_path.replace("/renders/", "", 1).strip("/"))
-        if not filename:
-            return None
-        try:
-            from scene_agent.utils.rendering import RENDERS_DIR
-
-            local_path = os.path.join(str(RENDERS_DIR), filename)
-            if os.path.exists(local_path):
-                return local_path
-        except Exception:
-            return None
-    if os.path.exists(candidate_path):
-        return candidate_path
-    return None
-
-
-def _analyze_render_flatness(render_reference: Any) -> dict[str, Any] | None:
-    local_path = _resolve_render_path_for_analysis(render_reference)
-    if not local_path:
-        return None
-
-    try:
-        from PIL import Image, ImageStat
-
-        with Image.open(local_path) as image:
-            rgb = image.convert("RGB")
-            stat = ImageStat.Stat(rgb)
-    except Exception:
-        return None
-
-    means = [float(value) for value in stat.mean[:3]]
-    stddevs = [float(value) for value in stat.stddev[:3]]
-    if not means or not stddevs:
-        return None
-
-    mean_intensity = sum(means) / len(means)
-    stddev_intensity = sum(stddevs) / len(stddevs)
-    max_channel_drift = max(abs(channel - mean_intensity) for channel in means)
-    is_flat = stddev_intensity <= _CATASTROPHIC_RENDER_STDDEV_THRESHOLD
-    is_grayish = max_channel_drift <= _CATASTROPHIC_RENDER_GRAY_DRIFT_THRESHOLD
-    is_black_or_white = (
-        mean_intensity <= _CATASTROPHIC_RENDER_BLACK_MEAN_THRESHOLD
-        or mean_intensity >= _CATASTROPHIC_RENDER_WHITE_MEAN_THRESHOLD
-    )
-    return {
-        "path": local_path,
-        "mean_intensity": round(mean_intensity, 3),
-        "stddev_intensity": round(stddev_intensity, 3),
-        "max_channel_drift": round(max_channel_drift, 3),
-        "is_flat": bool(is_flat),
-        "is_grayish": bool(is_grayish),
-        "is_black_or_white": bool(is_black_or_white),
-    }
-
-
-def detect_catastrophic_scene_state(
-    state: AgentState,
-    *,
-    render_reference: Any,
-) -> dict[str, Any]:
-    signals: list[str] = []
-    metrics: dict[str, Any] = {}
-
-    scene_bbox = state.get("scene_bbox")
-    if isinstance(scene_bbox, dict):
-        dims = _coerce_numeric_triplet(scene_bbox.get("dimensions"))
-        if len(dims) == 3:
-            max_dim = max(abs(value) for value in dims)
-            metrics["scene_bbox_dimensions"] = [round(value, 4) for value in dims]
-            metrics["scene_bbox_max_dimension"] = round(max_dim, 4)
-            if max_dim > _CATASTROPHIC_SCENE_DIMENSION_THRESHOLD:
-                signals.append("scene_bbox_dimension_exploded")
-            positive_dims = [abs(value) for value in dims if abs(value) > 1e-6]
-            if positive_dims:
-                span_ratio = max(positive_dims) / min(positive_dims)
-                metrics["scene_bbox_span_ratio"] = round(span_ratio, 4)
-                if max_dim > 100.0 and span_ratio > 10000.0:
-                    signals.append("scene_bbox_span_ratio_extreme")
-
-    scene_objects = state.get("scene_objects")
-    if isinstance(scene_objects, dict) and scene_objects:
-        far_objects: list[str] = []
-        huge_objects: list[str] = []
-        for name, payload in list(scene_objects.items())[:300]:
-            if not isinstance(name, str):
-                continue
-            if not isinstance(payload, dict):
-                continue
-
-            location = _coerce_numeric_triplet(payload.get("location"))
-            if location and max(abs(value) for value in location) > _CATASTROPHIC_OBJECT_COORD_THRESHOLD:
-                far_objects.append(name)
-
-            dimensions = _coerce_numeric_triplet(payload.get("dimensions"))
-            if not dimensions:
-                dimensions = _bbox_dimensions_from_bounds(payload.get("bounding_box"))
-            if not dimensions and isinstance(payload.get("bbox"), dict):
-                dimensions = _coerce_numeric_triplet(payload["bbox"].get("dimensions"))
-            if dimensions and max(abs(value) for value in dimensions) > _CATASTROPHIC_OBJECT_DIMENSION_THRESHOLD:
-                huge_objects.append(name)
-
-            if len(far_objects) >= 5 and len(huge_objects) >= 5:
-                break
-
-        if far_objects:
-            signals.append("object_location_outlier")
-            metrics["object_location_outliers"] = far_objects[:5]
-        if huge_objects:
-            signals.append("object_dimension_outlier")
-            metrics["object_dimension_outliers"] = huge_objects[:5]
-
-    render_stats = _analyze_render_flatness(render_reference)
-    if isinstance(render_stats, dict):
-        metrics["render_flatness"] = render_stats
-        if render_stats.get("is_flat") and (
-            render_stats.get("is_grayish") or render_stats.get("is_black_or_white")
-        ):
-            signals.append("render_flat_gray_or_blank")
-
-    return {
-        "is_catastrophic": bool(signals),
-        "signals": sorted(set(signals)),
-        "metrics": metrics,
-    }
-
-
 def _resolve_enabled_tool_set(state: AgentState) -> set[str]:
     enabled_tool_names = state.get("enabled_tool_names")
     if not isinstance(enabled_tool_names, list):
@@ -613,29 +435,7 @@ def build_verification_guidance_message(
 ) -> str:
     status_value = verification.get("status")
     status = status_value.strip().lower() if isinstance(status_value, str) else ""
-    if status == "catastrophic":
-        hard_recovery = verification.get("hard_recovery")
-        if isinstance(hard_recovery, dict):
-            action = hard_recovery.get("action")
-            attempt = hard_recovery.get("attempt")
-            forced = bool(hard_recovery.get("forced"))
-            if action == "undo_last_snapshot" and forced:
-                return (
-                    f"Catastrophic state detected (attempt {attempt}). "
-                    "Hard recovery is forcing undo_last_snapshot, then scene re-grounding."
-                )
-            if action == "clear_scene" and forced:
-                return (
-                    f"Catastrophic state detected (attempt {attempt}). "
-                    "Hard recovery is forcing clear_scene; rebuild todos if they assume deleted assets."
-                )
-            if action in {"undo_last_snapshot", "clear_scene"} and not forced:
-                return (
-                    f"Catastrophic state detected (attempt {attempt}), but automatic recovery budget is exhausted. "
-                    "Continue with manual remediation and consider rebuilding todos if scene state was reset."
-                )
-        return "Catastrophic state detected; no automatic recovery tool is currently available."
-    if status == "match":
+    if status in {"match", "done"}:
         return "Latest verification is match. Continue with the next pending todo."
 
     render_source = verification.get("render_source")

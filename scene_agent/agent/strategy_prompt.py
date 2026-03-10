@@ -129,6 +129,8 @@ def build_asset_creation_strategy_text(
             "   - After every scene mutation (import, generate, execute_blender_code, set_texture),",
             "     5 scene-level cameras auto-update and render (4 corners + top-down bird view).",
             "   - These cameras track the full scene bounding box - do NOT modify them manually.",
+            "   - If the scene has no explicit lights or HDRI, render tools may add temporary neutral",
+            "     verification lighting so geometry stays readable; those lights are not persisted/exported.",
             "   - For object-level inspection, use camera_act() and camera_observe().",
             "   - If object-level renders look unreliable (blank/black/repeatedly inconclusive),",
             "     run observe_scene_global() to re-ground with scene-wide context.",
@@ -269,6 +271,9 @@ def build_asset_creation_strategy_text(
             "   a. Use get_object_info() to confirm world_bounding_box, dimensions, and transform.",
             "   a.1 Scale safety: before changing object scale, inspect current dimensions/transform first.",
             "       Prefer incremental scaling from current value; avoid blind absolute scale overrides.",
+            "   a.2 Imported assets may arrive under nested Empty wrappers; compare world_scale vs local scale.",
+            "   a.3 Do NOT delete imported parent Empty wrappers directly; if wrappers still remain,",
+            "       prefer delete_objects(..., mode=\"detach_keep_world\" / \"reparent_to_parent_keep_world\").",
             "   b. Check for clipping/intersection/floating: compare bounding boxes of nearby objects.",
             "   c. Review the automatic scene-level renders for overall fit.",
             "   c.1 Ensure at least one scene-level view has clear line-of-sight to main target objects.",
@@ -347,7 +352,7 @@ def build_asset_creation_strategy_text(
     )
     if undo_ready:
         undo_recovery_lines = [
-            "   - If a single edit catastrophically breaks the scene (blank scene-level renders,"
+            "   - If a single edit badly breaks the scene (blank scene-level renders,"
             " key objects disappear, or scale explodes), call undo_last_snapshot() immediately.",
             "   - After undo, re-run get_scene_info() plus observe_scene_global() before continuing.",
         ]

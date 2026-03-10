@@ -84,7 +84,7 @@ messages, summary_text, omitted_count = build_projected_context(
 
 | 模式 | 触发条件 | 结果 |
 |------|----------|------|
-| `hard_stop` | 最近 2 条均为 `catastrophic` | 立即熔断，跳 `checkpoint_finalize` |
+| `hard_stop` | 指导重试后仍命中重复失败/振荡模式 | 立即熔断，跳 `checkpoint_finalize` |
 | `repeat_loop` | 最近 3 条 signature key 完全相同且 `todo_id` 非空 | 第 1 次 → `guided_retry`；第 2 次 → `hard_stop` |
 | `oscillation_loop` | 最近 4 条同 `todo_id`，failure_bucket 呈严格 ABAB | 同上 |
 
@@ -111,7 +111,7 @@ if prior_interventions >= 1:
 #### [P2] 任何非失败验证都会重置全部历史（`convergence.py:130-140`）
 
 ```python
-if quality_status not in {"mismatch", "catastrophic"}:
+if quality_status != "mismatch":
     return {
         "recent_verification_signatures": [],   # ← 清零
         "convergence_intervention_count": 0,    # ← 清零

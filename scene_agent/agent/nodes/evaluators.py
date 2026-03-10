@@ -1,6 +1,13 @@
-"""Node implementations by category."""
-from typing import Any, Dict
-from langchain_core.messages import SystemMessage
+"""Merged workflow evaluator and dual-agent verifier feedback nodes."""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any, Literal
+
+from langchain_core.messages import AIMessage, SystemMessage
+
 from scene_agent.agent.convergence import (
     CONVERGENCE_GUIDANCE_MESSAGE_ID,
     evaluate_convergence,
@@ -8,146 +15,292 @@ from scene_agent.agent.convergence import (
 from scene_agent.agent.memory_scope import merge_role_private_memory
 from scene_agent.agent.state import AgentState
 from scene_agent.agent.todo_state import apply_todo_actions
+from scene_agent.utils.agent_messages import find_last_ai_message, message_content_to_text
 from scene_agent.utils.todo_helpers import coerce_non_negative_int
 from scene_agent.utils.verification_helpers import (
-    coerce_verification_dict,
-    extract_verifier_fix_instructions,
-    latest_verification_payload,
     replan_budget_remaining,
 )
+from scene_agent.verification_result import (
+    VerificationResult,
+    coerce_verification_result,
+)
+
 from .constants_workflow import (
     DEFAULT_MAX_PLAN_REPLANS,
-    MODE_CONVERSATION,
-    MODE_PLAN,
+    DEFAULT_REPLAN_THRESHOLD,
+    DEFAULT_SKIP_THRESHOLD,
     ROLE_BUILDER,
     ROLE_VERIFIER,
     TOPOLOGY_DUAL,
 )
 from .shared import (
-    coerce_task_mode,
-    effective_todo_snapshot,
+    ai_message_has_tool_calls,
     coerce_workflow_topology,
+    effective_todo_snapshot,
     unfinished_todo_count,
 )
 
 
-def verifier_agent_node(state: AgentState) -> Dict[str, Any]:
-    """
-    Build compact structured verifier feedback from latest verification evidence.
-    """
-    verification_payload = latest_verification_payload(state)
-    verification = coerce_verification_dict(verification_payload)
-    raw_status = verification.get("status")
-    normalized_status = raw_status.strip().lower() if isinstance(raw_status, str) else ""
-    unfinished_todos = unfinished_todo_count(state)
+def _safe_active_todo_id(state: AgentState) -> str | None:
+    current = state.get("active_todo_id")
+    if isinstance(current, str) and current.strip():
+        return current
+    for todo in effective_todo_snapshot(state):
+        todo_id = str(todo.get("id", "")).strip()
+        status = str(todo.get("status", "")).strip()
+        if todo_id and status in {"pending", "in_progress"}:
+            return todo_id
+    return None
 
-    feedback_status = "needs_fix"
-    if normalized_status in {"match", "pass", "passed"}:
-        feedback_status = "pass"
-    elif normalized_status == "catastrophic":
-        feedback_status = "catastrophic"
 
-    fix_instructions = extract_verifier_fix_instructions(verification)
-    should_replan = False
-    if feedback_status == "needs_fix":
-        stall_count = coerce_non_negative_int(state.get("builder_stall_count"))
-        should_replan = replan_budget_remaining(state) and (stall_count >= 2 or len(fix_instructions) == 0)
+def _quality_status_from_verification(
+    verification: VerificationResult | None,
+) -> tuple[str, str]:
+    if verification is None:
+        return "skipped", "No fresh verification evidence."
+    reason = verification.reason.strip() or "Verification did not provide detailed reasoning."
+    if verification.status == "done":
+        return "match", reason
+    return "mismatch", reason
 
-    ready_to_finalize = feedback_status == "pass" and unfinished_todos == 0
-    confidence: float | None = None
-    raw_confidence = verification.get("confidence")
-    if isinstance(raw_confidence, (int, float)):
-        confidence = max(0.0, min(1.0, float(raw_confidence)))
 
-    verifier_feedback = {
-        "status": feedback_status,
-        "source_verification_status": normalized_status or "unknown",
-        "ready_to_finalize": ready_to_finalize,
-        "should_replan": should_replan,
-        "focus_objects": [],
-        "fix_instructions": fix_instructions,
+def _mark_todo_status(
+    state: AgentState,
+    *,
+    todo_id: str,
+    status: Literal["completed", "skipped"],
+    reason: str,
+) -> dict[str, Any]:
+    active_todo_value = state.get("active_todo_id")
+    previous_active_todo_id = (
+        active_todo_value
+        if isinstance(active_todo_value, str) and active_todo_value.strip()
+        else None
+    )
+    todo_versions, todos, next_active_todo_id = apply_todo_actions(
+        state.get("todo_versions"),
+        [
+            {
+                "action": "set_status",
+                "todo_id": todo_id,
+                "status": status,
+                "reason": reason,
+            }
+        ],
+        fallback_todos_raw=state.get("todos"),
+        source="verification",
+        role="system",
+        previous_active_todo_id=previous_active_todo_id,
+    )
+    return {
+        "todo_versions": todo_versions,
+        "todos": todos,
+        "active_todo_id": next_active_todo_id,
     }
-    if confidence is not None:
-        verifier_feedback["confidence"] = confidence
 
-    if isinstance(verification.get("reason"), str) and verification["reason"].strip():
-        verifier_feedback["reason"] = verification["reason"].strip()
-    elif fix_instructions:
-        verifier_feedback["reason"] = fix_instructions[0]
-    else:
-        verifier_feedback["reason"] = "No explicit verification guidance was available."
 
-    next_verifier_turns = coerce_non_negative_int(state.get("verifier_turn_count"))
+def _extract_json_candidate(text: str) -> dict[str, Any] | None:
+    normalized = text.strip()
+    if not normalized:
+        return None
+    candidates = [normalized]
+    start = normalized.find("{")
+    end = normalized.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(normalized[start : end + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _heuristic_verifier_assessment(text: str) -> VerificationResult:
+    normalized = " ".join(text.strip().split())
+    lowered = normalized.lower()
+    negative_phrases = (
+        "not done",
+        "not completed",
+        "not complete",
+        "not correct",
+        "not satisfied",
+        "incorrect",
+        "wrong",
+        "unfinished",
+        "incomplete",
+        "not finished",
+        "still working",
+        "still needs",
+        "needs more",
+        "missing",
+        "not yet",
+    )
+    positive_phrases = (
+        "looks good",
+        "looks correct",
+        "objective satisfied",
+        "request satisfied",
+        "task completed",
+        "task complete",
+        "completed successfully",
+        "passes verification",
+        "verified successfully",
+    )
+
+    status = "working"
+    if not any(phrase in lowered for phrase in negative_phrases):
+        if any(phrase in lowered for phrase in positive_phrases):
+            status = "done"
+        else:
+            tokens = re.findall(r"[a-z]+(?:'[a-z]+)?", lowered)
+            positive_tokens = {"done", "complete", "completed", "correct", "satisfied", "pass", "passes", "passed"}
+            negation_tokens = {
+                "not",
+                "no",
+                "never",
+                "incorrect",
+                "wrong",
+                "unfinished",
+                "incomplete",
+                "without",
+                "isnt",
+                "isn't",
+                "arent",
+                "aren't",
+                "wasnt",
+                "wasn't",
+            }
+            soft_negative_tokens = {"still", "almost", "partially", "partly", "yet"}
+            for index, token in enumerate(tokens):
+                if token not in positive_tokens:
+                    continue
+                window_before = tokens[max(0, index - 3) : index]
+                window_after = tokens[index + 1 : index + 3]
+                if any(item in negation_tokens for item in window_before):
+                    continue
+                if any(item in soft_negative_tokens for item in [*window_before, *window_after]):
+                    continue
+                status = "done"
+                break
+    reason = normalized or "Verifier returned no explicit judgment."
+    return VerificationResult(
+        status=status,
+        reason=reason[:1000],
+        edit_suggestions=[],
+    )
+
+
+def verifier_feedback_node(
+    state: AgentState,
+    *,
+    parser_model: Any | None = None,
+) -> dict[str, Any]:
+    """Dual-agent verifier dispatch + verification_result extraction."""
+    latest_ai = find_last_ai_message(list(state.get("messages") or [])[-10:])
+    has_calls = ai_message_has_tool_calls(latest_ai)
+    base_update: dict[str, Any] = {
+        "active_role": ROLE_VERIFIER,
+        "request_agent_turns": coerce_non_negative_int(state.get("request_agent_turns")) + 1,
+        "verifier_turn_count": coerce_non_negative_int(state.get("verifier_turn_count")) + 1,
+        "assistant_turn_kind": "has_calls" if has_calls else "no_calls",
+    }
+    if has_calls:
+        base_update["verification_result"] = None
+        base_update["verifier_feedback"] = {
+            "status": "observation_in_progress",
+            "reason": "verifier_called_camera_tools",
+        }
+        return base_update
+
+    content_text = ""
+    if latest_ai is not None:
+        content_text = message_content_to_text(latest_ai.content).strip()
+
+    parsed_result: VerificationResult | None = None
+    if parser_model is not None and content_text:
+        prompt = (
+            "Extract a structured verification result from verifier text.\n"
+            "Map success/completion to status=done; otherwise status=working.\n"
+            "Keep the reason concise and include only concrete edit suggestions."
+        )
+        parser_input = f"verifier_text:\n{content_text}"
+        try:
+            llm = parser_model
+            if hasattr(parser_model, "with_config"):
+                llm = parser_model.with_config(
+                    tags=["nostream"],
+                    run_name="verifier_feedback_internal",
+                )
+            if hasattr(llm, "with_structured_output"):
+                llm = llm.with_structured_output(VerificationResult)
+            parsed_raw = llm.invoke(
+                [
+                    SystemMessage(content=prompt),
+                    SystemMessage(content=parser_input),
+                ]
+            )
+            parsed_result = coerce_verification_result(parsed_raw)
+        except Exception:
+            parsed_result = None
+
+    if parsed_result is None and content_text:
+        payload = _extract_json_candidate(content_text)
+        if isinstance(payload, dict):
+            parsed_result = coerce_verification_result(payload)
+    if parsed_result is None:
+        parsed_result = _heuristic_verifier_assessment(content_text)
+
     role_private_memory = merge_role_private_memory(
         state.get("role_private_memory"),
         role=ROLE_VERIFIER,
         patch={
-            "last_feedback_status": verifier_feedback["status"],
-            "last_feedback_reason": verifier_feedback["reason"],
-            "last_feedback_confidence": confidence,
+            "last_feedback_status": parsed_result.status,
+            "last_feedback_reason": parsed_result.reason,
         },
     )
-
-    return {
-        "verifier_feedback": verifier_feedback,
-        "verifier_turn_count": next_verifier_turns,
-        "active_role": ROLE_VERIFIER,
-        "role_private_memory": role_private_memory,
+    base_update["role_private_memory"] = role_private_memory
+    base_update["verification_result"] = parsed_result.model_dump(mode="json")
+    base_update["verifier_feedback"] = {
+        "status": "done" if parsed_result.status == "done" else "working",
+        "reason": parsed_result.reason,
+        "edit_suggestions": list(parsed_result.edit_suggestions),
     }
+    return base_update
 
-def verifier_feedback_node(state: AgentState) -> Dict[str, Any]:
-    """Alias node for readability in graph composition."""
-    return verifier_agent_node(state)
 
-def quality_evaluator_node(state: AgentState) -> Dict[str, Any]:
-    verification_payload = latest_verification_payload(state)
-    verification = coerce_verification_dict(verification_payload)
-    raw_status = verification.get("status")
-    normalized_status = raw_status.strip().lower() if isinstance(raw_status, str) else ""
+def evaluator_node(state: AgentState) -> dict[str, Any]:
+    """Single merged evaluator for both single-agent and dual-agent workflows."""
+    verification = coerce_verification_result(state.get("verification_result"))
+    has_todos = unfinished_todo_count(state) > 0
+    current_todo_id = _safe_active_todo_id(state)
+    has_tool_calls = coerce_non_negative_int(state.get("request_tool_batches")) > 0
+    routed_to_plan = bool(state.get("routed_to_plan"))
+    topology = coerce_workflow_topology(state.get("workflow_topology"))
+    is_dual = topology == TOPOLOGY_DUAL
+    agent_target = "builder_agent" if is_dual else "agent"
 
-    status = "skipped"
-    reason = "No fresh verification evidence."
-    if normalized_status in {"match", "pass", "passed"}:
-        status = "match"
-        reason = str(verification.get("reason") or "Verification passed.")
-    elif normalized_status in {"mismatch", "partial", "needs_fix", "fail", "failed"}:
-        status = "mismatch"
-        reason = str(verification.get("reason") or "Verification reported mismatches.")
-    elif normalized_status == "catastrophic":
-        status = "catastrophic"
-        reason = str(verification.get("reason") or "Catastrophic scene signal detected.")
-    elif normalized_status in {"error", "skipped"}:
-        status = "skipped"
-        reason = str(verification.get("reason") or "Verification execution error.")
-
-    streak = coerce_non_negative_int(state.get("verification_mismatch_streak"))
-    if status in {"mismatch", "catastrophic"}:
-        streak += 1
-    else:
-        streak = 0
-    last_verified_value = state.get("last_verified_path")
-    last_verified_path = last_verified_value if isinstance(last_verified_value, str) and last_verified_value else None
-    active_todo_value = state.get("active_todo_id")
-    active_todo_id = active_todo_value if isinstance(active_todo_value, str) and active_todo_value else None
+    quality_status, quality_reason = _quality_status_from_verification(verification)
+    active_todo_id = current_todo_id
+    last_verified_path = state.get("last_verified_path")
+    if not isinstance(last_verified_path, str) or not last_verified_path:
+        last_verified_path = None
     convergence = evaluate_convergence(
         state=state,
-        verification=verification,
-        quality_status=status,
-        quality_reason=reason,
+        verification=verification.model_dump(mode="json") if verification is not None else {},
+        quality_status=quality_status,
+        quality_reason=quality_reason,
         active_todo_id=active_todo_id,
         last_verified_path=last_verified_path,
     )
 
-    result: Dict[str, Any] = {
-        "quality_eval": {
-            "status": status,
-            "reason": reason,
-            "source_verification_status": normalized_status or "none",
-        },
-        "verification_mismatch_streak": streak,
+    result: dict[str, Any] = {
         "recent_verification_signatures": convergence["recent_verification_signatures"],
         "convergence_intervention_count": convergence["convergence_intervention_count"],
         "convergence_eval": convergence["convergence_eval"],
+        "verification_result": None,
     }
     guidance_text = convergence.get("guidance_text")
     if isinstance(guidance_text, str) and guidance_text.strip():
@@ -157,249 +310,247 @@ def quality_evaluator_node(state: AgentState) -> Dict[str, Any]:
                 content=guidance_text.strip(),
             )
         ]
+
+    # Path A: Pure Q&A (no plan, no tool calls ever made).
+    if not has_todos and not has_tool_calls and not routed_to_plan:
+        result["transition_next"] = "__end__"
+        result["transition_reason"] = "pure_qa"
+        result["evaluator_result"] = {
+            "status": "pure_qa",
+            "reason": "no_plan_and_no_tool_calls",
+            "transition_next": "__end__",
+        }
+        return result
+
+    convergence_status = str(convergence["convergence_eval"].get("status", "")).strip().lower()
+    if convergence_status == "hard_stop":
+        hard_stop_reason = str(
+            convergence["convergence_eval"].get("reason")
+            or "repeated_same_failure_signature_after_guidance"
+        )
+        result["transition_next"] = "finalize"
+        result["transition_reason"] = hard_stop_reason
+        result["evaluator_result"] = {
+            "status": "hard_stop",
+            "reason": hard_stop_reason,
+            "transition_next": "finalize",
+        }
+        return result
+
+    # Path B: planned workflow with pending todos.
+    if has_todos and current_todo_id:
+        if verification is not None and verification.status == "done":
+            result.update(
+                _mark_todo_status(
+                    state,
+                    todo_id=current_todo_id,
+                    status="completed",
+                    reason=verification.reason or "Marked done by evaluator after verification.",
+                )
+            )
+            result["current_todo_stall_count"] = 0
+            remaining_open = unfinished_todo_count({**state, **result}) > 0
+            if remaining_open:
+                result["transition_next"] = agent_target
+                result["transition_reason"] = "todo_completed_continue"
+                result["evaluator_result"] = {
+                    "status": "continue",
+                    "reason": "completed_active_todo",
+                    "transition_next": agent_target,
+                }
+            else:
+                result["transition_next"] = "finalize"
+                result["transition_reason"] = "all_todos_terminal"
+                result["evaluator_result"] = {
+                    "status": "finalize",
+                    "reason": "all_todos_terminal",
+                    "transition_next": "finalize",
+                }
+            return result
+
+        if verification is None:
+            result["current_todo_stall_count"] = coerce_non_negative_int(
+                state.get("current_todo_stall_count")
+            )
+            result["transition_next"] = agent_target
+            result["transition_reason"] = "todo_waiting_for_fresh_verification"
+            result["evaluator_result"] = {
+                "status": "continue",
+                "reason": "no_fresh_verification_evidence",
+                "transition_next": agent_target,
+            }
+            return result
+
+        next_stall = coerce_non_negative_int(state.get("current_todo_stall_count")) + 1
+        result["current_todo_stall_count"] = next_stall
+        if is_dual and next_stall >= DEFAULT_REPLAN_THRESHOLD and replan_budget_remaining(state):
+            result["transition_next"] = "planner_refresh"
+            result["transition_reason"] = "todo_stall_replan"
+            result["evaluator_result"] = {
+                "status": "replan",
+                "reason": "todo_stall_threshold_reached",
+                "transition_next": "planner_refresh",
+            }
+            return result
+
+        if next_stall >= DEFAULT_SKIP_THRESHOLD:
+            result.update(
+                _mark_todo_status(
+                    state,
+                    todo_id=current_todo_id,
+                    status="skipped",
+                    reason="Skipped by evaluator after repeated stalls.",
+                )
+            )
+            result["current_todo_stall_count"] = 0
+            remaining_open = unfinished_todo_count({**state, **result}) > 0
+            if remaining_open:
+                result["transition_next"] = agent_target
+                result["transition_reason"] = "todo_skipped_continue"
+                result["evaluator_result"] = {
+                    "status": "continue",
+                    "reason": "skipped_stalled_todo",
+                    "transition_next": agent_target,
+                }
+            else:
+                result["transition_next"] = "finalize"
+                result["transition_reason"] = "all_todos_terminal_after_skip"
+                result["evaluator_result"] = {
+                    "status": "finalize",
+                    "reason": "all_todos_terminal_after_skip",
+                    "transition_next": "finalize",
+                }
+            return result
+
+        result["transition_next"] = agent_target
+        result["transition_reason"] = "todo_still_working"
+        result["evaluator_result"] = {
+            "status": "continue",
+            "reason": "active_todo_still_working",
+            "transition_next": agent_target,
+        }
+        return result
+
+    # Path C: direct-mode task (no todos).
+    if verification is not None and verification.status == "done":
+        result["overall_stall_count"] = 0
+        result["transition_next"] = "finalize"
+        result["transition_reason"] = "direct_done"
+        result["evaluator_result"] = {
+            "status": "finalize",
+            "reason": "verification_done_direct_mode",
+            "transition_next": "finalize",
+        }
+        return result
+
+    if verification is None:
+        result["overall_stall_count"] = coerce_non_negative_int(state.get("overall_stall_count"))
+        result["transition_next"] = agent_target
+        result["transition_reason"] = "direct_waiting_for_fresh_verification"
+        result["evaluator_result"] = {
+            "status": "continue",
+            "reason": "no_fresh_verification_evidence",
+            "transition_next": agent_target,
+        }
+        return result
+
+    overall_stall = coerce_non_negative_int(state.get("overall_stall_count")) + 1
+    result["overall_stall_count"] = overall_stall
+    if overall_stall >= DEFAULT_SKIP_THRESHOLD:
+        result["transition_next"] = "finalize"
+        result["transition_reason"] = "direct_stall_finalize"
+        result["evaluator_result"] = {
+            "status": "finalize",
+            "reason": "direct_mode_stall_threshold_reached",
+            "transition_next": "finalize",
+        }
+        return result
+
+    result["transition_next"] = agent_target
+    result["transition_reason"] = "direct_continue"
+    result["evaluator_result"] = {
+        "status": "continue",
+        "reason": "direct_mode_still_working",
+        "transition_next": agent_target,
+    }
     return result
 
-def progress_evaluator_node(state: AgentState) -> Dict[str, Any]:
-    mode = coerce_task_mode(state.get("task_mode"))
-    unfinished_todos = unfinished_todo_count(state)
-    quality = state.get("quality_eval")
-    quality_status = ""
-    quality_reason = ""
-    if isinstance(quality, dict):
-        quality_status = str(quality.get("status", "")).strip().lower()
-        quality_reason = str(quality.get("reason", "")).strip()
 
-    should_replan = False
-    verifier_feedback = state.get("verifier_feedback")
-    if isinstance(verifier_feedback, dict) and bool(verifier_feedback.get("should_replan")):
-        should_replan = True
-    mismatch_streak = coerce_non_negative_int(state.get("verification_mismatch_streak"))
-    builder_stall_count = coerce_non_negative_int(state.get("builder_stall_count"))
-    if mode == MODE_PLAN and (mismatch_streak >= 2 or builder_stall_count >= 2):
-        should_replan = True
-
-    convergence_eval = state.get("convergence_eval")
-    convergence_status = ""
-    if isinstance(convergence_eval, dict):
-        convergence_status = str(convergence_eval.get("status", "")).strip().lower()
-
-    if mode == MODE_CONVERSATION:
-        status = "done"
-        reason = "conversation_mode_response_ready"
-    elif convergence_status == "hard_stop":
-        status = "blocked"
-        reason = "convergence_guard_triggered"
-    elif quality_status == "match" and unfinished_todos == 0:
-        status = "done"
-        reason = "verification_match_and_no_open_todos"
-    elif quality_status == "catastrophic" and mode == MODE_PLAN and unfinished_todos == 0:
-        status = "blocked"
-        reason = quality_reason or "catastrophic_without_open_todo"
-    elif unfinished_todos > 0:
-        status = "continue"
-        reason = "open_todos_remaining"
-    elif quality_status in {"mismatch", "catastrophic"}:
-        status = "continue"
-        reason = quality_reason or f"quality_{quality_status}"
-    else:
-        status = "done"
-        reason = "no_additional_progress_needed"
-
-    return {
-        "progress_eval": {
-            "status": status,
-            "reason": reason,
-            "unfinished_todos": unfinished_todos,
-            "should_replan": should_replan,
-        }
-    }
-
-def budget_evaluator_node(state: AgentState) -> Dict[str, Any]:
-    stop_reason_raw = state.get("request_stop_reason")
-    if isinstance(stop_reason_raw, str) and stop_reason_raw:
-        return {
-            "budget_eval": {
-                "budget_ok": False,
-                "stop_reason": stop_reason_raw,
-            }
-        }
-
-    turns = coerce_non_negative_int(state.get("request_agent_turns"))
-    max_turns = coerce_non_negative_int(state.get("max_request_agent_turns"), default=-1)
-    if max_turns >= 0 and turns >= max_turns:
-        return {
-            "budget_eval": {
-                "budget_ok": False,
-                "stop_reason": "agent_turn_budget_exhausted",
-            },
-            "request_stop_reason": "agent_turn_budget_exhausted",
-        }
-
-    tool_batches = coerce_non_negative_int(state.get("request_tool_batches"))
-    max_tool_batches = coerce_non_negative_int(state.get("max_request_tool_batches"), default=-1)
-    if max_tool_batches >= 0 and tool_batches >= max_tool_batches:
-        return {
-            "budget_eval": {
-                "budget_ok": False,
-                "stop_reason": "tool_batch_budget_exhausted",
-            },
-            "request_stop_reason": "tool_batch_budget_exhausted",
-        }
-
-    replans = coerce_non_negative_int(state.get("plan_replan_count"))
-    max_replans = coerce_non_negative_int(state.get("max_plan_replans"), default=-1)
-    if max_replans >= 0 and replans > max_replans:
-        return {
-            "budget_eval": {
-                "budget_ok": False,
-                "stop_reason": "plan_replan_budget_exhausted",
-            },
-            "request_stop_reason": "plan_replan_budget_exhausted",
-        }
-
-    return {"budget_eval": {"budget_ok": True, "stop_reason": None}}
-
-def transition_resolver_node(state: AgentState) -> Dict[str, Any]:
-    """
-    Deterministic transition resolver shared by single-agent and dual-agent paths.
-    """
-    mode = coerce_task_mode(state.get("task_mode"))
-    topology = coerce_workflow_topology(state.get("workflow_topology"))
-    is_dual_plan = mode == MODE_PLAN and topology == TOPOLOGY_DUAL
-
-    budget_eval = state.get("budget_eval")
-    if isinstance(budget_eval, dict) and not bool(budget_eval.get("budget_ok", True)):
-        reason = str(budget_eval.get("stop_reason") or "budget_exhausted")
-        return {
-            "transition_next": "checkpoint_finalize",
-            "transition_reason": reason,
-        }
-
-    progress_eval = state.get("progress_eval")
-    progress_status = ""
-    should_replan = False
-    if isinstance(progress_eval, dict):
-        progress_status = str(progress_eval.get("status", "")).strip().lower()
-        should_replan = bool(progress_eval.get("should_replan"))
-
-    if progress_status == "done":
-        return {
-            "transition_next": "checkpoint_finalize",
-            "transition_reason": "progress_done",
-        }
-
-    convergence_eval = state.get("convergence_eval")
-    convergence_status = ""
-    if isinstance(convergence_eval, dict):
-        convergence_status = str(convergence_eval.get("status", "")).strip().lower()
-    if convergence_status == "hard_stop":
-        reason = str(convergence_eval.get("reason") or "convergence_guard_triggered")
-        return {
-            "transition_next": "checkpoint_finalize",
-            "transition_reason": reason,
-        }
-
-    quality_eval = state.get("quality_eval")
-    quality_status = ""
-    if isinstance(quality_eval, dict):
-        quality_status = str(quality_eval.get("status", "")).strip().lower()
-
-    # Priority: budget_exhausted > done > catastrophic > replan > continue
-    if quality_status == "catastrophic":
-        return {
-            "transition_next": "builder_agent" if is_dual_plan else "agent",
-            "transition_reason": "catastrophic_manual_remediation",
-        }
-
-    if is_dual_plan and should_replan and replan_budget_remaining(state):
-        return {
-            "transition_next": "planner_refresh",
-            "transition_reason": "replan_requested_by_evaluators",
-        }
-
-    if progress_status in {"continue", "blocked"}:
-        return {
-            "transition_next": "builder_agent" if is_dual_plan else "agent",
-            "transition_reason": "continue_execution",
-        }
-
-    return {
-        "transition_next": "checkpoint_finalize",
-        "transition_reason": "default_finalize",
-    }
-
-def planner_refresh_node(state: AgentState) -> Dict[str, Any]:
-    """
-    Structured plan refresh from verifier feedback.
-    Supersedes current open todos and creates a focused replan queue.
-    """
+def planner_refresh_node(state: AgentState) -> dict[str, Any]:
+    """Refresh todo plan from latest verification_result guidance."""
     current_replans = coerce_non_negative_int(state.get("plan_replan_count"))
     max_replans = coerce_non_negative_int(
         state.get("max_plan_replans"),
         default=DEFAULT_MAX_PLAN_REPLANS,
     )
     next_replans = current_replans + 1
-
-    result: Dict[str, Any] = {
-        "plan_replan_count": next_replans,
-        "active_role": ROLE_BUILDER,
-        "builder_stall_count": 0,
-    }
     if max_replans >= 0 and next_replans > max_replans:
-        result["request_stop_reason"] = "plan_replan_budget_exhausted"
-        return result
+        return {
+            "plan_replan_count": current_replans,
+            "transition_next": "builder_agent",
+            "transition_reason": "planner_refresh_budget_exhausted",
+        }
 
-    feedback = state.get("verifier_feedback")
+    verification = coerce_verification_result(state.get("verification_result"))
+    fallback_feedback = state.get("verifier_feedback")
     reason = ""
     instructions: list[str] = []
-    if isinstance(feedback, dict):
-        reason_value = feedback.get("reason")
-        if isinstance(reason_value, str):
-            reason = reason_value.strip()
-        raw_instructions = feedback.get("fix_instructions")
+
+    if verification is not None:
+        reason = verification.reason.strip()
+        instructions.extend(
+            [
+                " ".join(str(item).strip().split())
+                for item in verification.edit_suggestions
+                if isinstance(item, str) and item.strip()
+            ]
+        )
+
+    if isinstance(fallback_feedback, dict):
+        if not reason:
+            reason_value = fallback_feedback.get("reason")
+            if isinstance(reason_value, str):
+                reason = reason_value.strip()
+        raw_instructions = fallback_feedback.get("edit_suggestions") or fallback_feedback.get("fix_instructions")
         if isinstance(raw_instructions, list):
             for item in raw_instructions:
-                if isinstance(item, str):
-                    text = " ".join(item.strip().split())
-                    if text:
-                        instructions.append(text)
+                if isinstance(item, str) and item.strip():
+                    instructions.append(" ".join(item.strip().split()))
 
-    normalized_reason = reason or "verifier_requested_replan"
-    todo_actions: list[dict[str, Any]] = []
+    deduped_instructions: list[str] = []
+    seen: set[str] = set()
+    for instruction in instructions:
+        compact = " ".join(instruction.strip().split())
+        if not compact or compact in seen:
+            continue
+        seen.add(compact)
+        deduped_instructions.append(compact)
+        if len(deduped_instructions) >= 3:
+            break
+    if not deduped_instructions:
+        fallback_description = reason or "Re-evaluate unresolved scene mismatches and continue fixing."
+        deduped_instructions = [fallback_description]
+
     open_todos = [
         todo
         for todo in effective_todo_snapshot(state)
-        if todo.get("status") in {"pending", "in_progress"}
+        if str(todo.get("status", "")).strip() in {"pending", "in_progress"}
     ]
+    actions: list[dict[str, Any]] = []
+    normalized_reason = reason or "verifier_requested_replan"
     for todo in open_todos:
         todo_id = str(todo.get("id", "")).strip()
         if not todo_id:
             continue
-        todo_actions.append(
+        actions.append(
             {
                 "action": "supersede",
                 "todo_id": todo_id,
-                "reason": f"Superseded by replan #{next_replans}: {normalized_reason}",
+                "reason": f"Superseded by planner_refresh #{next_replans}: {normalized_reason}",
             }
         )
-
-    normalized_instructions: list[str] = []
-    seen_instructions: set[str] = set()
-    for instruction in instructions:
-        compact = " ".join(instruction.strip().split())
-        if not compact or compact in seen_instructions:
-            continue
-        seen_instructions.add(compact)
-        normalized_instructions.append(compact)
-        if len(normalized_instructions) >= 3:
-            break
-
-    if not normalized_instructions:
-        fallback_description = reason or "Re-evaluate scene plan and continue fixing unresolved mismatches"
-        normalized_instructions = [fallback_description]
-
-    for index, instruction in enumerate(normalized_instructions):
-        todo_actions.append(
+    for index, instruction in enumerate(deduped_instructions):
+        actions.append(
             {
                 "action": "create",
                 "title": f"Replan fix: {instruction}",
@@ -417,23 +568,28 @@ def planner_refresh_node(state: AgentState) -> Dict[str, Any]:
     )
     todo_versions, todos, next_active_todo_id = apply_todo_actions(
         state.get("todo_versions"),
-        todo_actions,
+        actions,
         fallback_todos_raw=state.get("todos"),
         source="system",
         role=ROLE_BUILDER,
         previous_active_todo_id=previous_active_todo_id,
     )
-    result["todo_versions"] = todo_versions
-    result["todos"] = todos
-    result["active_todo_id"] = next_active_todo_id
-    result["role_private_memory"] = merge_role_private_memory(
-        state.get("role_private_memory"),
-        role=ROLE_BUILDER,
-        patch={
-            "last_replan_reason": normalized_reason,
-            "replan_count": next_replans,
-            "last_replan_superseded": len(open_todos),
-            "last_replan_new_tasks": len(normalized_instructions),
-        },
-    )
-    return result
+    return {
+        "plan_replan_count": next_replans,
+        "active_role": ROLE_BUILDER,
+        "builder_stall_count": 0,
+        "current_todo_stall_count": 0,
+        "todo_versions": todo_versions,
+        "todos": todos,
+        "active_todo_id": next_active_todo_id,
+        "role_private_memory": merge_role_private_memory(
+            state.get("role_private_memory"),
+            role=ROLE_BUILDER,
+            patch={
+                "last_replan_reason": normalized_reason,
+                "replan_count": next_replans,
+                "last_replan_superseded": len(open_todos),
+                "last_replan_new_tasks": len(deduped_instructions),
+            },
+        ),
+    }

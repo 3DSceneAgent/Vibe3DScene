@@ -1,16 +1,12 @@
-from langchain_core.messages import ToolMessage
-
 from scene_agent.agent.convergence import evaluate_convergence
-from scene_agent.agent.nodes import quality_evaluator_node, transition_resolver_node
+from scene_agent.agent.nodes import evaluator_node
 
 
-def _verification_message(payload: dict, tool_call_id: str) -> ToolMessage:
-    return ToolMessage(name="verification", content=payload, tool_call_id=tool_call_id)
-
-
-def test_quality_evaluator_emits_guided_retry_on_repeat_loop():
+def test_evaluator_emits_guided_retry_on_repeat_loop():
     base_state = {
         "active_todo_id": "todo-1",
+        "routed_to_plan": True,
+        "request_tool_batches": 1,
         "recent_verification_signatures": [
             {
                 "todo_id": "todo-1",
@@ -27,40 +23,55 @@ def test_quality_evaluator_emits_guided_retry_on_repeat_loop():
                 "reason": "scale mismatch",
             },
         ],
-        "messages": [
-            _verification_message(
-                {
-                    "status": "mismatch",
-                    "reason": "Scale is still off.",
-                    "scale_feedback": "The chair is too large.",
-                },
-                "verification_repeat",
-            )
-        ],
+        "verification_result": {
+            "status": "working",
+            "reason": "Scale is still off.",
+            "edit_suggestions": ["Reduce chair scale"],
+        },
         "last_verified_path": "/renders/3.png",
     }
 
-    result = quality_evaluator_node(base_state)
+    result = evaluator_node(base_state)
     assert result["convergence_eval"]["status"] == "guided_retry"
     assert result["convergence_eval"]["pattern"] == "repeat_loop"
     assert result["convergence_intervention_count"] == 1
     assert "messages" in result
 
 
-def test_transition_resolver_stops_on_convergence_hard_stop():
-    result = transition_resolver_node(
+def test_evaluator_stops_on_convergence_hard_stop():
+    result = evaluator_node(
         {
-            "task_mode": "plan_mode",
-            "workflow_topology": "single_agent",
-            "budget_eval": {"budget_ok": True, "stop_reason": None},
-            "progress_eval": {"status": "blocked", "should_replan": False},
-            "convergence_eval": {"status": "hard_stop", "reason": "repeated_same_failure_signature_after_guidance"},
-            "quality_eval": {"status": "mismatch", "reason": "Still wrong"},
+            "routed_to_plan": True,
+            "request_tool_batches": 1,
+            "active_todo_id": "todo-1",
+            "convergence_intervention_count": 2,
+            "recent_verification_signatures": [
+                {
+                    "todo_id": "todo-1",
+                    "status": "mismatch",
+                    "failure_bucket": "scale",
+                    "verified_path": "/renders/1.png",
+                    "reason": "scale mismatch",
+                },
+                {
+                    "todo_id": "todo-1",
+                    "status": "mismatch",
+                    "failure_bucket": "scale",
+                    "verified_path": "/renders/2.png",
+                    "reason": "scale mismatch",
+                },
+            ],
+            "verification_result": {
+                "status": "working",
+                "reason": "Scale mismatch again",
+                "edit_suggestions": ["Adjust scale"],
+            },
+            "last_verified_path": "/renders/3.png",
         }
     )
 
-    assert result["transition_next"] == "checkpoint_finalize"
-    assert result["transition_reason"] == "repeated_same_failure_signature_after_guidance"
+    assert result["transition_next"] == "finalize"
+    assert "after_guidance" in result["transition_reason"]
 
 
 def test_evaluate_convergence_keeps_history_when_verification_is_skipped():

@@ -1,7 +1,7 @@
 """Node implementations by category."""
 import json
 import re
-from typing import Any, Dict, Literal
+from typing import Any, Dict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from scene_agent.agent.state import AgentState, TodoItem, create_todo
@@ -19,8 +19,6 @@ from scene_agent.utils.render_refs import (
 )
 from scene_agent.utils.todo_helpers import (
     coerce_non_negative_int,
-    coerce_todos,
-    is_milestone_tool_batch,
 )
 from .constants_runtime import (
     RENDER_VISION_MESSAGE_ID,
@@ -29,7 +27,6 @@ from .constants_runtime import (
     TODO_BLOCKED_RECOVERY_ACTION_MESSAGE_ID,
     TODO_BLOCKED_RECOVERY_ATTEMPTS,
     TODO_BLOCKED_RECOVERY_MESSAGE_ID,
-    TODO_CHECK_INTERVAL_ROUNDS,
     TODO_STAGNATION_LIMIT,
 )
 
@@ -58,9 +55,6 @@ def update_memory_node(state: AgentState) -> Dict[str, Any]:
         result["tool_round_count"] = coerce_non_negative_int(state.get("tool_round_count")) + 1
         next_request_batches = coerce_non_negative_int(state.get("request_tool_batches")) + 1
         result["request_tool_batches"] = next_request_batches
-        max_request_batches = coerce_non_negative_int(state.get("max_request_tool_batches"), default=-1)
-        if max_request_batches >= 0 and next_request_batches >= max_request_batches:
-            result["request_stop_reason"] = "tool_batch_budget_exhausted"
 
     for msg in last_messages:
         if isinstance(msg, ToolMessage) and "get_scene_info" in str(msg.name):
@@ -317,212 +311,6 @@ def scene_observe_node(state: AgentState) -> Dict[str, Any]:
         "scene_camera_params": camera_params,
         "persistent_cameras": camera_names,
         "scene_bbox": scene_bbox,
-    }
-
-def checkpoint_gate_node(
-    state: AgentState,
-    *,
-    stage: Literal["loop", "finalize"],
-) -> Dict[str, Any]:
-    """
-    Decide whether a checkpoint should keep iterating or allow finalization.
-
-    Strategy:
-    - In loop stage, retain the legacy sparse-check metadata only.
-    - In loop stage, run sparsely (interval or milestone tool batch).
-    - In finalize stage, run the finalize guard inline and emit the latest
-      finalize-guard snapshot directly, without a separate graph node.
-    """
-    todos = coerce_todos(state.get("todos"))
-    has_todos = len(todos) > 0
-    tool_round_count = coerce_non_negative_int(state.get("tool_round_count"))
-    last_check_round = coerce_non_negative_int(state.get("last_finalize_guard_round"), default=-1)
-    latest_tool_batch_names = state.get("last_tool_batch_names")
-    milestone_hit = is_milestone_tool_batch(latest_tool_batch_names)
-    stop_reason = state.get("request_stop_reason")
-    if not isinstance(stop_reason, str):
-        stop_reason = ""
-    transition_reason = state.get("transition_reason")
-    if not isinstance(transition_reason, str):
-        transition_reason = ""
-    convergence_eval = state.get("convergence_eval")
-    convergence_status = ""
-    if isinstance(convergence_eval, dict):
-        convergence_status = str(convergence_eval.get("status", "")).strip().lower()
-
-    should_run = False
-    reason = "no_todos"
-
-    if stage == "finalize":
-        pending_count = sum(1 for todo in todos if todo.get("status") == "pending")
-        in_progress_count = sum(1 for todo in todos if todo.get("status") == "in_progress")
-        completed_count = sum(1 for todo in todos if todo.get("status") == "completed")
-        failed_count = sum(1 for todo in todos if todo.get("status") == "failed")
-        snapshot = {
-            str(todo.get("id", "")): str(todo.get("status", "pending"))
-            for todo in todos
-            if isinstance(todo.get("id"), str) and str(todo.get("id"))
-        }
-        current_verified_path = state.get("last_verified_path")
-        if not isinstance(current_verified_path, str):
-            current_verified_path = None
-
-        todo_status = "not_applicable"
-        if stop_reason:
-            reason = "terminal_stop_skip_guard"
-            todo_status = "skipped"
-        elif convergence_status == "hard_stop":
-            reason = "convergence_hard_stop_skip_guard"
-            todo_status = "skipped"
-        elif transition_reason and transition_reason not in {"progress_done", "default_finalize"}:
-            reason = "non_success_finalize_skip_guard"
-            todo_status = "skipped"
-        elif not has_todos:
-            reason = "no_todos"
-            todo_status = "not_applicable"
-        elif pending_count == 0 and in_progress_count == 0:
-            reason = "all_todos_terminal"
-            todo_status = "completed"
-        else:
-            reason = "unfinished_todos_remaining"
-            todo_status = "continue"
-
-        result: Dict[str, Any] = {
-            "finalize_guard_gate": {
-                "stage": stage,
-                "should_run": False,
-                "reason": reason,
-                "has_todos": has_todos,
-                "tool_round_count": tool_round_count,
-                "last_finalize_guard_round": last_check_round,
-            },
-            "finalize_guard": {
-                "status": todo_status,
-                "reason": reason,
-                "stage": stage,
-                "pending_count": pending_count,
-                "in_progress_count": in_progress_count,
-                "completed_count": completed_count,
-                "failed_count": failed_count,
-                "tool_round_count": tool_round_count,
-                "stagnation_count": 0,
-            },
-            "last_finalize_guard_round": tool_round_count,
-            "last_finalize_guard_verified_path": current_verified_path,
-            "last_finalize_guard_todo_snapshot": snapshot,
-            "stagnation_count": 0,
-        }
-        return result
-
-    if has_todos:
-        if milestone_hit:
-            should_run = True
-            reason = "milestone_tool_batch"
-        elif last_check_round < 0:
-            should_run = True
-            reason = "first_check"
-        elif tool_round_count - last_check_round >= TODO_CHECK_INTERVAL_ROUNDS:
-            should_run = True
-            reason = "interval_reached"
-        else:
-            should_run = False
-            reason = "interval_not_reached"
-
-    return {
-        "finalize_guard_gate": {
-            "stage": stage,
-            "should_run": should_run,
-            "reason": reason,
-            "has_todos": has_todos,
-            "tool_round_count": tool_round_count,
-            "last_finalize_guard_round": last_check_round,
-        }
-    }
-
-def finalize_guard_node(state: AgentState) -> Dict[str, Any]:
-    """
-    Thin finalize-stage guard snapshot helper.
-
-    This node is no longer responsible for stagnation detection. Loop
-    stability now belongs to budget + convergence; finalize_guard only guards
-    against premature finalization when unfinished todos still exist.
-    """
-    gate = state.get("finalize_guard_gate")
-    stage = "loop"
-    if isinstance(gate, dict):
-        stage_value = gate.get("stage")
-        if stage_value in {"loop", "finalize"}:
-            stage = stage_value
-
-    todos = coerce_todos(state.get("todos"))
-    tool_round_count = coerce_non_negative_int(state.get("tool_round_count"))
-    current_verified_path = state.get("last_verified_path")
-    if not isinstance(current_verified_path, str):
-        current_verified_path = None
-
-    if not todos:
-        return {
-            "finalize_guard": {
-                "status": "not_applicable",
-                "reason": "no_todos",
-                "stage": stage,
-                "pending_count": 0,
-                "in_progress_count": 0,
-                "completed_count": 0,
-                "failed_count": 0,
-                "tool_round_count": tool_round_count,
-                "stagnation_count": 0,
-            },
-            "last_finalize_guard_round": tool_round_count,
-            "last_finalize_guard_verified_path": current_verified_path,
-            "last_finalize_guard_todo_snapshot": {},
-            "stagnation_count": 0,
-        }
-
-    effective_todos = list(todos)
-    pending_count = sum(1 for todo in effective_todos if todo.get("status") == "pending")
-    in_progress_count = sum(1 for todo in effective_todos if todo.get("status") == "in_progress")
-    completed_count = sum(1 for todo in effective_todos if todo.get("status") == "completed")
-    failed_count = sum(1 for todo in effective_todos if todo.get("status") == "failed")
-
-    snapshot = {
-        str(todo.get("id", "")): str(todo.get("status", "pending"))
-        for todo in effective_todos
-        if isinstance(todo.get("id"), str) and str(todo.get("id"))
-    }
-    convergence_eval = state.get("convergence_eval")
-    convergence_status = ""
-    convergence_reason = ""
-    if isinstance(convergence_eval, dict):
-        convergence_status = str(convergence_eval.get("status", "")).strip().lower()
-        convergence_reason = str(convergence_eval.get("reason", "")).strip()
-
-    status = "continue"
-    reason = "unfinished_todos_remaining"
-    stagnation_count = 0
-    if pending_count == 0 and in_progress_count == 0:
-        status = "completed"
-        reason = "all_todos_terminal"
-    elif convergence_status == "hard_stop":
-        status = "blocked"
-        reason = convergence_reason or "convergence_guard_triggered"
-
-    return {
-        "finalize_guard": {
-            "status": status,
-            "reason": reason,
-            "stage": stage,
-            "pending_count": pending_count,
-            "in_progress_count": in_progress_count,
-            "completed_count": completed_count,
-            "failed_count": failed_count,
-            "tool_round_count": tool_round_count,
-            "stagnation_count": stagnation_count,
-        },
-        "last_finalize_guard_round": tool_round_count,
-        "last_finalize_guard_verified_path": current_verified_path,
-        "last_finalize_guard_todo_snapshot": snapshot,
-        "stagnation_count": stagnation_count,
     }
 
 def blocked_recovery_node(state: AgentState) -> Dict[str, Any]:

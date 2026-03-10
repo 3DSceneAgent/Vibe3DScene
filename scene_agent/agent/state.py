@@ -13,7 +13,7 @@ class TodoItem(TypedDict):
     """Individual todo item for task tracking"""
     id: str
     description: str
-    status: str  # "pending" | "in_progress" | "completed" | "failed" | "superseded"
+    status: str  # "pending" | "in_progress" | "completed" | "failed" | "superseded" | "skipped"
     created_at: str
     completed_at: str | None
 
@@ -25,7 +25,7 @@ class TodoVersion(TypedDict):
     version: int
     prev_event_id: str | None
     title: str
-    status: str  # "pending" | "in_progress" | "completed" | "failed" | "superseded"
+    status: str  # "pending" | "in_progress" | "completed" | "failed" | "superseded" | "skipped"
     reason: str
     source: str  # "agent_commit" | "verification" | "system"
     created_at: str
@@ -44,7 +44,7 @@ class ReferenceImageCatalogEntry(TypedDict):
     use_count: int
 
 
-TaskMode = Literal["conversation_mode", "single_action_mode", "plan_mode"]
+TaskMode = Literal["direct_mode", "plan_mode"]
 WorkflowTopology = Literal["single_agent", "dual_agent"]
 MemoryProfile = Literal["thread_shared_only", "shared_plus_role_private"]
 AgentRole = Literal["general", "builder", "verifier"]
@@ -136,6 +136,7 @@ class AgentState(TypedDict):
         verifier_turn_count: Verifier turns executed in this request run
         builder_stall_count: Consecutive builder turns without tool calls
         verifier_feedback: Latest structured verifier feedback
+        verification_result: Canonical verification result payload shared across single/dual paths
         role_private_memory: Compact role-scoped private memory buckets
         reference_image_catalog: Compact named reference-image catalog for this thread state
         request_reference_image_keys: Active reference-image keys for the current request
@@ -143,7 +144,11 @@ class AgentState(TypedDict):
         request_reference_image_reason: Human-readable reason for the current request reference-image set
         plan_replan_count: Number of plan refreshes in this request run
         max_plan_replans: Max allowed plan refresh attempts in this request run
-        verification_mismatch_streak: Consecutive mismatch/catastrophic verification count
+        routed_to_plan: Whether router selected the plan decomposition path for this request
+        current_todo_stall_count: Consecutive rounds where the active todo did not finish
+        overall_stall_count: Consecutive rounds in direct mode without successful completion
+        evaluator_result: Latest merged evaluator output payload
+        verification_mismatch_streak: Consecutive mismatch verification count
         quality_eval: Latest quality evaluator output
         convergence_eval: Latest convergence evaluator output
         recent_verification_signatures: Recent structured verification signatures
@@ -161,8 +166,6 @@ class AgentState(TypedDict):
         last_finalize_guard_todo_snapshot: Last todo snapshot captured by the finalize guard
         stagnation_count: Legacy finalize guard field retained for observability/compatibility;
             single-agent stop control now relies on budget + convergence instead
-        verify_forced_recovery: Whether verify node forced hard-recovery tool calls
-        catastrophic_recovery_attempts: Consecutive catastrophic hard-recovery attempts
         workflow: Final workflow metadata from finalize node
     """
     # Messages with built-in reducer for proper message accumulation
@@ -201,6 +204,7 @@ class AgentState(TypedDict):
     verifier_turn_count: NotRequired[int]
     builder_stall_count: NotRequired[int]
     verifier_feedback: NotRequired[dict[str, Any]]
+    verification_result: NotRequired[dict[str, Any] | None]
     role_private_memory: NotRequired[dict[str, dict[str, Any]]]
     reference_image_catalog: NotRequired[Annotated[dict[str, ReferenceImageCatalogEntry], replace_mapping]]
     request_reference_image_keys: NotRequired[list[str]]
@@ -208,6 +212,10 @@ class AgentState(TypedDict):
     request_reference_image_reason: NotRequired[str | None]
     plan_replan_count: NotRequired[int]
     max_plan_replans: NotRequired[int]
+    routed_to_plan: NotRequired[bool]
+    current_todo_stall_count: NotRequired[int]
+    overall_stall_count: NotRequired[int]
+    evaluator_result: NotRequired[dict[str, Any]]
     verification_mismatch_streak: NotRequired[int]
     quality_eval: NotRequired[dict[str, Any]]
     convergence_eval: NotRequired[dict[str, Any]]
@@ -238,8 +246,6 @@ class AgentState(TypedDict):
     last_finalize_guard_verified_path: NotRequired[str | None]
     last_finalize_guard_todo_snapshot: NotRequired[dict[str, str]]
     stagnation_count: NotRequired[int]
-    verify_forced_recovery: NotRequired[bool]
-    catastrophic_recovery_attempts: NotRequired[int]
     # Scene-level camera state — updated by scene_observe_node
     scene_bbox: NotRequired[dict]
     # {"center": [x,y,z], "dimensions": [w,h,d]} — union AABB of all mesh objects

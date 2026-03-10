@@ -27,9 +27,6 @@ def _clean_text(raw_value: Any) -> str:
 
 
 def infer_failure_bucket(verification: dict[str, Any], quality_status: str) -> str:
-    if quality_status == "catastrophic":
-        return "catastrophic"
-
     for key, bucket in (
         ("scale_feedback", "scale"),
         ("placement_feedback", "placement"),
@@ -68,7 +65,7 @@ def _signature_key(signature: dict[str, Any]) -> tuple[str, str, str]:
 def _is_alternating_bucket_sequence(buckets: list[str]) -> bool:
     if len(buckets) < 4:
         return False
-    if any(not bucket or bucket in {"unknown", "catastrophic"} for bucket in buckets):
+    if any(not bucket or bucket == "unknown" for bucket in buckets):
         return False
     unique_buckets = set(buckets)
     if len(unique_buckets) != 2:
@@ -106,11 +103,6 @@ def _has_oscillation_pattern(history: list[dict[str, Any]]) -> bool:
 
 
 def _pattern_from_history(history: list[dict[str, Any]]) -> tuple[str, str]:
-    if len(history) >= 2:
-        last_two = history[-2:]
-        if all(str(item.get("status")) == "catastrophic" for item in last_two):
-            return "hard_stop", "consecutive_catastrophic_verification"
-
     if len(history) >= 3:
         last_three = history[-3:]
         keys = [_signature_key(item) for item in last_three]
@@ -158,7 +150,7 @@ def evaluate_convergence(
     if isinstance(raw_interventions, int) and raw_interventions >= 0:
         prior_interventions = raw_interventions
 
-    if quality_status not in {"mismatch", "catastrophic"}:
+    if quality_status != "mismatch":
         should_reset = quality_status == "match"
         return {
             "recent_verification_signatures": [] if should_reset else previous_history,
@@ -184,20 +176,6 @@ def evaluate_convergence(
     }
     history = (previous_history + [signature])[-6:]
     pattern, pattern_reason = _pattern_from_history(history)
-
-    if pattern == "hard_stop":
-        return {
-            "recent_verification_signatures": history,
-            "convergence_intervention_count": prior_interventions,
-            "convergence_eval": {
-                "status": "hard_stop",
-                "pattern": pattern,
-                "reason": pattern_reason,
-                "todo_id": signature["todo_id"],
-                "failure_bucket": signature["failure_bucket"],
-            },
-            "guidance_text": None,
-        }
 
     if pattern in {"repeat_loop", "oscillation_loop"}:
         if prior_interventions >= _MAX_GUIDED_RETRIES_BEFORE_HARD_STOP:

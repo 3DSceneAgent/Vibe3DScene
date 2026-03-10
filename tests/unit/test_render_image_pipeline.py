@@ -262,10 +262,9 @@ class TestVerifyRenderImageDelivery:
             model="gpt-4o",
         )
 
-        assert result["status"] == "match"
-        assert len(captured_messages) == 1
-        msg = captured_messages[0]
-        assert isinstance(msg, HumanMessage)
+        assert result["status"] == "done"
+        assert len(captured_messages) >= 1
+        msg = next(message for message in captured_messages if isinstance(message, HumanMessage))
         image_items = [
             item for item in msg.content
             if isinstance(item, dict) and item.get("type") == "image_url"
@@ -311,8 +310,8 @@ class TestVerifyRenderImageDelivery:
             model="gpt-4o",
         )
 
-        assert result["status"] == "mismatch"
-        msg = captured_messages[0]
+        assert result["status"] == "working"
+        msg = next(message for message in captured_messages if isinstance(message, HumanMessage))
         image_items = [
             item for item in msg.content
             if isinstance(item, dict) and item.get("type") == "image_url"
@@ -352,7 +351,7 @@ class TestVerifyRenderImageDelivery:
             model="gpt-4o",
         )
 
-        msg = captured_messages[0]
+        msg = next(message for message in captured_messages if isinstance(message, HumanMessage))
         text_items = [
             item["text"] for item in msg.content
             if isinstance(item, dict) and item.get("type") == "text"
@@ -397,11 +396,12 @@ class TestVerifyRenderImageDelivery:
             model="gpt-4o",
         )
 
-        assert result["status"] == "match"
-        assert len(captured_messages) == 1
+        assert result["status"] == "done"
+        assert len(captured_messages) >= 1
+        human_message = next(message for message in captured_messages if isinstance(message, HumanMessage))
         image_items = [
             item
-            for item in captured_messages[0].content
+            for item in human_message.content
             if isinstance(item, dict) and item.get("type") == "image_url"
         ]
         assert image_items
@@ -447,11 +447,12 @@ class TestVerifyRenderImageDelivery:
             model="gpt-4o",
         )
 
-        assert result["status"] == "match"
-        assert len(captured_messages) == 1
+        assert result["status"] == "done"
+        assert len(captured_messages) >= 1
+        human_message = next(message for message in captured_messages if isinstance(message, HumanMessage))
         image_items = [
             item
-            for item in captured_messages[0].content
+            for item in human_message.content
             if isinstance(item, dict) and item.get("type") == "image_url"
         ]
         assert image_items
@@ -503,13 +504,12 @@ class TestVerifyRenderImageDelivery:
             model="gpt-4o",
         )
 
-        msg = captured_messages[0]
+        msg = next(message for message in captured_messages if isinstance(message, HumanMessage))
         text_items = [
             item["text"] for item in msg.content
             if isinstance(item, dict) and item.get("type") == "text"
         ]
         full_text = " ".join(text_items)
-        assert "current active todos (primary verification target)" in full_text.lower()
+        assert "active objective (primary)" in full_text.lower()
         assert "move the sofa to align with the carpet center line." in full_text.lower()
-        assert "background context only" in full_text.lower()
-        assert "todo_assessment" in full_text
+        assert "full request context" in full_text.lower()

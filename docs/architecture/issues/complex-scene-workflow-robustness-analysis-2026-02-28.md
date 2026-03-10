@@ -49,7 +49,7 @@
 
 | # | 风险 | 现象 | 根因 |
 |---|------|------|------|
-| S4 | **VLM 验证假阳/假阴** | 空间关系误判、遮挡导致误 pass/误 fail | VLM 空间推理弱；catastrophic 检测依赖硬编码阈值（`stddev ≤ 2.0` 等） |
+| S4 | **VLM 验证假阳/假阴** | 空间关系误判、遮挡导致误 pass/误 fail | VLM 空间推理弱；旧版 scene-state 检测依赖硬编码阈值（`stddev ≤ 2.0` 等） |
 | S5 | **语义级进度度量仍偏弱** | 难稳定区分"慢进展"与"真停滞"；收敛能止血，但还不够细 | 目前 single-agent 主路径已不再依赖 `stagnation_count`；仍缺少语义级 milestone/progress 追踪 |
 | S6 | **单次 HTTP 请求执行** | 长任务 HTTP 超时/断连 → 全部丢失 | `ainvoke`/`astream` 全量在一次 request 中完成，无 pause/resume |
 
@@ -260,7 +260,7 @@ P0 完成状态（2026-03-01，single-agent 首轮落地）：
 
 - `已完成` Context 管理：`context_manager` 已接入 prompt 投影压缩，Agent 不再向模型注入全量历史消息；改为“系统提示 + todo 视图 + 关键近因消息 + 历史摘要”。
 - `已完成` 预算护栏：`plan_mode` 默认预算已改为有限值（`50 / 40 / 3`），不再使用无限预算。
-- `已完成` 收敛检测：已新增基于稳定 `todo_id` 的 convergence guard，可识别重复失败 / 振荡 / 连续 catastrophic，并触发指导性重试或硬熔断。
+- `已完成` 收敛检测：已新增基于稳定 `todo_id` 的 convergence guard，可识别重复失败 / 振荡，并触发指导性重试或硬熔断。
 - `已完成` Todo 解耦：`todo_update` 已从文本 `<todos>` 协议迁移到结构化提交，并通过 `turn_dispatch -> todo_commit` 独立路径执行，不再触发 Blender 工具链上的额外 observe/verify。
 - `已完成` Todo finalize guard 瘦身：`finalize_guard` 不再用硬编码 stagnation 阈值驱动主循环，也不会在 budget/convergence hard-stop 后把流程错误送回 `agent`；该 guard 已内联进 `checkpoint_finalize`。
 

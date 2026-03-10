@@ -1,738 +1,149 @@
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from scene_agent.agent.graph import (
-    _route_after_blocked_recovery_action,
-    _route_after_finalize_checkpoint,
-    _route_after_loop_checkpoint,
-    _route_after_post_agent,
-    _route_after_todo_commit,
+    _route_after_evaluator,
     _route_after_post_builder,
-    _route_after_post_verifier,
-    _route_after_transition_resolver,
-    _route_after_verify,
-    _route_after_finalize_guard,
+    _route_after_router,
+    _route_after_turn_dispatch,
+    _route_after_update_memory,
+    _route_after_verifier_feedback,
 )
 from scene_agent.agent.nodes import (
     RENDER_VISION_MESSAGE_ID,
     SCENE_OBSERVE_MESSAGE_ID,
-    latest_human_message,
-    blocked_recovery_action_node,
-    blocked_recovery_node,
-    checkpoint_gate_node,
     finalize_node,
-    initialize_request_node,
+    latest_human_message,
     planner_refresh_node,
     post_builder_node,
     scene_observe_node,
-    todo_commit_node,
-    finalize_guard_node,
     turn_dispatch_node,
-    transition_resolver_node,
-    verifier_agent_node,
+    verifier_feedback_node,
 )
 
 
-def _todo(
-    todo_id: str,
-    description: str,
-    status: str,
-    *,
-    completed_at: str | None = None,
-) -> dict:
+def _todo(todo_id: str, description: str, status: str) -> dict:
     return {
         "id": todo_id,
         "description": description,
         "status": status,
         "created_at": "2026-01-01T00:00:00",
-        "completed_at": completed_at,
+        "completed_at": None,
     }
 
 
-def test_checkpoint_gate_skips_without_todos_in_loop():
-    result = checkpoint_gate_node({"tool_round_count": 3}, stage="loop")
-    gate = result["finalize_guard_gate"]
-    assert gate["should_run"] is False
-    assert gate["reason"] == "no_todos"
-
-
-def test_checkpoint_gate_runs_on_interval_when_todos_exist():
-    result = checkpoint_gate_node(
-        {
-            "todos": [_todo("todo-1", "Import table", "in_progress")],
-            "tool_round_count": 4,
-            "last_finalize_guard_round": 1,
-        },
-        stage="loop",
-    )
-    gate = result["finalize_guard_gate"]
-    assert gate["should_run"] is True
-    assert gate["reason"] == "interval_reached"
-
-
-def test_checkpoint_gate_inlines_finalize_guard_when_todos_remain_open():
-    result = checkpoint_gate_node(
-        {
-            "todos": [_todo("todo-1", "Import table", "in_progress")],
-            "tool_round_count": 1,
-            "last_finalize_guard_round": 1,
-        },
-        stage="finalize",
-    )
-    gate = result["finalize_guard_gate"]
-    assert gate["should_run"] is False
-    assert gate["reason"] == "unfinished_todos_remaining"
-    assert result["finalize_guard"]["status"] == "continue"
-
-
-def test_checkpoint_gate_skips_finalize_guard_on_request_stop_reason():
-    result = checkpoint_gate_node(
-        {
-            "todos": [_todo("todo-1", "Import table", "in_progress")],
-            "tool_round_count": 1,
-            "request_stop_reason": "tool_batch_budget_exhausted",
-        },
-        stage="finalize",
-    )
-    gate = result["finalize_guard_gate"]
-    assert gate["should_run"] is False
-    assert gate["reason"] == "terminal_stop_skip_guard"
-    assert result["finalize_guard"]["status"] == "skipped"
-
-
-def test_checkpoint_gate_skips_finalize_guard_on_convergence_hard_stop():
-    result = checkpoint_gate_node(
-        {
-            "todos": [_todo("todo-1", "Import table", "in_progress")],
-            "tool_round_count": 1,
-            "convergence_eval": {"status": "hard_stop", "reason": "convergence_guard_triggered"},
-        },
-        stage="finalize",
-    )
-    gate = result["finalize_guard_gate"]
-    assert gate["should_run"] is False
-    assert gate["reason"] == "convergence_hard_stop_skip_guard"
-    assert result["finalize_guard"]["status"] == "skipped"
-
-
-def test_finalize_guard_not_applicable_when_no_todos():
-    result = finalize_guard_node({"tool_round_count": 2, "finalize_guard_gate": {"stage": "loop"}})
-    assert result["finalize_guard"]["status"] == "not_applicable"
-    assert result["finalize_guard"]["reason"] == "no_todos"
-
-
-def test_finalize_guard_completed_when_no_pending_or_in_progress():
-    result = finalize_guard_node(
-        {
-            "todos": [
-                _todo("todo-1", "Import table", "completed", completed_at="2026-01-01T00:10:00"),
-                _todo("todo-2", "Add cup", "failed"),
-            ],
-            "tool_round_count": 5,
-            "finalize_guard_gate": {"stage": "loop"},
-        }
-    )
-    assert result["finalize_guard"]["status"] == "completed"
-    assert result["finalize_guard"]["reason"] == "all_todos_terminal"
-
-
-def test_finalize_guard_keeps_finalize_guard_as_continue_when_todos_are_open():
-    result = finalize_guard_node(
-        {
-            "todos": [_todo("todo-1", "Import table", "pending")],
-            "tool_round_count": 6,
-            "finalize_guard_gate": {"stage": "loop"},
-            "last_finalize_guard_todo_snapshot": {"todo-1": "pending"},
-            "stagnation_count": 1,
-        }
-    )
-    assert result["finalize_guard"]["status"] == "continue"
-    assert result["finalize_guard"]["reason"] == "unfinished_todos_remaining"
-    assert result["stagnation_count"] == 0
-
-
-def test_initialize_request_node_uses_plan_defaults_for_simple_qa():
-    result = initialize_request_node({"messages": [HumanMessage(content="What is global illumination?")]})
-    assert result["task_mode"] == "plan_mode"
-    assert result["max_request_tool_batches"] > 0
-    assert result["max_request_agent_turns"] > 0
-
-
-def test_initialize_request_node_marks_continue_existing_plan_when_unfinished_todos_exist():
-    result = initialize_request_node(
-        {
-            "messages": [HumanMessage(content="continue")],
-            "todos": [_todo("todo-1", "Arrange room layout", "in_progress")],
-        }
-    )
-    assert result["task_mode"] == "plan_mode"
-    assert result["task_intent"] == "continue_existing_plan"
-
-
-def test_initialize_request_node_sets_dual_topology_when_requested():
-    result = initialize_request_node(
-        {
-            "messages": [HumanMessage(content="Create a chair and then add a lamp.")],
-            "workflow_topology_request": "dual_agent",
-        }
-    )
-    assert result["task_mode"] == "plan_mode"
-    assert result["workflow_topology"] == "dual_agent"
-    assert result["active_role"] == "builder"
-    assert result["memory_profile"] == "shared_plus_role_private"
-
-
-def test_initialize_request_node_preserves_single_topology_defaults():
-    result = initialize_request_node(
-        {
-            "messages": [HumanMessage(content="What is global illumination?")],
-            "workflow_topology_request": "single_agent",
-        }
-    )
-    assert result["task_mode"] == "plan_mode"
-    assert result["workflow_topology"] == "single_agent"
-    assert result["active_role"] == "general"
-
-
-def test_turn_dispatch_extracts_internal_todo_updates():
-    state = {
-        "messages": [
-            AIMessage(
-                content="Planning scene build.",
-                tool_calls=[
-                    {
-                        "name": "todo_update",
-                        "args": {
-                            "actions": [
-                                {
-                                    "action": "create",
-                                    "title": "Import table",
-                                    "status": "pending",
-                                    "reason": "Initial planning step",
-                                }
-                            ]
-                        },
-                        "id": "todo-create-1",
-                        "type": "tool_call",
-                    }
-                ],
-            )
-        ]
-    }
-    result = turn_dispatch_node(state)
-    assert result["assistant_turn_kind"] == "todo_only"
-    assert result["request_agent_turns"] == 1
-    assert len(result["pending_todo_updates"]) == 1
-
-
-def test_todo_commit_creates_snapshot_and_version_entry():
-    result = todo_commit_node(
-        {
-            "active_role": "general",
-            "pending_todo_updates": [
-                {
-                    "tool_call_id": "todo-create-1",
-                    "request": {
-                        "actions": [
-                            {
-                                "action": "create",
-                                "title": "Import table",
-                                "status": "pending",
-                                "reason": "Initial plan",
-                                "set_active": True,
-                            }
-                        ]
-                    },
-                }
-            ],
-        }
-    )
-    assert result["todo_protocol_version"] == 1
-    assert len(result["todo_versions"]) == 1
-    assert result["todos"][0]["description"] == "Import table"
-    assert result["active_todo_id"] == result["todos"][0]["id"]
-
-
-def test_route_after_finalize_guard_continues_when_finalize_stage_not_terminal():
-    next_node = _route_after_finalize_guard(
-        {
-            "finalize_guard_gate": {"stage": "finalize"},
-            "finalize_guard": {"status": "continue"},
-            "last_render_path": None,
-        }
-    )
-    assert next_node == "agent"
-
-
-def test_route_after_finalize_guard_finalizes_blocked_status_in_single_mode():
-    next_node = _route_after_finalize_guard(
-        {
-            "finalize_guard_gate": {"stage": "finalize"},
-            "finalize_guard": {"status": "blocked", "stagnation_count": 2},
-            "last_render_path": None,
-        }
-    )
-    assert next_node == "finalize"
-
-
-def test_route_after_finalize_guard_finalizes_blocked_status_even_with_high_stagnation():
-    next_node = _route_after_finalize_guard(
-        {
-            "finalize_guard_gate": {"stage": "finalize"},
-            "finalize_guard": {"status": "blocked", "stagnation_count": 4},
-            "last_render_path": None,
-        }
-    )
-    assert next_node == "finalize"
-
-
-def test_route_after_finalize_guard_finalizes_when_finalize_stage_terminal():
-    next_node = _route_after_finalize_guard(
-        {
-            "finalize_guard_gate": {"stage": "finalize"},
-            "finalize_guard": {"status": "completed"},
-            "last_render_path": None,
-        }
-    )
-    assert next_node == "finalize"
-
-
-def test_route_after_finalize_checkpoint_ends_non_plan_modes():
-    next_node = _route_after_finalize_checkpoint(
-        {
-            "task_mode": "conversation_mode",
-            "finalize_guard_gate": {"should_run": True},
-        }
-    )
-    assert next_node == "__end__"
-
-
-def test_route_after_finalize_checkpoint_returns_to_agent_when_guard_detects_open_todos():
-    next_node = _route_after_finalize_checkpoint(
-        {
-            "task_mode": "plan_mode",
-            "finalize_guard": {"status": "continue"},
-            "request_agent_turns": 1,
-            "max_request_agent_turns": 8,
-        }
-    )
-    assert next_node == "agent"
-
-
-def test_route_after_finalize_checkpoint_finalizes_when_guard_allows_finish():
-    next_node = _route_after_finalize_checkpoint(
-        {
-            "task_mode": "plan_mode",
-            "finalize_guard": {"status": "completed"},
-        }
-    )
-    assert next_node == "finalize"
-
-
-def test_route_after_finalize_guard_ends_non_plan_modes_as_defensive_fallback():
-    next_node = _route_after_finalize_guard(
-        {
-            "task_mode": "single_action_mode",
-            "finalize_guard_gate": {"stage": "finalize"},
-            "finalize_guard": {"status": "blocked", "stagnation_count": 2},
-        }
-    )
-    assert next_node == "__end__"
-
-
-def test_blocked_recovery_node_prioritizes_undo_when_available():
-    result = blocked_recovery_node(
-        {
-            "finalize_guard": {"status": "blocked", "stagnation_count": 2},
-            "enabled_tool_names": ["get_scene_info", "observe_scene_global", "undo_last_snapshot"],
-        }
-    )
-    message = result["messages"][0]
-    content = message.content
-    assert "Recovery mode" in content
-    assert "undo_last_snapshot" in content
-
-
-def test_blocked_recovery_node_second_attempt_forces_reset_even_with_undo_available():
-    result = blocked_recovery_node(
-        {
-            "finalize_guard": {"status": "blocked", "stagnation_count": 3},
-            "enabled_tool_names": ["get_scene_info", "observe_scene_global", "undo_last_snapshot"],
-        }
-    )
-    message = result["messages"][0]
-    content = message.content
-    assert "Skip undo and run full reset now." in content
-    assert "delete_objects(object_names=[...], mode=\"cascade\", strict=False, ignore_missing=True)" in content
-
-
-def test_blocked_recovery_node_prefers_clear_scene_when_available():
-    result = blocked_recovery_node(
-        {
-            "finalize_guard": {"status": "blocked", "stagnation_count": 2},
-            "enabled_tool_names": ["clear_scene", "get_scene_info", "observe_scene_global"],
-        }
-    )
-    message = result["messages"][0]
-    content = message.content
-    assert "clear_scene()" in content
-    assert "delete_objects(object_names=[...]" not in content
-
-
-def test_blocked_recovery_node_uses_clear_and_rebuild_when_undo_unavailable():
-    result = blocked_recovery_node(
-        {
-            "finalize_guard": {"status": "blocked", "stagnation_count": 2},
-            "enabled_tool_names": ["get_scene_info", "delete_objects"],
-        }
-    )
-    message = result["messages"][0]
-    content = message.content
-    assert "undo_last_snapshot` is unavailable" in content
-    assert "delete_objects" in content
-
-
-def test_blocked_recovery_action_node_attempt_one_prefers_undo_and_observe():
-    result = blocked_recovery_action_node(
-        {
-            "finalize_guard": {"status": "blocked", "stagnation_count": 2},
-            "enabled_tool_names": ["undo_last_snapshot", "get_scene_info", "observe_scene_global"],
-        }
-    )
-    message = result["messages"][0]
-    tool_names = [call["name"] for call in message.tool_calls]
-    assert tool_names == ["undo_last_snapshot", "get_scene_info", "observe_scene_global"]
-
-
-def test_blocked_recovery_action_node_attempt_two_prefers_clear_scene():
-    result = blocked_recovery_action_node(
-        {
-            "finalize_guard": {"status": "blocked", "stagnation_count": 3},
-            "enabled_tool_names": ["clear_scene", "get_scene_info", "observe_scene_global"],
-        }
-    )
-    message = result["messages"][0]
-    tool_names = [call["name"] for call in message.tool_calls]
-    assert tool_names == ["clear_scene", "get_scene_info", "observe_scene_global"]
-
-
-def test_route_after_blocked_recovery_action_routes_to_tools_on_forced_calls():
-    next_node = _route_after_blocked_recovery_action(
+def test_turn_dispatch_binary_has_calls():
+    result = turn_dispatch_node(
         {
             "messages": [
                 AIMessage(
                     content="",
-                    tool_calls=[
-                        {"name": "clear_scene", "args": {}, "id": "tc-reset", "type": "tool_call"},
-                    ],
+                    tool_calls=[{"name": "get_scene_info", "args": {}, "id": "tc1", "type": "tool_call"}],
                 )
             ]
         }
     )
-    assert next_node == "tools"
+    assert result["assistant_turn_kind"] == "has_calls"
+    assert result["request_agent_turns"] == 1
 
 
-def test_route_after_verify_routes_to_checkpoint_when_no_forced_recovery():
-    next_node = _route_after_verify({"verify_forced_recovery": False})
-    assert next_node == "quality_evaluator"
+def test_turn_dispatch_binary_no_calls():
+    result = turn_dispatch_node({"messages": [AIMessage(content="No tool needed.")], "request_agent_turns": 1})
+    assert result["assistant_turn_kind"] == "no_calls"
+    assert result["request_agent_turns"] == 2
 
 
-def test_route_after_verify_routes_to_verifier_in_dual_plan_mode():
-    next_node = _route_after_verify(
+def test_route_after_router_uses_plan_flag():
+    assert _route_after_router({"routed_to_plan": True}) == "plan_node"
+    assert _route_after_router({"routed_to_plan": False}) == "agent"
+
+
+def test_route_after_turn_dispatch_uses_binary_kind():
+    assert _route_after_turn_dispatch({"assistant_turn_kind": "has_calls"}) == "tools"
+    assert _route_after_turn_dispatch({"assistant_turn_kind": "no_calls"}) == "evaluator"
+
+
+def test_route_after_evaluator_handles_end_and_finalize():
+    assert _route_after_evaluator({"transition_next": "__end__"}) == "__end__"
+    assert _route_after_evaluator({"transition_next": "finalize"}) == "finalize"
+
+
+def test_post_builder_node_increments_stall_count_without_tool_calls():
+    result = post_builder_node(
         {
-            "verify_forced_recovery": False,
-            "task_mode": "plan_mode",
-            "workflow_topology": "dual_agent",
+            "messages": [AIMessage(content="Trying to plan next step")],
+            "request_agent_turns": 0,
+            "builder_turn_count": 0,
+            "builder_stall_count": 0,
         }
     )
-    assert next_node == "quality_evaluator"
+    assert result["request_agent_turns"] == 1
+    assert result["builder_turn_count"] == 1
+    assert result["builder_stall_count"] == 1
+    assert result["assistant_turn_kind"] == "no_calls"
 
 
-def test_route_after_post_builder_routes_to_verifier_when_no_tool_calls():
-    next_node = _route_after_post_builder(
-        {
-            "messages": [AIMessage(content="Verifier should inspect this result.")],
-            "request_agent_turns": 1,
-            "max_request_agent_turns": 8,
-        }
-    )
-    assert next_node == "verifier_camera_agent"
-
-
-def test_route_after_post_verifier_routes_to_tools_when_tool_calls_present():
-    next_node = _route_after_post_verifier(
+def test_verifier_feedback_routes_has_calls_and_no_calls():
+    with_calls = verifier_feedback_node(
         {
             "messages": [
                 AIMessage(
                     content="",
-                    tool_calls=[
-                        {
-                            "name": "camera_set_pose",
-                            "args": {"location": [0, 0, 2], "rotation_euler": [1, 0, 0]},
-                            "id": "tc-camera-pose",
-                            "type": "tool_call",
-                        }
-                    ],
+                    tool_calls=[{"name": "camera_observe", "args": {}, "id": "tc1", "type": "tool_call"}],
                 )
-            ],
-            "request_agent_turns": 1,
-            "max_request_agent_turns": 8,
+            ]
         }
     )
-    assert next_node == "tools"
+    assert with_calls["assistant_turn_kind"] == "has_calls"
+    assert _route_after_verifier_feedback(with_calls) == "tools"
+
+    no_calls = verifier_feedback_node({"messages": [AIMessage(content='{"status":"done","reason":"ok"}')]})
+    assert no_calls["assistant_turn_kind"] == "no_calls"
+    assert no_calls["verification_result"]["status"] == "done"
+    assert _route_after_verifier_feedback(no_calls) == "evaluator"
 
 
-def test_route_after_post_verifier_routes_to_feedback_without_tool_calls():
-    next_node = _route_after_post_verifier(
-        {
-            "messages": [AIMessage(content="Need builder to move the lamp 10cm left.")],
-            "request_agent_turns": 1,
-            "max_request_agent_turns": 8,
-        }
-    )
-    assert next_node == "verifier_feedback"
+def test_route_after_update_memory_switches_by_topology():
+    assert _route_after_update_memory({"workflow_topology": "single_agent"}) == "scene_observe"
+    assert _route_after_update_memory({"workflow_topology": "dual_agent"}) == "verifier_agent"
 
 
-def test_route_after_post_verifier_routes_to_checkpoint_on_turn_budget_exhaustion():
-    next_node = _route_after_post_verifier(
-        {
-            "messages": [AIMessage(content="No more tool calls.")],
-            "request_agent_turns": 8,
-            "max_request_agent_turns": 8,
-        }
-    )
-    assert next_node == "quality_evaluator"
-
-
-def test_route_after_post_agent_routes_todo_only_turns_to_todo_commit():
-    next_node = _route_after_post_agent(
-        {
-            "assistant_turn_kind": "todo_only",
-            "pending_todo_updates": [{"tool_call_id": "todo-1", "request": {"actions": []}}],
-        }
-    )
-    assert next_node == "todo_commit"
-
-
-def test_route_after_post_agent_routes_external_only_to_tools():
-    next_node = _route_after_post_agent(
-        {
-            "assistant_turn_kind": "external_only",
-        }
-    )
-    assert next_node == "tools"
-
-
-def test_route_after_todo_commit_returns_to_agent_when_no_external_calls():
-    next_node = _route_after_todo_commit(
-        {
-            "messages": [ToolMessage(name="todo_update", content={"applied": True}, tool_call_id="todo-1")],
-            "request_agent_turns": 1,
-            "max_request_agent_turns": 8,
-        }
-    )
-    assert next_node == "agent"
-
-
-def test_route_after_transition_resolver_routes_to_agent_for_single_topology():
-    next_node = _route_after_transition_resolver(
-        {
-            "task_mode": "single_action_mode",
-            "workflow_topology": "single_agent",
-            "transition_next": "agent",
-        }
-    )
-    assert next_node == "agent"
-
-
-def test_route_after_loop_checkpoint_routes_to_builder_for_dual_plan_mode():
-    next_node = _route_after_loop_checkpoint(
-        {
-            "task_mode": "plan_mode",
-            "workflow_topology": "dual_agent",
-            "finalize_guard_gate": {"should_run": False},
-        }
-    )
-    assert next_node == "builder_agent"
-
-
-def test_route_after_finalize_guard_returns_builder_for_dual_plan_mode():
-    next_node = _route_after_finalize_guard(
-        {
-            "task_mode": "plan_mode",
-            "workflow_topology": "dual_agent",
-            "finalize_guard_gate": {"stage": "loop"},
-            "finalize_guard": {"status": "continue"},
-        }
-    )
-    assert next_node == "builder_agent"
-
-
-def test_route_after_finalize_checkpoint_returns_builder_for_dual_plan_when_guard_continues():
-    next_node = _route_after_finalize_checkpoint(
-        {
-            "task_mode": "plan_mode",
-            "workflow_topology": "dual_agent",
-            "finalize_guard": {"status": "continue"},
-            "request_agent_turns": 1,
-            "max_request_agent_turns": 8,
-        }
-    )
-    assert next_node == "builder_agent"
-
-
-def test_route_after_finalize_guard_finalizes_blocked_status_for_dual_plan_finalize_stage():
-    next_node = _route_after_finalize_guard(
-        {
-            "task_mode": "plan_mode",
-            "workflow_topology": "dual_agent",
-            "finalize_guard_gate": {"stage": "finalize"},
-            "finalize_guard": {"status": "blocked", "stagnation_count": 3},
-        }
-    )
-    assert next_node == "finalize"
-
-
-def test_route_after_blocked_recovery_action_returns_builder_for_dual_plan_without_calls():
-    next_node = _route_after_blocked_recovery_action(
-        {
-            "task_mode": "plan_mode",
-            "workflow_topology": "dual_agent",
-            "messages": [AIMessage(content="no tool call")],
-        }
-    )
-    assert next_node == "builder_agent"
-
-
-def test_finalize_node_emits_summary_message():
+def test_finalize_summary_mentions_skipped_todos():
     result = finalize_node(
         {
             "task_mode": "plan_mode",
-            "request_agent_turns": 3,
-            "request_tool_batches": 2,
-            "finalize_guard": {
-                "status": "completed",
-                "reason": "all_todos_terminal",
-                "pending_count": 0,
-                "in_progress_count": 0,
-                "completed_count": 2,
-                "failed_count": 0,
-            },
-            "messages": [],
-        }
-    )
-    assert result["workflow"]["workflow_status"] == "finished"
-    assert result["workflow"]["finish_reason"] == "todos_completed"
-    assert "messages" in result
-    assert len(result["messages"]) == 1
-    assert isinstance(result["messages"][0], AIMessage)
-    assert "Scene workflow finished" in result["messages"][0].content
-
-
-def test_finalize_node_uses_transition_reason_when_stop_reason_is_absent():
-    result = finalize_node(
-        {
-            "task_mode": "plan_mode",
-            "transition_reason": "repeated_same_failure_signature_after_guidance",
-            "finalize_guard": {
-                "status": "skipped",
-                "reason": "convergence_hard_stop_skip_guard",
-                "pending_count": 1,
-                "in_progress_count": 0,
-                "completed_count": 0,
-                "failed_count": 0,
-            },
-            "messages": [],
-        }
-    )
-    assert result["workflow"]["finish_reason"] == "repeated_same_failure_signature_after_guidance"
-
-
-def test_finalize_summary_uses_finalize_guard_counts_for_consistency():
-    result = finalize_node(
-        {
-            "task_mode": "plan_mode",
-            # Historical todo revisions can contain duplicates by description.
+            "transition_reason": "all_todos_terminal_after_skip",
             "todos": [
-                _todo("todo-1", "Create cube", "pending"),
-                _todo("todo-1b", "Create cube", "completed", completed_at="2026-01-01T00:10:00"),
+                _todo("todo-1", "Create cube", "completed"),
+                _todo("todo-2", "Create chair", "skipped"),
             ],
-            "finalize_guard": {
-                "status": "completed",
-                "reason": "all_todos_terminal",
-                "pending_count": 0,
-                "in_progress_count": 0,
-                "completed_count": 1,
-                "failed_count": 0,
-            },
             "messages": [],
         }
     )
     content = result["messages"][0].content
-    assert "Total todos: 1." in content
-    assert "Completed: 1, in progress: 0, pending: 0, failed: 0." in content
+    assert "skipped" in content.lower()
 
 
-def test_finalize_node_prefers_model_generated_summary_when_available():
-    class _StubFinalizer:
-        def __init__(self):
-            self.configs: list[dict] = []
-
-        def with_config(self, **kwargs):
-            self.configs.append(kwargs)
-            return self
-
-        def invoke(self, _messages):
-            return AIMessage(content="Result\nModel summary output.")
-
-    model = _StubFinalizer()
-    result = finalize_node(
-        {
-            "task_mode": "plan_mode",
-            "finalize_guard": {
-                "status": "blocked",
-                "reason": "todo_progress_stagnant",
-                "pending_count": 1,
-                "in_progress_count": 0,
-                "completed_count": 0,
-                "failed_count": 0,
-            },
-            "messages": [HumanMessage(content="Build a dungeon.")],
-        },
-        finalizer_model=model,
-    )
-    assert result["messages"][0].content == "Result\nModel summary output."
-    assert any(
-        cfg.get("tags") == ["nostream"] and cfg.get("run_name") == "finalize_summary_internal"
-        for cfg in model.configs
-    )
-
-
-def test_finalize_fallback_does_not_dump_raw_verification_dict_string():
-    verification_raw = (
-        "{'status': 'mismatch', 'object_feedback': 'Pot of gold is missing.', "
-        "'layout_feedback': 'Dragon is present but scene is incomplete.', 'reason': 'Key asset missing.'}"
-    )
-    result = finalize_node(
-        {
-            "task_mode": "plan_mode",
-            "finalize_guard": {
-                "status": "blocked",
-                "reason": "todo_progress_stagnant",
-                "pending_count": 2,
-                "in_progress_count": 1,
-                "completed_count": 0,
-                "failed_count": 0,
-            },
-            "messages": [
-                HumanMessage(content="Build a dungeon with a dragon and pot of gold."),
-                ToolMessage(name="verification", content=verification_raw, tool_call_id="verification_test"),
-            ],
-        },
-        finalizer_model=None,
-    )
-    content = result["messages"][0].content
-    assert "Verification note: Key asset missing." in content
-    assert "Verification note: {'status': 'mismatch'" not in content
+def test_latest_human_message_skips_internal_render_and_scene_observe_messages():
+    state = {
+        "messages": [
+            HumanMessage(content="Create a red chair beside a wooden table."),
+            HumanMessage(
+                id=RENDER_VISION_MESSAGE_ID,
+                content=[
+                    {"type": "text", "text": "Latest render from tool call."},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/agent_render.png"}},
+                ],
+            ),
+            HumanMessage(
+                id=SCENE_OBSERVE_MESSAGE_ID,
+                content=[
+                    {"type": "text", "text": "Auto scene observation."},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/scene_ne.png"}},
+                ],
+            ),
+        ]
+    }
+    assert latest_human_message(state) == "Create a red chair beside a wooden table."
 
 
 def test_scene_observe_node_routes_commands_via_api_sender(monkeypatch):
@@ -794,140 +205,19 @@ def test_scene_observe_node_routes_commands_via_api_sender(monkeypatch):
     assert calls == [("probe", {"foo": "bar"}, "thread-scene-observe")]
 
 
-def test_latest_human_message_skips_internal_render_and_scene_observe_messages():
-    state = {
-        "messages": [
-            HumanMessage(content="Create a red chair beside a wooden table."),
-            HumanMessage(
-                id=RENDER_VISION_MESSAGE_ID,
-                content=[
-                    {"type": "text", "text": "Latest render from tool call."},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": "https://example.com/agent_render.png"},
-                    },
-                ],
-            ),
-            HumanMessage(
-                id=SCENE_OBSERVE_MESSAGE_ID,
-                content=[
-                    {
-                        "type": "text",
-                        "text": "Auto scene observation — 4-view render after scene mutation.",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": "https://example.com/scene_ne.png"},
-                    },
-                ],
-            ),
-        ]
-    }
-    assert latest_human_message(state) == "Create a red chair beside a wooden table."
-
-
-def test_post_builder_node_increments_stall_count_without_tool_calls():
-    result = post_builder_node(
-        {
-            "messages": [AIMessage(content="Trying to plan next step")],
-            "request_agent_turns": 0,
-            "builder_turn_count": 0,
-            "builder_stall_count": 0,
-            "max_request_agent_turns": 8,
-        }
-    )
-    assert result["request_agent_turns"] == 1
-    assert result["builder_turn_count"] == 1
-    assert result["builder_stall_count"] == 1
-
-
-def test_verifier_agent_node_marks_ready_to_finalize_on_match_without_open_todos():
-    result = verifier_agent_node(
-        {
-            "messages": [
-                ToolMessage(
-                    name="verification",
-                    content={"status": "match", "reason": "Looks good."},
-                    tool_call_id="verification_match",
-                )
-            ],
-            "todos": [_todo("todo-1", "Add lamp", "completed", completed_at="2026-01-01T00:10:00")],
-        }
-    )
-    feedback = result["verifier_feedback"]
-    assert feedback["status"] == "pass"
-    assert feedback["ready_to_finalize"] is True
-    assert feedback["should_replan"] is False
-
-
-def test_transition_resolver_node_routes_to_planner_refresh_on_replan_signal():
-    result = transition_resolver_node(
-        {
-            "task_mode": "plan_mode",
-            "workflow_topology": "dual_agent",
-            "budget_eval": {"budget_ok": True, "stop_reason": None},
-            "quality_eval": {"status": "mismatch", "reason": "needs_fix"},
-            "progress_eval": {"status": "continue", "should_replan": True},
-            "plan_replan_count": 0,
-            "max_plan_replans": 2,
-        }
-    )
-    assert result["transition_next"] == "planner_refresh"
-
-
-def test_planner_refresh_node_adds_replan_todo():
+def test_planner_refresh_node_generates_replan_todos_from_verification_result():
     result = planner_refresh_node(
         {
-            "verifier_feedback": {
+            "verification_result": {
+                "status": "working",
                 "reason": "layout mismatch",
-                "fix_instructions": ["Move chair closer to table"],
+                "edit_suggestions": ["Move chair closer to table"],
             },
             "plan_replan_count": 0,
             "max_plan_replans": 2,
-        }
-    )
-    assert result["plan_replan_count"] == 1
-    assert result["builder_stall_count"] == 0
-    assert len(result["todos"]) >= 1
-
-
-def test_planner_refresh_node_supersedes_open_todos_and_sets_new_active_todo():
-    result = planner_refresh_node(
-        {
-            "verifier_feedback": {
-                "reason": "layout mismatch",
-                "fix_instructions": [
-                    "Move chair closer to table",
-                    "Rotate lamp toward sofa",
-                ],
-            },
-            "plan_replan_count": 0,
-            "max_plan_replans": 3,
+            "todos": [_todo("todo-open-1", "Place chair", "in_progress")],
             "active_todo_id": "todo-open-1",
-            "todos": [
-                _todo("todo-open-1", "Place chair", "in_progress"),
-                _todo("todo-open-2", "Adjust lamp", "pending"),
-            ],
         }
     )
     assert result["plan_replan_count"] == 1
-    assert result["builder_stall_count"] == 0
-    assert result["role_private_memory"]["builder"]["last_replan_superseded"] == 2
-    assert result["role_private_memory"]["builder"]["last_replan_new_tasks"] == 2
-
-    todos = result["todos"]
-    todo_by_id = {todo["id"]: todo for todo in todos}
-    assert todo_by_id["todo-open-1"]["status"] == "superseded"
-    assert todo_by_id["todo-open-2"]["status"] == "superseded"
-
-    pending_titles = [
-        todo["description"]
-        for todo in todos
-        if todo.get("status") == "pending"
-    ]
-    assert any(title.startswith("Replan fix: Move chair closer to table") for title in pending_titles)
-    assert any(title.startswith("Replan fix: Rotate lamp toward sofa") for title in pending_titles)
-    assert isinstance(result.get("active_todo_id"), str) and result["active_todo_id"] not in {
-        "todo-open-1",
-        "todo-open-2",
-    }
+    assert len(result["todos"]) >= 1

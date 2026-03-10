@@ -2,52 +2,49 @@
 LangGraph state machine construction.
 Creates the agent graph following LangGraph best practices.
 """
+
+from __future__ import annotations
+
 import asyncio
 import json
 import os
 import re
 import time
 from typing import Any, Literal
+
 from langchain_core.messages import AIMessage, ToolMessage
-from langgraph.graph import END
 from langgraph.errors import GraphBubbleUp
+from langgraph.graph import END
 from langgraph.prebuilt import ToolNode
 from langgraph.prebuilt.tool_node import ToolCallRequest
 
-
 from scene_agent.agent.graph_factory import build_agent_state_graph
 from scene_agent.agent.internal_tools import get_internal_agent_tools
-from scene_agent.agent.state import AgentState
-from scene_agent.agent.todo_protocol import TODO_UPDATE_TOOL_NAME
-from scene_agent.agent.redis_checkpointer import get_graph_checkpointer
-from scene_agent.memory.reference_image_memory import get_image_asset_memory
 from scene_agent.agent.nodes import (
     agent_node,
     builder_agent_node,
-    budget_evaluator_node,
-    initialize_request_node,
-    prepare_reference_context_node,
-    quality_evaluator_node,
+    evaluator_node,
     finalize_node,
+    initialize_request_node,
+    plan_node,
     planner_refresh_node,
-    progress_evaluator_node,
     post_builder_node,
-    post_verifier_node,
-    sync_reference_catalog_node,
+    prepare_reference_context_node,
+    router_node,
     scene_observe_node,
-    transition_resolver_node,
-    todo_commit_node,
+    sync_reference_catalog_node,
     turn_dispatch_node,
     update_memory_node,
-    verifier_camera_agent_node,
+    verifier_agent_node,
     verifier_feedback_node,
     verify_node,
-    checkpoint_gate_node,
 )
+from scene_agent.agent.redis_checkpointer import get_graph_checkpointer
+from scene_agent.agent.state import AgentState
 from scene_agent.config import get_settings
-from scene_agent.vlm import get_vlm_provider
+from scene_agent.memory.reference_image_memory import get_image_asset_memory
 from scene_agent.tools import get_blender_tools
-
+from scene_agent.vlm import get_vlm_provider
 
 _TOOL_RETRY_MAX_ATTEMPTS = 2
 _TOOL_RETRY_BASE_DELAY_SECONDS = 0.2
@@ -90,12 +87,6 @@ def _message_has_tool_calls(message: AIMessage) -> bool:
         if isinstance(additional_tool_calls, list) and len(additional_tool_calls) > 0:
             return True
     return False
-
-
-def _coerce_non_negative_int(value: Any, *, default: int = 0) -> int:
-    if isinstance(value, int) and value >= 0:
-        return value
-    return default
 
 
 def _build_context_summary_helper_model(
@@ -156,13 +147,6 @@ def _resolve_dual_agent_verifier_runtime(
     return verifier_provider, verifier_model, verifier_api_key
 
 
-def _task_mode(state: AgentState) -> str:
-    raw_mode = state.get("task_mode")
-    if isinstance(raw_mode, str) and raw_mode.strip():
-        return raw_mode.strip()
-    return "plan_mode"
-
-
 def _workflow_topology(state: AgentState) -> str:
     raw_topology = state.get("workflow_topology")
     if isinstance(raw_topology, str) and raw_topology.strip():
@@ -170,27 +154,8 @@ def _workflow_topology(state: AgentState) -> str:
     return "single_agent"
 
 
-def _is_dual_plan_mode(state: AgentState) -> bool:
-    return _task_mode(state) == "plan_mode" and _workflow_topology(state) == "dual_agent"
-
-
-def _has_unfinished_todos(state: AgentState) -> bool:
-    todos = state.get("todos")
-    if not isinstance(todos, list):
-        return False
-    for item in todos:
-        if not isinstance(item, dict):
-            continue
-        status = item.get("status")
-        if status in {"pending", "in_progress"}:
-            return True
-    return False
-
-
-def _agent_turn_budget_exhausted(state: AgentState) -> bool:
-    turns = _coerce_non_negative_int(state.get("request_agent_turns"))
-    max_turns = _coerce_non_negative_int(state.get("max_request_agent_turns"), default=-1)
-    return max_turns >= 0 and turns >= max_turns
+def _is_dual_topology(state: AgentState) -> bool:
+    return _workflow_topology(state) == "dual_agent"
 
 
 def _route_after_initialize_request(_state: AgentState) -> Literal["sync_reference_catalog"]:
@@ -203,82 +168,47 @@ def _route_after_sync_reference_catalog(
     return "prepare_reference_context"
 
 
-def _route_after_prepare_reference_context(state: AgentState) -> Literal["agent", "builder_agent"]:
-    if _is_dual_plan_mode(state):
-        return "builder_agent"
-    return "agent"
+def _route_after_prepare_reference_context(_state: AgentState) -> Literal["router"]:
+    return "router"
 
 
-def _route_after_turn_dispatch(
+def _route_after_router(
     state: AgentState,
-) -> Literal["todo_commit", "tools", "quality_evaluator", "agent"]:
-    turn_kind = state.get("assistant_turn_kind")
-    pending_updates = state.get("pending_todo_updates")
-    has_pending_updates = isinstance(pending_updates, list) and len(pending_updates) > 0
-
-    if turn_kind == "mixed":
-        return "todo_commit"
-    if turn_kind == "todo_only":
-        if has_pending_updates:
-            return "todo_commit"
-        if _agent_turn_budget_exhausted(state):
-            return "quality_evaluator"
-        return "agent"
-    if turn_kind == "external_only":
-        return "tools"
-    return "quality_evaluator"
+) -> Literal["plan_node", "agent", "builder_agent"]:
+    if bool(state.get("routed_to_plan")):
+        return "plan_node"
+    return "builder_agent" if _is_dual_topology(state) else "agent"
 
 
-def _route_after_post_agent(
-    state: AgentState,
-) -> Literal["todo_commit", "tools", "quality_evaluator", "agent"]:
-    return _route_after_turn_dispatch(state)
+def _route_after_plan_node(state: AgentState) -> Literal["agent", "builder_agent"]:
+    return "builder_agent" if _is_dual_topology(state) else "agent"
 
 
-def _route_after_todo_commit(
-    state: AgentState,
-) -> Literal["tools", "quality_evaluator", "agent"]:
-    messages = state.get("messages") or []
-    for message in reversed(list(messages)):
-        if isinstance(message, AIMessage):
-            if _message_has_tool_calls(message):
-                return "tools"
-            break
-    if _agent_turn_budget_exhausted(state):
-        return "quality_evaluator"
-    return "agent"
+def _route_after_turn_dispatch(state: AgentState) -> Literal["tools", "evaluator"]:
+    return "tools" if state.get("assistant_turn_kind") == "has_calls" else "evaluator"
 
 
-def _route_after_post_builder(
-    state: AgentState,
-) -> Literal["tools", "verifier_camera_agent", "quality_evaluator"]:
-    messages = state.get("messages") or []
-    for message in reversed(list(messages)):
-        if isinstance(message, AIMessage):
-            if _message_has_tool_calls(message):
-                return "tools"
-            if _agent_turn_budget_exhausted(state):
-                return "quality_evaluator"
-            return "verifier_camera_agent"
-    if _agent_turn_budget_exhausted(state):
-        return "quality_evaluator"
-    return "verifier_camera_agent"
+def _route_after_post_builder(state: AgentState) -> Literal["tools", "evaluator"]:
+    return "tools" if state.get("assistant_turn_kind") == "has_calls" else "evaluator"
 
 
-def _route_after_post_verifier(
-    state: AgentState,
-) -> Literal["tools", "verifier_feedback", "quality_evaluator"]:
-    messages = state.get("messages") or []
-    for message in reversed(list(messages)):
-        if isinstance(message, AIMessage):
-            if _message_has_tool_calls(message):
-                return "tools"
-            if _agent_turn_budget_exhausted(state):
-                return "quality_evaluator"
-            return "verifier_feedback"
-    if _agent_turn_budget_exhausted(state):
-        return "quality_evaluator"
-    return "verifier_feedback"
+def _route_after_verifier_feedback(state: AgentState) -> Literal["tools", "evaluator"]:
+    return "tools" if state.get("assistant_turn_kind") == "has_calls" else "evaluator"
+
+
+def _route_after_update_memory(state: AgentState) -> Literal["scene_observe", "verifier_agent"]:
+    if _is_dual_topology(state):
+        return "verifier_agent"
+    return "scene_observe"
+
+
+def _route_after_evaluator(state: AgentState) -> str:
+    transition_next = state.get("transition_next")
+    if transition_next in {"agent", "builder_agent", "planner_refresh", "finalize"}:
+        return str(transition_next)
+    if transition_next in {"__end__", END}:
+        return END
+    return "builder_agent" if _is_dual_topology(state) else "agent"
 
 
 def _coerce_object_name_list(raw_value: Any) -> list[str] | None:
@@ -495,7 +425,6 @@ async def _awrap_tool_call_with_retry(
                     status="error",
                 )
 
-            # Keep retries lightweight and only apply deterministic arg normalization.
             working_request = _normalize_tool_request(working_request)
             await asyncio.sleep(_TOOL_RETRY_BASE_DELAY_SECONDS * attempt)
 
@@ -556,77 +485,6 @@ def _wrap_tool_call_with_retry(
     )
 
 
-def _route_after_loop_checkpoint(
-    state: AgentState,
-) -> Literal["agent", "builder_agent", "checkpoint_finalize"]:
-    if _agent_turn_budget_exhausted(state):
-        return "checkpoint_finalize"
-    if _is_dual_plan_mode(state):
-        return "builder_agent"
-    return "agent"
-
-
-def _route_after_finalize_checkpoint(state: AgentState) -> str:
-    if _task_mode(state) != "plan_mode":
-        return END
-    finalize_guard = state.get("finalize_guard")
-    if isinstance(finalize_guard, dict):
-        status = str(finalize_guard.get("status") or "").strip().lower()
-        if status == "continue":
-            if _agent_turn_budget_exhausted(state):
-                return "finalize"
-            if _is_dual_plan_mode(state):
-                return "builder_agent"
-            return "agent"
-    return "finalize"
-
-
-def _route_after_finalize_guard(
-    state: AgentState,
-) -> str:
-    return _route_after_finalize_checkpoint(state)
-
-
-def _route_after_blocked_recovery_action(
-    state: AgentState,
-) -> Literal["tools", "agent", "builder_agent"]:
-    messages = state.get("messages") or []
-    for message in reversed(list(messages)):
-        if isinstance(message, AIMessage):
-            if _message_has_tool_calls(message):
-                return "tools"
-            if _is_dual_plan_mode(state):
-                return "builder_agent"
-            return "agent"
-    if _is_dual_plan_mode(state):
-        return "builder_agent"
-    return "agent"
-
-
-def _route_after_verify(
-    state: AgentState,
-) -> Literal["quality_evaluator"]:
-    _ = state
-    return "quality_evaluator"
-
-
-def _route_after_transition_resolver(
-    state: AgentState,
-) -> Literal["agent", "builder_agent", "planner_refresh", "checkpoint_finalize"]:
-    transition_next = state.get("transition_next")
-    if transition_next == "agent":
-        return "agent"
-    if transition_next == "builder_agent":
-        return "builder_agent"
-    if transition_next == "planner_refresh":
-        return "planner_refresh"
-    if transition_next == "checkpoint_finalize":
-        return "checkpoint_finalize"
-    if _is_dual_plan_mode(state):
-        return "builder_agent"
-    return "agent"
-
-
 async def create_agent_graph(
     session_id: str | None = None,
     *,
@@ -636,19 +494,9 @@ async def create_agent_graph(
 ):
     """
     Create and compile the LangGraph agent.
-    
-    Following langchain-mcp-adapters best practices:
-    - Standard agent-tools loop
-    - Agent decides when to perceive/render
-    - Checkpointing with MemorySaver
-    - Streaming support
-    
-    Returns:
-        Compiled LangGraph application
     """
     settings = get_settings()
-    
-    # Initialize VLM provider
+
     selected_provider = (provider_name or settings.vlm_provider).lower()
     selected_model = model or settings.get_vlm_default_model(selected_provider)
     selected_api_key = api_key or settings.get_vlm_api_key(selected_provider)
@@ -668,6 +516,7 @@ async def create_agent_graph(
         api_key=selected_api_key,
         settings=settings,
     )
+
     verifier_provider_name, verifier_model_name, verifier_api_key = _resolve_dual_agent_verifier_runtime(
         settings=settings,
         default_provider=selected_provider,
@@ -699,8 +548,7 @@ async def create_agent_graph(
             verifier_api_key = selected_api_key
             verifier_chat_model = primary_chat_model
             verifier_context_summary_model = context_summary_model
-    
-    # Load tools from Blender MCP server
+
     tools = await get_blender_tools(session_id=session_id)
     tools.extend(get_internal_agent_tools())
     available_tool_names = [
@@ -716,18 +564,12 @@ async def create_agent_graph(
         hint = _extract_tool_hint(tool)
         if hint:
             available_tool_hints[tool_name] = hint
-    public_tool_names = [name for name in available_tool_names if name != TODO_UPDATE_TOOL_NAME]
-    public_tool_hints = {
-        name: hint
-        for name, hint in available_tool_hints.items()
-        if name != TODO_UPDATE_TOOL_NAME
-    }
-    
-    # Bind tools to model
+    public_tool_names = list(available_tool_names)
+    public_tool_hints = dict(available_tool_hints)
+
     llm_with_tools = primary_chat_model.bind_tools(tools)
     verifier_llm_with_tools = verifier_chat_model.bind_tools(tools)
-    
-    # Define agent node with bound tools
+
     def call_model(state: AgentState) -> dict:
         return agent_node(
             state,
@@ -744,13 +586,22 @@ async def create_agent_graph(
             summary_model=context_summary_model,
         )
 
-    def call_verifier_camera_model(state: AgentState) -> dict:
-        return verifier_camera_agent_node(
+    def call_verifier_model(state: AgentState) -> dict:
+        return verifier_agent_node(
             state,
             verifier_llm_with_tools,
             available_tool_names,
             summary_model=verifier_context_summary_model,
         )
+
+    def call_router(state: AgentState) -> dict:
+        return router_node(state, router_model=primary_chat_model)
+
+    def call_plan(state: AgentState) -> dict:
+        return plan_node(state, planner_model=primary_chat_model)
+
+    def call_verifier_feedback(state: AgentState) -> dict:
+        return verifier_feedback_node(state, parser_model=verifier_chat_model)
 
     def call_prepare_reference_context(state: AgentState) -> dict:
         return prepare_reference_context_node(
@@ -765,53 +616,48 @@ async def create_agent_graph(
             provider_name=selected_provider,
             api_key=selected_api_key,
         )
-    
+
     builder = build_agent_state_graph(
         initialize_request_node=initialize_request_node,
         sync_reference_catalog_node=call_sync_reference_catalog,
         prepare_reference_context_node=call_prepare_reference_context,
+        router_node=call_router,
+        plan_node=call_plan,
         agent_node=call_model,
         turn_dispatch_node=turn_dispatch_node,
         builder_agent_node=call_builder_model,
         post_builder_node=post_builder_node,
-        verifier_camera_agent_node=call_verifier_camera_model,
-        post_verifier_node=post_verifier_node,
-        verifier_feedback_node=verifier_feedback_node,
-        quality_evaluator_node=quality_evaluator_node,
-        progress_evaluator_node=progress_evaluator_node,
-        budget_evaluator_node=budget_evaluator_node,
+        verifier_agent_node=call_verifier_model,
+        verifier_feedback_node=call_verifier_feedback,
+        evaluator_node=evaluator_node,
         tools_node=ToolNode(
             tools,
             handle_tool_errors=False,
             wrap_tool_call=_wrap_tool_call_with_retry,
             awrap_tool_call=_awrap_tool_call_with_retry,
         ),
-        todo_commit_node=todo_commit_node,
         update_memory_node=update_memory_node,
         scene_observe_node=scene_observe_node,
-        checkpoint_finalize_node=lambda state: checkpoint_gate_node(state, stage="finalize"),
         verify_node=lambda state: verify_node(
             state,
-            provider_name=verifier_provider_name if _is_dual_plan_mode(state) else selected_provider,
-            api_key=verifier_api_key if _is_dual_plan_mode(state) else selected_api_key,
-            model=verifier_model_name if _is_dual_plan_mode(state) else selected_model,
+            provider_name=selected_provider,
+            api_key=selected_api_key,
+            model=selected_model,
         ),
-        transition_resolver_node=transition_resolver_node,
         planner_refresh_node=planner_refresh_node,
         finalize_node=lambda state: finalize_node(state, finalizer_model=primary_chat_model),
         route_after_initialize_request=_route_after_initialize_request,
         route_after_sync_reference_catalog=_route_after_sync_reference_catalog,
         route_after_prepare_reference_context=_route_after_prepare_reference_context,
+        route_after_router=_route_after_router,
+        route_after_plan_node=_route_after_plan_node,
         route_after_turn_dispatch=_route_after_turn_dispatch,
-        route_after_todo_commit=_route_after_todo_commit,
         route_after_post_builder=_route_after_post_builder,
-        route_after_post_verifier=_route_after_post_verifier,
-        route_after_verify=_route_after_verify,
-        route_after_transition_resolver=_route_after_transition_resolver,
-        route_after_finalize_checkpoint=_route_after_finalize_checkpoint,
+        route_after_verifier_feedback=_route_after_verifier_feedback,
+        route_after_update_memory=_route_after_update_memory,
+        route_after_evaluator=_route_after_evaluator,
     )
-    
-    # Compile with checkpointing
+
     checkpointer = get_graph_checkpointer()
     app = builder.compile(checkpointer=checkpointer)
     setattr(app, "_available_tool_names", available_tool_names)
@@ -822,7 +668,6 @@ async def create_agent_graph(
     setattr(app, "_vlm_model", selected_model)
     setattr(app, "_verifier_vlm_provider", verifier_provider_name)
     setattr(app, "_verifier_vlm_model", verifier_model_name)
-    
     return app
 
 
@@ -833,8 +678,7 @@ def create_agent_graph_sync(
     api_key: str | None = None,
     model: str | None = None,
 ):
-    """Synchronous wrapper for create_agent_graph"""
-    import asyncio
+    """Synchronous wrapper for create_agent_graph."""
     return asyncio.run(
         create_agent_graph(
             session_id=session_id,
@@ -843,3 +687,4 @@ def create_agent_graph_sync(
             model=model,
         )
     )
+

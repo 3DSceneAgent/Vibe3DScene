@@ -147,7 +147,7 @@ Lines 123-127
         }
 问题：当验证因为渲染文件不可访问或 VLM 调用失败而出错时，它被报告为 mismatch。这会导致后续的 quality_evaluator → progress_evaluator → transition_resolver 链把它当作"场景不匹配"来处理，agent 会继续迭代尝试修复一个根本不存在的 mismatch。在 plan_mode 下，这可能浪费 10+ 个 turns 的预算去"修复"一个实际上是系统错误导致的假 mismatch。
 
-应该：要么报告为 "status": "error" 或 "skipped"，让 evaluator 链知道这不是场景质量问题；要么直接跳过 verification 返回 verify_forced_recovery: False 即可。
+应该：要么报告为 "status": "error" 或 "skipped"，让 evaluator 链知道这不是场景质量问题；要么直接跳过 verification 返回 `verification_result=None` 即可。
 
 问题 4：Reference image 选择的 token-overlap 兜底（容易误导 agent）
 
@@ -192,7 +192,7 @@ Lines 55-59
     confidence = 0.55
     if feedback_status == "pass":
         confidence = 0.9
-    elif feedback_status == "catastrophic":
+    elif feedback_status == "working":
         confidence = 0.4
 问题：这些数字没有任何实际意义——它们不来自 VLM 的概率输出，不来自任何统计分析，只是开发者随手设的魔法数字。downstream 代码如果真的依赖这个 confidence 做决策（虽然目前看起来并没有），会非常不可靠。
 
