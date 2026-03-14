@@ -103,6 +103,7 @@ def build_asset_creation_strategy_text(
     sam_reconstruct_ready: bool,
     undo_ready: bool,
     clear_scene_ready: bool,
+    fast_mode: bool = False,
 ) -> str:
     # Phase 0: Scene grounding
     lines: list[str] = [
@@ -126,15 +127,29 @@ def build_asset_creation_strategy_text(
     lines.extend(
         [
             "0.5. Automatic scene observation (system-managed):",
-            "   - After every scene mutation (import, generate, execute_blender_code, set_texture),",
-            "     5 scene-level cameras auto-update and render (4 corners + top-down bird view).",
-            "   - These cameras track the full scene bounding box - do NOT modify them manually.",
-            "   - If the scene has no explicit lights or HDRI, render tools may add temporary neutral",
-            "     verification lighting so geometry stays readable; those lights are not persisted/exported.",
-            "   - For object-level inspection, use camera_act() and camera_observe().",
-            "   - If object-level renders look unreliable (blank/black/repeatedly inconclusive),",
-            "     run observe_scene_global() to re-ground with scene-wide context.",
-            "   - After local refinement, ALWAYS re-render the target object before moving on.",
+            *(
+                [
+                    "   - Fast mode is ON for this request: automatic scene observation is skipped.",
+                    "   - You must proactively call get_scene_info() after meaningful edits to keep scene grounding fresh.",
+                    "   - For scene-wide visual checks, manually call observe_scene_global() when layout or scale may have shifted.",
+                    "   - For object-level inspection, use camera_act(), camera_observe(), and manual render tools more aggressively.",
+                    "   - Do not assume the system has fresh visual evidence unless you explicitly produced it.",
+                    "   - If a major scene edit lands, render before and after the next high-risk change when feasible.",
+                    "   - After local refinement, ALWAYS re-render the target object before moving on.",
+                ]
+                if fast_mode
+                else [
+                    "   - After every scene mutation (import, generate, execute_blender_code, set_texture),",
+                    "     5 scene-level cameras auto-update and render (4 corners + top-down bird view).",
+                    "   - These cameras track the full scene bounding box - do NOT modify them manually.",
+                    "   - If the scene has no explicit lights or HDRI, render tools may add temporary neutral",
+                    "     verification lighting so geometry stays readable; those lights are not persisted/exported.",
+                    "   - For object-level inspection, use camera_act() and camera_observe().",
+                    "   - If object-level renders look unreliable (blank/black/repeatedly inconclusive),",
+                    "     run observe_scene_global() to re-ground with scene-wide context.",
+                    "   - After local refinement, ALWAYS re-render the target object before moving on.",
+                ]
+            ),
             "",
         ]
     )
@@ -143,7 +158,11 @@ def build_asset_creation_strategy_text(
     lines.extend(
         [
             "1. Visual evidence before claims (anti-hallucination rule):",
-            "   - Review the automatic multi-view renders for global composition issues.",
+            (
+                "   - Review the latest scene-wide renders for global composition issues."
+                if fast_mode
+                else "   - Review the automatic multi-view renders for global composition issues."
+            ),
             "   - For targeted inspection around one object:",
             '       camera_act(action="focus", object_names=[...])',
             '       camera_act(action="move", direction="left/right/up/down")',
@@ -342,10 +361,22 @@ def build_asset_creation_strategy_text(
         [
             "",
             "5. Multimodal feedback loop (use throughout construction):",
-            "   - Scene-level verification runs automatically after every scene mutation.",
+            (
+                "   - Fast mode is ON for this request: automatic verification is skipped."
+                if fast_mode
+                else "   - Scene-level verification runs automatically after every scene mutation."
+            ),
             "   - Keep global-first cadence: global render/verification first, then object-level refinement.",
             "   - For object-level detail work, use camera_act/render_from_objects to inspect.",
             "   - If mismatch persists, call render_from_objects(..., mode=\"annotated\") to pinpoint bad objects/regions.",
+            *(
+                [
+                    "   - You must judge progress from get_scene_info(), manual renders, and explicit visual inspection.",
+                    "   - Before claiming completion, produce a fresh render yourself and reason from that evidence.",
+                ]
+                if fast_mode
+                else []
+            ),
             "   - If verification reports problems (wrong scale, bad placement, missing objects):",
             "       -> fix immediately, then re-render the affected object to confirm the fix.",
         ]
@@ -418,7 +449,10 @@ def build_asset_creation_strategy_text(
 
 def asset_creation_strategy_text_from_tools(
     available_tool_names: Iterable[str] | None,
+    *,
+    fast_mode: bool = False,
 ) -> str:
     return build_asset_creation_strategy_text(
-        **infer_asset_workflow_availability(available_tool_names)
+        **infer_asset_workflow_availability(available_tool_names),
+        fast_mode=fast_mode,
     )

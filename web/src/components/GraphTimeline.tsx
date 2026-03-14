@@ -10,6 +10,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
+function normalizeBooleanValue(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null
+}
+
 function normalizeTodoStatus(rawStatus: unknown): TodoItem['status'] {
   if (typeof rawStatus !== 'string') return 'pending'
   switch (rawStatus.trim().toLowerCase()) {
@@ -89,6 +93,10 @@ function summarizePatch(patch: Record<string, unknown> | undefined): string | nu
   if (typeof patch.workflow_topology === 'string' && patch.workflow_topology.trim()) {
     prioritizedEntries.push(['workflow_topology', patch.workflow_topology.trim()])
   }
+  const fastMode = normalizeBooleanValue(patch.fast_mode)
+  if (fastMode !== null) {
+    prioritizedEntries.push(['fast_mode', fastMode ? 'on' : 'off'])
+  }
   const todos = extractTodosFromPatch(patch)
   const todoSummary = summarizeTodoProgress(todos)
   if (todoSummary) {
@@ -127,6 +135,10 @@ export function GraphTimeline({ events, isStreaming = false }: GraphTimelineProp
     () => summarizeTodoProgress(latestTodos),
     [latestTodos]
   )
+  const latestSummary = useMemo(
+    () => summarizePatch(latestEvent?.state_patch),
+    [latestEvent]
+  )
 
   useEffect(() => {
     if (collapsed) return
@@ -164,8 +176,10 @@ export function GraphTimeline({ events, isStreaming = false }: GraphTimelineProp
                 <span className="graph-timeline-node graph-timeline-collapsed-node">
                   {latestEvent.node}
                 </span>
-                {latestTodoSummary && (
-                  <span className="graph-timeline-collapsed-meta">{latestTodoSummary}</span>
+                {(latestTodoSummary || latestSummary) && (
+                  <span className="graph-timeline-collapsed-meta">
+                    {latestTodoSummary || latestSummary}
+                  </span>
                 )}
               </div>
             </div>

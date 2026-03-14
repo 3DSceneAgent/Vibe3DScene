@@ -36,6 +36,7 @@ export type Thread = {
   createdAt: number
   messages: Message[]
   mcpToolEnabled?: Record<string, boolean>
+  fastMode?: boolean
   vlmProvider?: string
   vlmModel?: string
   vlmLocked?: boolean

@@ -115,6 +115,26 @@ def test_verify_node_skips_when_render_already_verified(monkeypatch):
     assert result["verification_result"] is None
 
 
+def test_verify_node_skips_in_fast_mode(monkeypatch):
+    def fail_verify_render_with_references(**_kwargs):
+        raise AssertionError("verify_render_with_references should not be called in fast mode")
+
+    monkeypatch.setattr(
+        "scene_agent.agent.nodes.verification.verify_render_with_references",
+        fail_verify_render_with_references,
+    )
+
+    result = verify_node(
+        {
+            "messages": [HumanMessage(content="Move the chair closer to the desk.")],
+            "last_render_path": "/tmp/render.png",
+            "fast_mode": True,
+        }
+    )
+
+    assert result == {"verification_result": None}
+
+
 def test_verify_node_uses_vlm_result_even_with_large_scene_bbox(monkeypatch):
     monkeypatch.setattr(
         "scene_agent.agent.nodes.verification.verify_render_with_references",

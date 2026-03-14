@@ -101,7 +101,11 @@ Execution behavior:
 - If no safe/useful tool action is needed, explain clearly and stop.
 """
 
-def get_full_system_prompt(available_tool_names: Iterable[str] | None = None) -> str:
+def get_full_system_prompt(
+    available_tool_names: Iterable[str] | None = None,
+    *,
+    fast_mode: bool = False,
+) -> str:
     """
     Get the complete system prompt including all strategies.
 
@@ -111,5 +115,19 @@ def get_full_system_prompt(available_tool_names: Iterable[str] | None = None) ->
     Returns:
         Combined system prompt string
     """
-    dynamic_strategy = asset_creation_strategy_text_from_tools(available_tool_names)
+    dynamic_strategy = asset_creation_strategy_text_from_tools(
+        available_tool_names,
+        fast_mode=fast_mode,
+    )
+    request_override = ""
+    if fast_mode:
+        request_override = """
+
+Current request override:
+- Fast mode is enabled for this request.
+- Automatic scene observation and automatic verification mentioned elsewhere are disabled for this request.
+- You must rely on get_scene_info(), observe_scene_global(), camera tools, and manual renders to gather evidence.
+""".strip()
+    if request_override:
+        return f"{SYSTEM_PROMPT}\n\n{request_override}\n\n{dynamic_strategy}"
     return f"{SYSTEM_PROMPT}\n\n{dynamic_strategy}"

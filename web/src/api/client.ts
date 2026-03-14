@@ -145,6 +145,7 @@ type StreamChatArgs = {
   message: string
   threadId: string
   enabledMcpTools?: string[]
+  fastMode?: boolean
   attachedImageIds?: string[]
   vlmProvider?: string
   vlmModel?: string
@@ -235,6 +236,7 @@ export async function streamChat({
   message,
   threadId,
   enabledMcpTools,
+  fastMode,
   attachedImageIds,
   vlmProvider,
   vlmModel,
@@ -244,6 +246,9 @@ export async function streamChat({
   const payload: Record<string, unknown> = { message, thread_id: threadId }
   if (enabledMcpTools) {
     payload.enabled_mcp_tools = enabledMcpTools
+  }
+  if (fastMode === true) {
+    payload.fast_mode = true
   }
   if (attachedImageIds && attachedImageIds.length > 0) {
     payload.attached_image_ids = attachedImageIds
@@ -508,12 +513,20 @@ export async function deleteThread(
 export async function getHealth(
   baseUrl: string,
   signal?: AbortSignal
-): Promise<{ status: string; blender_mode?: 'headless' | 'local-client' }> {
+): Promise<{
+  status: string
+  blender_mode?: 'headless' | 'local-client'
+  features?: { fast_mode?: boolean }
+}> {
   const response = await apiFetch(`${baseUrl}/health`, { signal })
   if (!response.ok) {
     throw await buildHttpError(response, `Healthcheck failed (${response.status})`)
   }
-  return (await response.json()) as { status: string; blender_mode?: 'headless' | 'local-client' }
+  return (await response.json()) as {
+    status: string
+    blender_mode?: 'headless' | 'local-client'
+    features?: { fast_mode?: boolean }
+  }
 }
 
 

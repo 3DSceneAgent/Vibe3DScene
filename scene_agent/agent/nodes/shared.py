@@ -853,7 +853,14 @@ def invoke_role_agent(
         role=role,
     )
 
-    messages = [SystemMessage(content=get_full_system_prompt(effective_tool_names))]
+    messages = [
+        SystemMessage(
+            content=get_full_system_prompt(
+                effective_tool_names,
+                fast_mode=state.get("fast_mode") is True,
+            )
+        )
+    ]
     if role == ROLE_BUILDER:
         messages.append(
             SystemMessage(

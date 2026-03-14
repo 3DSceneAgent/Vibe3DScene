@@ -47,6 +47,10 @@ def _sanitize_task_id(raw_task_id: Any) -> str:
     return "request"
 
 
+def _coerce_fast_mode(raw_value: Any) -> bool:
+    return raw_value is True
+
+
 def initialize_request_node(state: AgentState) -> dict[str, Any]:
     """Initialize request-scoped workflow counters and topology preferences."""
     unfinished_todos = unfinished_todo_count(state)
@@ -84,6 +88,9 @@ def initialize_request_node(state: AgentState) -> dict[str, Any]:
     if not isinstance(active_todo_id, str) or not active_todo_id.strip():
         active_todo_id = None
 
+    requested_fast_mode = _coerce_fast_mode(state.get("fast_mode"))
+    resolved_fast_mode = requested_fast_mode and workflow_topology != TOPOLOGY_DUAL
+
     return {
         "task_mode": MODE_DIRECT,
         "task_intent": "continue_existing_plan" if unfinished_todos > 0 else "direct_request",
@@ -93,6 +100,7 @@ def initialize_request_node(state: AgentState) -> dict[str, Any]:
         "memory_profile_request": memory_profile_request,
         "workflow_topology": workflow_topology,
         "memory_profile": memory_profile,
+        "fast_mode": resolved_fast_mode,
         "active_role": ROLE_BUILDER if workflow_topology == TOPOLOGY_DUAL else ROLE_GENERAL,
         "request_agent_turns": 0,
         "request_tool_batches": 0,

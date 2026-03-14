@@ -75,6 +75,22 @@ def test_get_mcp_tools_endpoint_returns_loaded_tools(monkeypatch):
     }
 
 
+def test_health_endpoint_reports_fast_mode_feature(monkeypatch):
+    class DummyCoordinator:
+        def redis_health(self):
+            return True, 1.5
+
+    monkeypatch.setattr(api_routes_system, "get_session_coordinator", lambda: DummyCoordinator())
+    monkeypatch.setenv("BLENDER_MODE", "headless")
+    reload_settings()
+
+    with TestClient(api_module.app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["features"] == {"fast_mode": True}
+
+
 def test_extract_available_tool_hints_filters_invalid_entries():
     class DummyAgent:
         _available_tool_hints = {
@@ -155,12 +171,14 @@ def test_chat_endpoint_passes_enabled_tool_names(monkeypatch):
                 "message": "hello",
                 "thread_id": thread_id,
                 "enabled_mcp_tools": ["camera_observe", "invalid_tool"],
+                "fast_mode": True,
             },
         )
 
     assert response.status_code == 200
     assert captured_payloads
     assert captured_payloads[0]["enabled_tool_names"] == ["camera_observe"]
+    assert captured_payloads[0]["fast_mode"] is True
 
 
 def test_chat_endpoint_serializes_list_content_to_string(monkeypatch):
@@ -233,6 +251,7 @@ def test_chat_stream_passes_enabled_tool_names(monkeypatch):
                 "message": "hello",
                 "thread_id": thread_id,
                 "enabled_mcp_tools": ["get_scene_info", "missing_tool"],
+                "fast_mode": True,
             },
         ) as response:
             assert response.status_code == 200
@@ -241,3 +260,4 @@ def test_chat_stream_passes_enabled_tool_names(monkeypatch):
 
     assert captured_payloads
     assert captured_payloads[0]["enabled_tool_names"] == ["get_scene_info"]
+    assert captured_payloads[0]["fast_mode"] is True

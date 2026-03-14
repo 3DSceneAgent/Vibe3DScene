@@ -86,6 +86,22 @@ def test_strategy_includes_undo_guidance_when_tool_available():
     assert "call undo_last_snapshot() immediately." in prompt
 
 
+def test_get_full_system_prompt_includes_fast_mode_override():
+    prompt = get_full_system_prompt(
+        [
+            "get_scene_info",
+            "observe_scene_global",
+            "render_from_objects",
+        ],
+        fast_mode=True,
+    )
+
+    assert "Current request override:" in prompt
+    assert "Fast mode is enabled for this request." in prompt
+    assert "automatic verification is skipped" in prompt
+    assert "automatic scene observation is skipped" in prompt
+
+
 def test_strategy_omits_undo_guidance_when_tool_unavailable():
     prompt = get_full_system_prompt(
         [

@@ -476,6 +476,7 @@ async def _produce_stream_events(
                 "task_id": request.task_id,
                 "workflow_topology_request": request.workflow_topology,
                 "memory_profile_request": request.memory_profile,
+                "fast_mode": request.fast_mode,
             },
             config=config,
             stream_mode=["messages", "values", "updates"],
@@ -813,6 +814,7 @@ async def chat(request: ChatRequest, request_http: Request, response: Response):
                 "task_id": request.task_id,
                 "workflow_topology_request": request.workflow_topology,
                 "memory_profile_request": request.memory_profile,
+                "fast_mode": request.fast_mode,
             },
             config=config
         )

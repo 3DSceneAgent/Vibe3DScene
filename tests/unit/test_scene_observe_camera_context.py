@@ -342,6 +342,28 @@ def test_scene_observe_node_invalidates_render_path_on_failure(monkeypatch):
     assert result == {"last_render_path": None}
 
 
+def test_scene_observe_node_skips_in_fast_mode(monkeypatch):
+    def fail_update_scene_cameras(*args, **kwargs):
+        raise AssertionError("update_scene_cameras should not run in fast mode")
+
+    monkeypatch.setattr(
+        "mcp_server.tools.multimodal.camera_tools.update_scene_cameras",
+        fail_update_scene_cameras,
+    )
+
+    state: AgentState = {
+        "thread_id": "test-thread",
+        "last_tool_batch_names": ["execute_blender_code"],
+        "enabled_tool_names": ["camera_observe", "render_from_camera"],
+        "fast_mode": True,
+        "messages": [],
+    }
+
+    result = scene_observe_node(state)
+
+    assert result == {}
+
+
 def test_scene_observe_node_invalidates_render_path_when_no_images(monkeypatch):
     """
     Regression test: when scene_observe_node gets success=True but no

@@ -175,6 +175,9 @@ def scene_observe_node(state: AgentState) -> Dict[str, Any]:
     camera work the node is a no-op so that the agent's own render flows
     directly to verify.
     """
+    if state.get("fast_mode") is True:
+        return {}
+
     latest_tools = state.get("last_tool_batch_names")
     if not isinstance(latest_tools, list):
         return {}

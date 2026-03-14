@@ -40,6 +40,31 @@ def test_initialize_request_node_resolves_dual_topology_request():
     assert result["memory_profile"] == "shared_plus_role_private"
 
 
+def test_initialize_request_node_preserves_fast_mode_for_single_agent():
+    result = initialize_request_node(
+        {
+            "messages": [HumanMessage(content="Build a minimal scene.")],
+            "fast_mode": True,
+        }
+    )
+
+    assert result["workflow_topology"] == "single_agent"
+    assert result["fast_mode"] is True
+
+
+def test_initialize_request_node_disables_fast_mode_for_dual_agent():
+    result = initialize_request_node(
+        {
+            "messages": [HumanMessage(content="Build a full scene.")],
+            "workflow_topology_request": "dual_agent",
+            "fast_mode": True,
+        }
+    )
+
+    assert result["workflow_topology"] == "dual_agent"
+    assert result["fast_mode"] is False
+
+
 def test_router_node_forces_plan_when_unfinished_todos_exist():
     result = router_node(
         {

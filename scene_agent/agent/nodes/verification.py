@@ -28,6 +28,9 @@ def verify_node(
     model: str | None = None,
 ) -> dict[str, Any]:
     """Verify latest render and emit canonical `verification_result` contract."""
+    if state.get("fast_mode") is True:
+        return {"verification_result": None}
+
     render_path = state.get("last_render_path")
     if not render_path:
         return {"verification_result": None}

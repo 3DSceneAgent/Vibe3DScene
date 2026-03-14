@@ -106,6 +106,12 @@ function formatStreamFailureMessage(error: unknown): string {
 }
 
 function formatThreadCreateError(error: unknown): string {
+  if (
+    (error instanceof DOMException && error.name === 'AbortError') ||
+    (error instanceof Error && error.name === 'AbortError')
+  ) {
+    return 'Unable to create a new session because the backend took too long to claim a headless runtime after startup.'
+  }
   if (error instanceof ApiRequestError) {
     if (error.reason === 'process_capacity_exhausted') {
       const active = Number(error.in_use?.active_headless_sessions)
@@ -143,7 +149,8 @@ function formatThreadCreateError(error: unknown): string {
 
 function App() {
   const REQUEST_TIMEOUT_MS = 35000
-  const MCP_REQUEST_TIMEOUT_MS = 10000
+  // Claiming a headless runtime can cold-start Blender + MCP on the first request.
+  const MCP_REQUEST_TIMEOUT_MS = 30000
   const VLM_REQUEST_TIMEOUT_MS = 10000
   const MAX_EXAMPLE_PROMPTS = 10
   const [threads, setThreads] = useState<Thread[]>(() => loadThreads())
@@ -157,6 +164,7 @@ function App() {
   const [isStorageHydrated, setIsStorageHydrated] = useState(false)
   const [backendStatus, setBackendStatus] = useState<'online' | 'offline' | 'checking'>('checking')
   const [backendMode, setBackendMode] = useState<'headless' | 'local-client' | null>(null)
+  const [fastModeAvailable, setFastModeAvailable] = useState(false)
   const [examplePrompts, setExamplePrompts] = useState<string[]>([])
   const [mcpToolsByThread, setMcpToolsByThread] = useState<Record<string, string[]>>({})
   const [mcpToolHintsByThread, setMcpToolHintsByThread] = useState<Record<string, Record<string, string>>>({})
@@ -408,6 +416,7 @@ function App() {
         if (isActive) {
           setBackendStatus('offline')
           setBackendMode(null)
+          setFastModeAvailable(false)
         }
         return
       }
@@ -422,11 +431,13 @@ function App() {
         if (isActive) {
           setBackendStatus('online')
           setBackendMode(health.blender_mode ?? null)
+          setFastModeAvailable(health.features?.fast_mode === true)
         }
       } catch {
         if (isActive) {
           setBackendStatus('offline')
           setBackendMode(null)
+          setFastModeAvailable(false)
         }
       } finally {
         window.clearTimeout(timeoutId)
@@ -661,6 +672,7 @@ function App() {
         createdAt: Date.now(),
         messages: [],
         mcpToolEnabled: {},
+        fastMode: false,
         vlmProvider: initialProvider,
         vlmModel: initialModel,
         vlmLocked: false,
@@ -813,6 +825,17 @@ function App() {
           ...(thread.mcpToolEnabled ?? {}),
           [toolName]: enabled
         }
+      }))
+    },
+    [activeThreadId, updateThread]
+  )
+
+  const handleFastModeToggle = useCallback(
+    (enabled: boolean) => {
+      if (!activeThreadId) return
+      updateThread(activeThreadId, (thread) => ({
+        ...thread,
+        fastMode: enabled
       }))
     },
     [activeThreadId, updateThread]
@@ -974,21 +997,26 @@ function App() {
       }
     }
 
+    let resolvedFastModeAvailable = fastModeAvailable
     try {
       let resolvedBackendStatus = backendStatus
       let resolvedBackendMode = backendMode
-      if (resolvedBackendStatus === 'checking' && settings.backendUrl) {
+      if ((resolvedBackendStatus === 'checking' || !resolvedFastModeAvailable) && settings.backendUrl) {
         try {
           const health = await getHealth(settings.backendUrl)
           setBackendStatus('online')
           setBackendMode(health.blender_mode ?? null)
+          setFastModeAvailable(health.features?.fast_mode === true)
           resolvedBackendStatus = 'online'
           resolvedBackendMode = health.blender_mode ?? null
+          resolvedFastModeAvailable = health.features?.fast_mode === true
         } catch {
           setBackendStatus('offline')
           setBackendMode(null)
+          setFastModeAvailable(false)
           resolvedBackendStatus = 'offline'
           resolvedBackendMode = null
+          resolvedFastModeAvailable = false
         }
       }
 
@@ -1084,6 +1112,7 @@ function App() {
     const enabledMcpTools = hasMcpToolSnapshot
       ? availableMcpTools.filter((toolName) => activeThread.mcpToolEnabled?.[toolName] !== false)
       : undefined
+    const requestedFastMode = Boolean(resolvedFastModeAvailable && activeThread.fastMode)
 
     if (streamAbortRef.current) {
       streamAbortRef.current.abort()
@@ -1383,6 +1412,7 @@ function App() {
         message: text,
         threadId,
         enabledMcpTools,
+        fastMode: requestedFastMode,
         attachedImageIds,
         vlmProvider: selectedProvider,
         vlmModel: selectedModel,
@@ -1805,10 +1835,13 @@ function App() {
                   vlmProviders={vlmProviders}
                   vlmProvider={activeThread.vlmProvider ?? vlmDefaultProvider}
                   vlmModel={activeThread.vlmModel ?? vlmDefaultModel}
+                  fastMode={Boolean(activeThread.fastMode)}
+                  fastModeAvailable={fastModeAvailable}
                   vlmLoading={vlmLoadingThreadId === activeThread.id}
                   vlmError={vlmErrorByThread[activeThread.id] ?? null}
                   vlmLocked={Boolean(activeThread.vlmLocked)}
                   onVlmSelectionChange={handleVlmSelectionChange}
+                  onFastModeToggle={handleFastModeToggle}
                   graphEvents={activeThread.graphEvents ?? []}
                   todos={activeThread.todos ?? []}
                   runtimeClaimHint={runtimeClaimHint}

@@ -23,10 +23,13 @@ type ChatTabProps = {
   vlmProviders?: VlmProviderOption[]
   vlmProvider?: string
   vlmModel?: string
+  fastMode?: boolean
+  fastModeAvailable?: boolean
   vlmLoading?: boolean
   vlmError?: string | null
   vlmLocked?: boolean
   onVlmSelectionChange?: (provider: string, model: string) => void
+  onFastModeToggle?: (enabled: boolean) => void
   graphEvents?: GraphNodeStream[]
   todos?: TodoItem[]
   runtimeClaimHint?: string | null
@@ -49,6 +52,10 @@ function normalizeWorkflowValue(value: unknown): string | null {
   return normalized || null
 }
 
+function normalizeBooleanValue(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null
+}
+
 export function ChatTab({
   thread,
   isStreaming,
@@ -66,10 +73,13 @@ export function ChatTab({
   vlmProviders = [],
   vlmProvider,
   vlmModel,
+  fastMode = false,
+  fastModeAvailable = false,
   vlmLoading = false,
   vlmError = null,
   vlmLocked = false,
   onVlmSelectionChange,
+  onFastModeToggle,
   graphEvents = [],
   todos = [],
   runtimeClaimHint = null
@@ -95,6 +105,7 @@ export function ChatTab({
   const workflowBadgeLabel = (() => {
     let taskMode: string | null = null
     let topology: string | null = null
+    let resolvedFastMode: boolean | null = null
 
     for (let index = graphEvents.length - 1; index >= 0; index -= 1) {
       const patchRaw = graphEvents[index]?.state_patch
@@ -108,15 +119,25 @@ export function ChatTab({
       if (!topology) {
         topology = normalizeWorkflowValue(patch.workflow_topology)
       }
-      if (taskMode && topology) {
+      if (resolvedFastMode === null) {
+        resolvedFastMode = normalizeBooleanValue(patch.fast_mode)
+      }
+      if (taskMode && topology && resolvedFastMode !== null) {
         break
       }
     }
 
+    const effectiveFastMode = resolvedFastMode ?? Boolean(fastMode)
     if (!taskMode && !topology) {
-      return 'Workflow: pending'
+      return {
+        workflow: 'Workflow: pending',
+        fastMode: `Fast mode: ${effectiveFastMode ? 'on' : 'off'}`
+      }
     }
-    return `Workflow: ${taskMode ?? 'unknown'} / ${topology ?? 'unknown'}`
+    return {
+      workflow: `Workflow: ${taskMode ?? 'unknown'} / ${topology ?? 'unknown'}`,
+      fastMode: `Fast mode: ${effectiveFastMode ? 'on' : 'off'}`
+    }
   })()
   const activeTodoId = (() => {
     for (let index = graphEvents.length - 1; index >= 0; index -= 1) {
@@ -150,8 +171,13 @@ export function ChatTab({
             {streamStatus === 'streaming' ? 'Agent is building the scene' : 'Agent ready'}
           </span>
         </div>
-        <div className="chat-workflow-badge" aria-live="polite">
-          {workflowBadgeLabel}
+        <div className="chat-badge-group" aria-live="polite">
+          <div className="chat-workflow-badge">{workflowBadgeLabel.workflow}</div>
+          {(fastModeAvailable || Boolean(fastMode)) && (
+            <div className="chat-workflow-badge chat-fastmode-badge">
+              {workflowBadgeLabel.fastMode}
+            </div>
+          )}
         </div>
       </div>
       <GraphTimeline events={graphEvents} isStreaming={streamStatus === 'streaming'} />
@@ -185,6 +211,9 @@ export function ChatTab({
           if (!option) return
           onVlmSelectionChange?.(option.provider, option.model)
         }}
+        fastMode={fastMode}
+        fastModeAvailable={fastModeAvailable}
+        onFastModeToggle={onFastModeToggle}
         modelLoading={vlmLoading}
         modelError={vlmError}
         modelLocked={selectorDisabled}

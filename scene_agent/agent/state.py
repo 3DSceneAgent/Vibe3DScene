@@ -131,6 +131,7 @@ class AgentState(TypedDict):
         memory_profile_request: Optional request-level memory-profile hint
         workflow_topology: Effective workflow topology for this request
         memory_profile: Effective memory profile for this request
+        fast_mode: Whether automatic scene observe and verification are skipped for this request
         active_role: Active role in current request (`general/builder/verifier`)
         builder_turn_count: Builder turns executed in this request run
         verifier_turn_count: Verifier turns executed in this request run
@@ -187,6 +188,7 @@ class AgentState(TypedDict):
     memory_profile_request: NotRequired[str | None]
     workflow_topology: NotRequired[WorkflowTopology]
     memory_profile: NotRequired[MemoryProfile]
+    fast_mode: NotRequired[bool]
     active_role: NotRequired[AgentRole]
     transition_next: NotRequired[str]
 

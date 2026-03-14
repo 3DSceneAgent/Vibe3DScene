@@ -20,6 +20,9 @@ type ChatComposerProps = {
   modelOptions?: ModelOption[]
   selectedModelValue?: string
   onModelSelectionChange?: (value: string) => void
+  fastMode?: boolean
+  onFastModeToggle?: (enabled: boolean) => void
+  fastModeAvailable?: boolean
   modelLoading?: boolean
   modelError?: string | null
   modelLocked?: boolean
@@ -43,6 +46,9 @@ export function ChatComposer({
   modelOptions = [],
   selectedModelValue = '',
   onModelSelectionChange,
+  fastMode = false,
+  onFastModeToggle,
+  fastModeAvailable = false,
   modelLoading = false,
   modelError = null,
   modelLocked = false
@@ -167,6 +173,7 @@ export function ChatComposer({
   const hasPendingImages = pendingImages.length > 0
   const canSend = input.trim().length > 0
   const enabledToolCount = mcpTools.filter((toolName) => mcpToolEnabled[toolName] !== false).length
+  const fastModeDisabled = Boolean(disabled)
 
   const shortenFilename = (filename: string) => {
     const stem = filename.replace(/\.[^/.]+$/, '')
@@ -175,7 +182,7 @@ export function ChatComposer({
 
   return (
     <div className="composer-shell">
-      <div className="composer-top-row">
+      <div className={`composer-top-row ${fastModeAvailable ? 'has-fast-mode' : ''}`}>
         <div className="composer-model-panel">
           <select
             id="composer-model-select"
@@ -245,6 +252,25 @@ export function ChatComposer({
             </div>
           )}
         </div>
+        {fastModeAvailable && (
+          <div className={`composer-fast-mode-panel ${fastModeDisabled ? 'is-disabled' : ''}`}>
+            <div className="composer-fast-mode-copy">
+              <div className="composer-fast-mode-title">Fast mode</div>
+              <div className="composer-fast-mode-meta">
+                Skip auto observe and verify. Faster, lower fidelity.
+              </div>
+            </div>
+            <label className="toggle-switch" aria-label="Toggle fast mode">
+              <input
+                type="checkbox"
+                checked={fastMode}
+                onChange={(event) => onFastModeToggle?.(event.target.checked)}
+                disabled={fastModeDisabled}
+              />
+              <span className="toggle-slider" />
+            </label>
+          </div>
+        )}
       </div>
       {(modelLoading || modelLocked || modelError) && (
         <div className="composer-model-meta muted">

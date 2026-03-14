@@ -51,6 +51,7 @@ class UpdatesAgent:
                 },
                 "todo_check": {
                     "todo_check": {"status": "continue", "reason": "pending_todos"},
+                    "fast_mode": True,
                 },
             },
         )
@@ -361,6 +362,10 @@ def test_chat_stream_emits_graph_node_events_and_update_messages(monkeypatch):
     node_names = [payload.get("graph_node", {}).get("node") for payload in graph_node_payloads]
     assert "verify" in node_names
     assert "todo_check" in node_names
+    assert any(
+        payload.get("graph_node", {}).get("state_patch", {}).get("fast_mode") is True
+        for payload in graph_node_payloads
+    )
 
     tool_payloads = [
         payload for payload in payloads if "messages" in payload and payload["messages"][0].get("type") == "tool"

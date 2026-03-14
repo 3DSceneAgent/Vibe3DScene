@@ -1387,6 +1387,7 @@ class ChatRequest(BaseModel):
     task_id: str | None = None
     workflow_topology: str | None = None
     memory_profile: str | None = None
+    fast_mode: bool | None = None
 
 
 class ChatResponse(BaseModel):

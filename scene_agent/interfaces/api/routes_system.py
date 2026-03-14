@@ -72,6 +72,7 @@ async def healthcheck():
         "status": "ok",
         "timestamp": time.time(),
         "blender_mode": settings.blender_mode,
+        "features": {"fast_mode": True},
         "worker_id": settings.api_worker_id,
         "redis_ok": redis_ok,
         "redis_latency_ms": redis_latency_ms,
