@@ -13,3 +13,6 @@
 [submodule "tool_servers/SAMServer"]
 	path = tool_servers/SAMServer
 	url = git@github.com:3DSceneAgent/SAMServer.git
+[submodule "tool_servers/SceneSmithRetrieval"]
+	path = tool_servers/SceneSmithRetrieval
+	url = https://github.com/FishWoWater/SceneSmithRetrieval
