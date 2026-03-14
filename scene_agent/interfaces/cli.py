@@ -116,7 +116,10 @@ async def run_cli():
     except Exception as e:
         console.print(f"[red]✗ Failed to initialize agent: {str(e)}[/red]")
         console.print("\n[yellow]Make sure:")
-        console.print("1. You have a .env file with VLM_API_KEY set")
+        console.print(
+            "1. You have a .env file with the selected provider key set "
+            "(for example GEMINI_API_KEY)"
+        )
         console.print("2. The Blender MCP server is running (localhost:9876)[/yellow]")
         return
     

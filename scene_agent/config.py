@@ -19,10 +19,6 @@ class Settings(BaseSettings):
         default="gemini",
         description="VLM provider: openai, anthropic, gemini, or qwen"
     )
-    vlm_api_key: str | None = Field(
-        default=None,
-        description="Fallback API key for VLM providers (used if provider-specific key is not set)"
-    )
     vlm_model: str | None = Field(
         default=None,
         description="Optional model override (uses provider default if not set)"
@@ -416,7 +412,10 @@ class Settings(BaseSettings):
             "gemini": self.gemini_api_key,
             "qwen": self.qwen_api_key,
         }
-        return provider_keys.get(provider_lower) or self.vlm_api_key
+        value = provider_keys.get(provider_lower)
+        if isinstance(value, str):
+            value = value.strip()
+        return value or None
 
     def get_reference_image_helper_model(self, provider: str) -> str:
         provider_lower = provider.lower()

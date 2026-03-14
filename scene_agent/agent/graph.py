@@ -503,7 +503,8 @@ async def create_agent_graph(
     if not selected_api_key:
         raise ValueError(
             f"No API key configured for provider '{selected_provider}'. "
-            "Set provider-specific API key or VLM_API_KEY."
+            f"Set {selected_provider.upper()}_API_KEY. "
+            "VLM_API_KEY is no longer used."
         )
     vlm_provider = get_vlm_provider(
         provider_name=selected_provider,
@@ -687,4 +688,3 @@ def create_agent_graph_sync(
             model=model,
         )
     )
-

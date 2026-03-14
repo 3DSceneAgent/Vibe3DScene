@@ -10,7 +10,6 @@ def test_settings_accept_qwen_provider_and_key(monkeypatch):
     monkeypatch.setenv("VLM_PROVIDER", "qwen")
     monkeypatch.setenv("VLM_MODEL", "qwen-vl-max-latest")
     monkeypatch.setenv("QWEN_API_KEY", "qwen-key")
-    monkeypatch.setenv("VLM_API_KEY", "fallback-key")
     reload_settings()
 
     settings = get_settings()

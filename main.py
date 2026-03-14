@@ -29,7 +29,7 @@ Examples:
   python main.py --mode api --host 0.0.0.0 --port 8080
 
 Requirements:
-  - Create a .env file with VLM_API_KEY set
+  - Create a .env file with the selected provider API key set
   - Start the Blender MCP server (localhost:6274)
   - Optionally: Start 3D asset retrieval API (localhost:8001)
         """
@@ -68,7 +68,7 @@ Requirements:
     import os
     if not os.path.exists(".env"):
         print("⚠️  Warning: .env file not found!")
-        print("   Create a .env file with VLM_API_KEY set.")
+        print("   Create a .env file with the selected provider API key set.")
         print("   See .env.example for reference.")
         print()
     

@@ -107,7 +107,7 @@ Minimum required environment variables:
 | Variable | Description |
 | --- | --- |
 | `VLM_PROVIDER` | Default model provider (`openai`, `anthropic`, `gemini`, `qwen`). |
-| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `QWEN_API_KEY` | Provider API key. You can also use `VLM_API_KEY` as fallback. |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `QWEN_API_KEY` | Provider-specific API key. |
 | `BLENDER_MODE` | `local-client` or `headless`. |
 | `API_PORT` | API bind port (default `8000`). |
 
@@ -332,11 +332,10 @@ npm run lint
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `VLM_PROVIDER` | `GEMINI` in template | Default provider for new threads (`openai`, `anthropic`, `gemini`). |
+| `VLM_PROVIDER` | `GEMINI` in template | Default provider for new threads (`openai`, `anthropic`, `gemini`, `qwen`). |
 | `VLM_MODEL` | `gpt-4o` | Default model override for selected provider. |
-| `VLM_API_KEY` | empty | Fallback key when provider-specific key is not set. |
-| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` | empty | Provider-specific API keys. |
-| `VLM_OPENAI_MODELS` / `VLM_ANTHROPIC_MODELS` / `VLM_GEMINI_MODELS` | comma-separated | Exposed provider model catalogs. |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `QWEN_API_KEY` | empty | Provider-specific API keys. |
+| `VLM_OPENAI_MODELS` / `VLM_ANTHROPIC_MODELS` / `VLM_GEMINI_MODELS` / `VLM_QWEN_MODELS` | comma-separated | Exposed provider model catalogs. |
 
 ### 6.2 Backend and Session Runtime
 

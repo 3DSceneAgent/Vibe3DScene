@@ -15,7 +15,7 @@ def _reset_vlm_runtime_state() -> None:
 def test_get_vlm_models_endpoint_returns_catalog_and_thread_selection(monkeypatch):
     monkeypatch.setenv("BLENDER_MODE", "headless")
     monkeypatch.setenv("VLM_PROVIDER", "openai")
-    monkeypatch.setenv("VLM_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     reload_settings()
     _reset_vlm_runtime_state()
 
@@ -35,8 +35,7 @@ def test_get_vlm_models_endpoint_returns_catalog_and_thread_selection(monkeypatc
 def test_chat_allows_model_change_after_session_starts(monkeypatch):
     monkeypatch.setenv("BLENDER_MODE", "headless")
     monkeypatch.setenv("VLM_PROVIDER", "openai")
-    monkeypatch.setenv("VLM_API_KEY", "test-key")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     reload_settings()

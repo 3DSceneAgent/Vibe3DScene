@@ -17,7 +17,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scene_agent.env import load_project_dotenv
 
-load_project_dotenv()
+# Keep repository defaults from `.env`, but do not overwrite per-session
+# ports/hosts injected by the headless API when it spawns MCP subprocesses.
+load_project_dotenv(override=False)
 
 from mcp_server import runtime
 from mcp_server.tool_registry import register_mcp_tools

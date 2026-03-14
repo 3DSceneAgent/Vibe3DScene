@@ -66,7 +66,7 @@ curl http://localhost:8000/
 
 If services fail to start:
 
-1. Check that you have a `.env` file with `VLM_API_KEY` set
+1. Check that you have a `.env` file with the selected provider API key set
 2. Ensure no other processes are using the same ports
 3. Check the MCP server log at `/tmp/mcp_server.log` (bash script only)
 4. Verify all dependencies are installed: `pip install -r requirements.txt`

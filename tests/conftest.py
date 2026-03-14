@@ -11,7 +11,10 @@ if PROJECT_ROOT not in sys.path:
 
 @pytest.fixture(autouse=True)
 def _set_test_env():
-    os.environ.setdefault("VLM_API_KEY", "test-key")
+    os.environ.setdefault("OPENAI_API_KEY", "test-key")
+    os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
+    os.environ.setdefault("GEMINI_API_KEY", "test-key")
+    os.environ.setdefault("QWEN_API_KEY", "test-key")
     os.environ.setdefault("ENABLE_RODIN", "false")
     os.environ.setdefault("RODIN_API_KEY", "")
     yield

@@ -7,8 +7,12 @@ from dotenv import load_dotenv
 _DOTENV_LOADED = False
 
 
-def load_project_dotenv(*, override: bool = False) -> bool:
-    """Load project-level .env into process environment."""
+def load_project_dotenv(*, override: bool = True) -> bool:
+    """Load project-level .env into process environment.
+
+    By default, repository-local `.env` values override inherited shell
+    variables so project configuration is deterministic across terminals/IDEs.
+    """
     global _DOTENV_LOADED
     if _DOTENV_LOADED and not override:
         return False

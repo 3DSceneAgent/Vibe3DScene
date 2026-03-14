@@ -425,7 +425,8 @@ def _resolve_vlm_selection(
             status_code=400,
             detail=(
                 f"No API key configured for provider '{selected_provider}'. "
-                f"Set {selected_provider.upper()}_API_KEY or VLM_API_KEY."
+                f"Set {selected_provider.upper()}_API_KEY. "
+                "VLM_API_KEY is no longer used."
             ),
         )
 
