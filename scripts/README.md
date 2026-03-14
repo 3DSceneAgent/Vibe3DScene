@@ -2,6 +2,19 @@
 
 This directory contains scripts for managing the 3D Scene Agent services.
 
+## Asset Provider Reachability
+
+Use the standalone reachability checker to verify Sketchfab and PolyHaven access before debugging higher-level retrieval flows:
+
+```bash
+python scripts/check_asset_provider_reachability.py
+python scripts/check_asset_provider_reachability.py --only sketchfab --timeout 5
+python scripts/check_asset_provider_reachability.py --http-retries 5 --retry-delay 0.5
+SKETCHFAB_API_KEY=your_key python scripts/check_asset_provider_reachability.py --sketchfab-model-uid your_model_uid
+```
+
+The script checks DNS, TCP, and HTTP reachability for the relevant website and API endpoints, then returns a non-zero exit code if any required probe fails.
+
 ## Starting Services
 
 You can use either the bash or Python script to start both the MCP server and API server simultaneously:
