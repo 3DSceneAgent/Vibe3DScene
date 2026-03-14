@@ -166,6 +166,24 @@ def test_strategy_includes_blend_import_guidance_for_infinigen():
     assert "Do NOT assume collection name equals asset_type" in prompt
 
 
+def test_strategy_includes_scenesmith_specific_workflows_when_tools_are_available():
+    prompt = get_full_system_prompt(
+        [
+            "search_hssd_assets",
+            "import_hssd_asset",
+            "search_ambientcg_materials",
+            "apply_ambientcg_material",
+        ]
+    )
+
+    assert "SceneSmith HSSD Retrieval" in prompt
+    assert "search_hssd_assets(query=..., object_type=..., top_k=..., desired_dimensions_m=...)" in prompt
+    assert "SceneSmith AmbientCG Materials" in prompt
+    assert "apply_ambientcg_material(object_name=..., color_url=..., normal_url=..., roughness_url=...)" in prompt
+    assert "Use the texture URLs returned by search_ambientcg_materials() directly." in prompt
+    assert "Do NOT manually download the package zip or route AmbientCG maps through set_texture()." in prompt
+
+
 def test_strategy_includes_sam_reconstruct_guidance_when_workflow_is_complete():
     prompt = get_full_system_prompt(
         [
@@ -255,3 +273,36 @@ def test_mcp_strategy_omits_sketchfab_when_api_unreachable(monkeypatch):
     prompt = strategy_module.asset_creation_strategy_text()
 
     assert "Sketchfab (server-side)" not in prompt
+
+
+def test_mcp_strategy_respects_independent_scenesmith_subservice_readiness(monkeypatch):
+    monkeypatch.setattr(
+        strategy_module.runtime,
+        "probe_conditional_services",
+        lambda _logger: {
+            "trellis2": False,
+            "retrieval": True,
+            "scenesmith_hssd": True,
+            "scenesmith_ambientcg": False,
+            "pcg_integrator": False,
+            "sam_reconstruct": False,
+        },
+    )
+    monkeypatch.setattr(strategy_module.runtime, "is_sketchfab_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "get_sketchfab_api_key", lambda: "")
+    monkeypatch.setattr(strategy_module.runtime, "is_infinigen_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "is_trellis2_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "is_rodin_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "get_rodin_api_key", lambda: "")
+    monkeypatch.setattr(strategy_module.runtime, "is_hunyuan_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "is_retrieval_tool_enabled", lambda: True)
+    monkeypatch.setattr(strategy_module.runtime, "is_scenesmith_hssd_tool_enabled", lambda: True)
+    monkeypatch.setattr(
+        strategy_module.runtime, "is_scenesmith_ambientcg_tool_enabled", lambda: True
+    )
+    monkeypatch.setattr(strategy_module.runtime, "is_sam_reconstruct_tool_enabled", lambda: False)
+
+    prompt = strategy_module.asset_creation_strategy_text()
+
+    assert "SceneSmith HSSD Retrieval" in prompt
+    assert "SceneSmith AmbientCG Materials" not in prompt

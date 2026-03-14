@@ -12,6 +12,8 @@ if [[ ! -f "$ENV_FILE" ]]; then
   cp "$ENV_EXAMPLE" "$ENV_FILE"
 fi
 
+cd "$SCRIPT_DIR"
+
 set -a
 source "$ENV_FILE"
 set +a
@@ -22,6 +24,26 @@ set +a
 : "${ENABLE_RETRIEVAL:=true}"
 : "${ENABLE_PCG:=true}"
 : "${ENABLE_SAMSERVER:=false}"
+: "${TOOL_SERVER_RETRIEVAL_PROVIDER:=assetretrieval3d}"
+
+normalized_retrieval_provider() {
+  printf '%s' "${TOOL_SERVER_RETRIEVAL_PROVIDER}" | tr '[:upper:]' '[:lower:]'
+}
+
+retrieval_compose_service_name() {
+  case "$(normalized_retrieval_provider)" in
+    assetretrieval3d)
+      printf 'retrieval'
+      ;;
+    scenesmith)
+      printf 'scenesmith_retrieval'
+      ;;
+    *)
+      echo "Unsupported TOOL_SERVER_RETRIEVAL_PROVIDER: ${TOOL_SERVER_RETRIEVAL_PROVIDER}" >&2
+      exit 1
+      ;;
+  esac
+}
 
 if docker compose version >/dev/null 2>&1; then
   COMPOSE_BIN=(docker compose)
@@ -45,7 +67,10 @@ if [[ "$ENABLE_TRELLIS2" == "true" ]]; then
   SERVICES+=(trellis2)
 fi
 if [[ "$ENABLE_RETRIEVAL" == "true" ]]; then
-  SERVICES+=(retrieval)
+  SERVICES+=("$(retrieval_compose_service_name)")
+  if [[ "$(normalized_retrieval_provider)" == "assetretrieval3d" ]]; then
+    SERVICES+=(postgres)
+  fi
 fi
 if [[ "$ENABLE_PCG" == "true" ]]; then
   SERVICES+=(pcg)
@@ -59,7 +84,6 @@ if [[ ${#SERVICES[@]} -eq 0 ]]; then
   exit 0
 fi
 
-cd "$SCRIPT_DIR"
 "${COMPOSE_BIN[@]}" "${COMPOSE_ARGS[@]}" stop "${SERVICES[@]}" || true
 "${COMPOSE_BIN[@]}" "${COMPOSE_ARGS[@]}" rm -f "${SERVICES[@]}" || true
 

@@ -19,11 +19,15 @@ from mcp_server.tools.asset_gen import (
     poll_rodin_job_status,
 )
 from mcp_server.tools.asset_retrieval import (
+    apply_ambientcg_material,
     download_polyhaven_asset,
     download_sketchfab_model,
     get_sketchfab_model_preview,
+    import_hssd_asset,
     import_retrieved_asset,
+    search_ambientcg_materials,
     search_3d_assets_by_text,
+    search_hssd_assets,
     search_polyhaven_assets,
     search_sketchfab_models,
     set_texture,
@@ -51,6 +55,7 @@ from mcp_server.tools.strategy import asset_creation_strategy_text
 
 __all__ = [
     "asset_creation_strategy_text",
+    "apply_ambientcg_material",
     "camera_act",
     "camera_observe",
     "camera_set_pose",
@@ -71,6 +76,7 @@ __all__ = [
     "get_scene_info",
     "get_viewport_screenshot",
     "get_sketchfab_model_preview",
+    "import_hssd_asset",
     "import_generated_asset",
     "import_blend_contents",
     "import_glb_model",
@@ -78,7 +84,9 @@ __all__ = [
     "poll_rodin_job_status",
     "render_from_camera",
     "render_from_objects",
+    "search_ambientcg_materials",
     "search_3d_assets_by_text",
+    "search_hssd_assets",
     "search_polyhaven_assets",
     "search_sketchfab_models",
     "set_texture",

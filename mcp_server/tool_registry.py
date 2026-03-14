@@ -21,6 +21,12 @@ from mcp_server.tools.asset_retrieval.polyhaven import (
     search_polyhaven_assets,
     set_texture,
 )
+from mcp_server.tools.asset_retrieval.scenesmith_retrieval import (
+    apply_ambientcg_material,
+    import_hssd_asset,
+    search_ambientcg_materials,
+    search_hssd_assets,
+)
 from mcp_server.tools.asset_retrieval.sketchfab import (
     download_sketchfab_model,
     get_sketchfab_model_preview,
@@ -63,6 +69,8 @@ def register_mcp_tools(mcp, logger) -> list[str]:
     enable_rodin = runtime.is_rodin_tool_enabled()
     enable_trellis2 = runtime.is_trellis2_tool_enabled()
     enable_retrieval = runtime.is_retrieval_tool_enabled()
+    enable_scenesmith_hssd = runtime.is_scenesmith_hssd_tool_enabled()
+    enable_scenesmith_ambientcg = runtime.is_scenesmith_ambientcg_tool_enabled()
     enable_infinigen = runtime.is_infinigen_tool_enabled()
     enable_sketchfab = runtime.is_sketchfab_tool_enabled()
     sketchfab_api_reachable = runtime.probe_sketchfab_api(logger) if enable_sketchfab else None
@@ -90,6 +98,16 @@ def register_mcp_tools(mcp, logger) -> list[str]:
     def _is_headless_mode() -> bool:
         return runtime.get_blender_mode() == "headless"
 
+    def _is_scenesmith_hssd_fully_enabled() -> bool:
+        return runtime.is_scenesmith_hssd_tool_enabled() and service_status.get(
+            "scenesmith_hssd", False
+        )
+
+    def _is_scenesmith_ambientcg_fully_enabled() -> bool:
+        return runtime.is_scenesmith_ambientcg_tool_enabled() and service_status.get(
+            "scenesmith_ambientcg", False
+        )
+
     enabled_generator_switches = [
         name for name, is_enabled in generator_switches.items() if is_enabled
     ]
@@ -109,6 +127,7 @@ def register_mcp_tools(mcp, logger) -> list[str]:
         (
             "Tool-gating context: BLENDER_MODE=%s ENABLE_HUNYUAN=%s "
             "ENABLE_RODIN=%s ENABLE_TRELLIS2=%s ENABLE_RETRIEVAL=%s "
+            "SCENESMITH_ENABLE_HSSD=%s SCENESMITH_ENABLE_AMBIENTCG=%s "
             "ENABLE_INFINIGEN=%s ENABLE_SKETCHFAB=%s RODIN_API_KEY_SET=%s "
             "SKETCHFAB_API_KEY_SET=%s SKETCHFAB_API_REACHABLE=%s"
         ),
@@ -117,6 +136,8 @@ def register_mcp_tools(mcp, logger) -> list[str]:
         enable_rodin,
         enable_trellis2,
         enable_retrieval,
+        enable_scenesmith_hssd,
+        enable_scenesmith_ambientcg,
         enable_infinigen,
         enable_sketchfab,
         has_rodin_key,
@@ -226,6 +247,34 @@ def register_mcp_tools(mcp, logger) -> list[str]:
             "retrieval",
             runtime.is_retrieval_tool_enabled,
             "requires ENABLE_RETRIEVAL=true",
+        ),
+        (
+            search_hssd_assets,
+            "retrieval",
+            _is_scenesmith_hssd_fully_enabled,
+            "requires ENABLE_RETRIEVAL=true, RETRIEVAL_PROVIDER=scenesmith, "
+            "SCENESMITH_ENABLE_HSSD=true, and healthy /hssd/healthz",
+        ),
+        (
+            import_hssd_asset,
+            "retrieval",
+            _is_scenesmith_hssd_fully_enabled,
+            "requires ENABLE_RETRIEVAL=true, RETRIEVAL_PROVIDER=scenesmith, "
+            "SCENESMITH_ENABLE_HSSD=true, and healthy /hssd/healthz",
+        ),
+        (
+            search_ambientcg_materials,
+            "retrieval",
+            _is_scenesmith_ambientcg_fully_enabled,
+            "requires ENABLE_RETRIEVAL=true, RETRIEVAL_PROVIDER=scenesmith, "
+            "SCENESMITH_ENABLE_AMBIENTCG=true, and healthy /ambientcg/healthz",
+        ),
+        (
+            apply_ambientcg_material,
+            "retrieval",
+            _is_scenesmith_ambientcg_fully_enabled,
+            "requires ENABLE_RETRIEVAL=true, RETRIEVAL_PROVIDER=scenesmith, "
+            "SCENESMITH_ENABLE_AMBIENTCG=true, and healthy /ambientcg/healthz",
         ),
         (
             render_from_objects,

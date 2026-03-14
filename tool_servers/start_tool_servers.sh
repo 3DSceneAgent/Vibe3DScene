@@ -14,6 +14,8 @@ if [[ ! -f "$ENV_FILE" ]]; then
   echo "Created ${ENV_FILE} from template. Please review values before production use."
 fi
 
+cd "$SCRIPT_DIR"
+
 set -a
 source "$ENV_FILE"
 set +a
@@ -44,6 +46,7 @@ fi
 : "${ENABLE_RETRIEVAL:=true}"
 : "${ENABLE_PCG:=true}"
 : "${ENABLE_SAMSERVER:=false}"
+: "${TOOL_SERVER_RETRIEVAL_PROVIDER:=assetretrieval3d}"
 : "${WAIT_FOR_HEALTH_TIMEOUT_SECONDS:=300}"
 : "${TRELLIS2_ENABLE_GPU:=true}"
 : "${SAMSERVER_ENABLE_GPU:=true}"
@@ -53,6 +56,71 @@ fi
 : "${POSTGRES_DATA_DIR:=./cache/postgres}"
 : "${SAMSERVER_MODEL_DIR:=./cache/samserver/models}"
 : "${SAMSERVER_JOB_DIR:=./cache/samserver/jobs}"
+
+normalized_retrieval_provider() {
+  printf '%s' "${TOOL_SERVER_RETRIEVAL_PROVIDER}" | tr '[:upper:]' '[:lower:]'
+}
+
+retrieval_service_label() {
+  case "$(normalized_retrieval_provider)" in
+    assetretrieval3d)
+      printf 'AssetRetrieval3D'
+      ;;
+    scenesmith)
+      printf 'SceneSmithRetrieval'
+      ;;
+    *)
+      printf 'Retrieval(%s)' "${TOOL_SERVER_RETRIEVAL_PROVIDER}"
+      ;;
+  esac
+}
+
+retrieval_compose_service_name() {
+  case "$(normalized_retrieval_provider)" in
+    assetretrieval3d)
+      printf 'retrieval'
+      ;;
+    scenesmith)
+      printf 'scenesmith_retrieval'
+      ;;
+    *)
+      echo "Unsupported TOOL_SERVER_RETRIEVAL_PROVIDER: ${TOOL_SERVER_RETRIEVAL_PROVIDER}" >&2
+      exit 1
+      ;;
+  esac
+}
+
+require_existing_path() {
+  local path="$1"
+  local label="$2"
+  if [[ -z "${path}" || ! -e "${path}" ]]; then
+    echo "${label} does not exist: ${path}" >&2
+    exit 1
+  fi
+}
+
+validate_scenesmith_config() {
+  local enable_hssd="${SCENESMITH_ENABLE_HSSD:-true}"
+  local enable_ambientcg="${SCENESMITH_ENABLE_AMBIENTCG:-false}"
+
+  if [[ "$(normalized_retrieval_provider)" != "scenesmith" ]]; then
+    return
+  fi
+  if [[ "${enable_hssd}" != "true" && "${enable_ambientcg}" != "true" ]]; then
+    echo "SceneSmith retrieval requires at least one of SCENESMITH_ENABLE_HSSD or SCENESMITH_ENABLE_AMBIENTCG to be true." >&2
+    exit 1
+  fi
+  if [[ "${enable_hssd}" == "true" ]]; then
+    require_existing_path "${HSSD_DATA_PATH:-}" "HSSD_DATA_PATH"
+    require_existing_path "${HSSD_PREPROCESSED_PATH:-}" "HSSD_PREPROCESSED_PATH"
+    mkdir -p "${HSSD_ARTIFACT_ROOT:-./cache/scenesmith/hssd}"
+  fi
+  if [[ "${enable_ambientcg}" == "true" ]]; then
+    require_existing_path "${AMBIENTCG_DATA_PATH:-}" "AMBIENTCG_DATA_PATH"
+    require_existing_path "${AMBIENTCG_EMBEDDINGS_PATH:-}" "AMBIENTCG_EMBEDDINGS_PATH"
+    mkdir -p "${AMBIENTCG_ARTIFACT_ROOT:-./cache/scenesmith/ambientcg}"
+  fi
+}
 
 resolve_healthcheck_host() {
   local host="$1"
@@ -170,10 +238,22 @@ if [[ "$ENABLE_TRELLIS2" == "true" ]]; then
   PULL_SERVICES+=(trellis2)
 fi
 if [[ "$ENABLE_RETRIEVAL" == "true" ]]; then
-  SERVICES+=(postgres)
-  SERVICES+=(retrieval)
-  PULL_SERVICES+=(postgres)
-  PULL_SERVICES+=(retrieval)
+  case "$(normalized_retrieval_provider)" in
+    assetretrieval3d)
+      SERVICES+=(postgres)
+      SERVICES+=(retrieval)
+      PULL_SERVICES+=(postgres)
+      PULL_SERVICES+=(retrieval)
+      ;;
+    scenesmith)
+      validate_scenesmith_config
+      SERVICES+=("$(retrieval_compose_service_name)")
+      ;;
+    *)
+      echo "Unsupported TOOL_SERVER_RETRIEVAL_PROVIDER: ${TOOL_SERVER_RETRIEVAL_PROVIDER}" >&2
+      exit 1
+      ;;
+  esac
 fi
 if [[ "$ENABLE_PCG" == "true" ]]; then
   SERVICES+=(pcg)
@@ -188,15 +268,15 @@ if [[ ${#SERVICES[@]} -eq 0 ]]; then
   exit 1
 fi
 
-cd "$SCRIPT_DIR"
-
-if [[ "$ENABLE_TRELLIS2" == "true" || "$ENABLE_RETRIEVAL" == "true" ]]; then
+if [[ "$ENABLE_TRELLIS2" == "true" || ( "$ENABLE_RETRIEVAL" == "true" && "$(normalized_retrieval_provider)" == "assetretrieval3d" ) ]]; then
   mkdir -p "$HUGGINGFACE_CACHE_DIR"
 fi
 
 if [[ "$ENABLE_RETRIEVAL" == "true" ]]; then
-  mkdir -p "$RETRIEVAL_CACHE_DIR"
-  mkdir -p "$POSTGRES_DATA_DIR"
+  if [[ "$(normalized_retrieval_provider)" == "assetretrieval3d" ]]; then
+    mkdir -p "$RETRIEVAL_CACHE_DIR"
+    mkdir -p "$POSTGRES_DATA_DIR"
+  fi
 fi
 
 if [[ "$ENABLE_SAMSERVER" == "true" ]]; then
@@ -212,6 +292,10 @@ fi
 if [[ "$ENABLE_SAMSERVER" == "true" ]]; then
   echo "Building local SAMServer image"
   "${COMPOSE_BIN[@]}" "${COMPOSE_ARGS[@]}" build samserver
+fi
+if [[ "$ENABLE_RETRIEVAL" == "true" && "$(normalized_retrieval_provider)" == "scenesmith" ]]; then
+  echo "Building local SceneSmithRetrieval image"
+  "${COMPOSE_BIN[@]}" "${COMPOSE_ARGS[@]}" build scenesmith_retrieval
 fi
 
 UP_ARGS=(up -d)
@@ -233,7 +317,21 @@ fi
 if [[ "$ENABLE_RETRIEVAL" == "true" ]]; then
   retrieval_host="$(resolve_healthcheck_host "${RETRIEVAL_HOST:-0.0.0.0}")"
   retrieval_url="http://${retrieval_host}:${RETRIEVAL_PORT:-8002}/health"
-  wait_for_http_health "AssetRetrieval3D" "$retrieval_url" "$HEALTH_DEADLINE" || health_failed=1
+  wait_for_http_health "$(retrieval_service_label)" "$retrieval_url" "$HEALTH_DEADLINE" || health_failed=1
+  if [[ "$(normalized_retrieval_provider)" == "scenesmith" ]]; then
+    if [[ "${SCENESMITH_ENABLE_HSSD:-true}" == "true" ]]; then
+      wait_for_http_health \
+        "SceneSmith HSSD" \
+        "http://${retrieval_host}:${RETRIEVAL_PORT:-8002}/hssd/healthz" \
+        "$HEALTH_DEADLINE" || health_failed=1
+    fi
+    if [[ "${SCENESMITH_ENABLE_AMBIENTCG:-false}" == "true" ]]; then
+      wait_for_http_health \
+        "SceneSmith AmbientCG" \
+        "http://${retrieval_host}:${RETRIEVAL_PORT:-8002}/ambientcg/healthz" \
+        "$HEALTH_DEADLINE" || health_failed=1
+    fi
+  fi
 fi
 
 if [[ "$ENABLE_PCG" == "true" ]]; then
@@ -259,7 +357,13 @@ if [[ "$ENABLE_TRELLIS2" == "true" ]]; then
   echo "TRELLIS2:       http://${TRELLIS2_HOST:-0.0.0.0}:${TRELLIS2_PORT:-8001}/health"
 fi
 if [[ "$ENABLE_RETRIEVAL" == "true" ]]; then
-  echo "AssetRetrieval: http://${RETRIEVAL_HOST:-0.0.0.0}:${RETRIEVAL_PORT:-8002}/health"
+  echo "$(retrieval_service_label): http://${RETRIEVAL_HOST:-0.0.0.0}:${RETRIEVAL_PORT:-8002}/health"
+  if [[ "$(normalized_retrieval_provider)" == "scenesmith" && "${SCENESMITH_ENABLE_HSSD:-true}" == "true" ]]; then
+    echo "SceneSmith HSSD: http://${RETRIEVAL_HOST:-0.0.0.0}:${RETRIEVAL_PORT:-8002}/hssd/healthz"
+  fi
+  if [[ "$(normalized_retrieval_provider)" == "scenesmith" && "${SCENESMITH_ENABLE_AMBIENTCG:-false}" == "true" ]]; then
+    echo "SceneSmith AmbientCG: http://${RETRIEVAL_HOST:-0.0.0.0}:${RETRIEVAL_PORT:-8002}/ambientcg/healthz"
+  fi
 fi
 if [[ "$ENABLE_PCG" == "true" ]]; then
   echo "PCGIntegrator:  http://${PCG_HOST:-0.0.0.0}:${PCG_PORT:-8003}/health"

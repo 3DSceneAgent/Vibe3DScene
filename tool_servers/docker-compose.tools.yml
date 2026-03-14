@@ -70,6 +70,46 @@ services:
       - tools
     restart: unless-stopped
 
+  scenesmith_retrieval:
+    build:
+      context: ./SceneSmithRetrieval
+    container_name: ${SCENESMITH_RETRIEVAL_CONTAINER:-scenesmith-retrieval-server}
+    command: ["bash", "scripts/run_compat_service.sh"]
+    ports:
+      - "${RETRIEVAL_HOST}:${RETRIEVAL_PORT}:${RETRIEVAL_CONTAINER_PORT}"
+    environment:
+      RETRIEVAL_HOST: 0.0.0.0
+      RETRIEVAL_PORT: ${RETRIEVAL_CONTAINER_PORT}
+      SCENESMITH_ENABLE_HSSD: ${SCENESMITH_ENABLE_HSSD}
+      SCENESMITH_ENABLE_AMBIENTCG: ${SCENESMITH_ENABLE_AMBIENTCG}
+      HSSD_DATA_PATH: /app/data/hssd-models
+      HSSD_PREPROCESSED_PATH: /app/data/preprocessed
+      HSSD_ARTIFACT_ROOT: /app/artifacts/hssd_service
+      AMBIENTCG_DATA_PATH: /app/data/materials
+      AMBIENTCG_EMBEDDINGS_PATH: /app/data/materials/embeddings
+      AMBIENTCG_ARTIFACT_ROOT: /app/artifacts/ambientcg_service
+    volumes:
+      - "${HSSD_DATA_PATH}:/app/data/hssd-models:ro"
+      - "${HSSD_PREPROCESSED_PATH}:/app/data/preprocessed:ro"
+      - "${HSSD_ARTIFACT_ROOT}:/app/artifacts/hssd_service"
+      - "${AMBIENTCG_DATA_PATH}:/app/data/materials:ro"
+      - "${AMBIENTCG_EMBEDDINGS_PATH}:/app/data/materials/embeddings:ro"
+      - "${AMBIENTCG_ARTIFACT_ROOT}:/app/artifacts/ambientcg_service"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import json, urllib.request; payload = json.loads(urllib.request.urlopen('http://127.0.0.1:${RETRIEVAL_CONTAINER_PORT}/health', timeout=5).read().decode('utf-8')); raise SystemExit(0 if payload.get('status') == 'running' else 1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - tools
+    restart: unless-stopped
+
   pcg:
     image: ${PCG_IMAGE}
     container_name: ${PCG_CONTAINER}

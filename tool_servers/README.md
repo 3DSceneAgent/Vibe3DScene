@@ -110,9 +110,13 @@ cd tool_servers
 Notes:
 
 - `ENABLE_TOOL_SERVER_*` is separate from the Docker `ENABLE_*` flags.
-- Local shell mode starts processes with `conda run -n <env>`.
+- Local shell mode starts processes with the selected conda env's `python`.
 - `TOOL_SERVER_*_CONDA_ENV` lets you pick the conda env for each service.
-- AssetRetrieval3D local shell mode does not start PostgreSQL; point `TOOL_SERVER_RETRIEVAL_DB_HOST` and `TOOL_SERVER_RETRIEVAL_DB_PORT` at an existing database.
+- `TOOL_SERVER_RETRIEVAL_PROVIDER=assetretrieval3d|scenesmith` selects which retrieval implementation local shell mode starts.
+- `scenesmith` provider runs the self-contained [SceneSmithRetrieval](./SceneSmithRetrieval/README.md) repository under `tool_servers/SceneSmithRetrieval`, and keeps `/health` plus `/search/text` compatible with the existing MCP retrieval tools.
+- When `TOOL_SERVER_RETRIEVAL_PROVIDER=scenesmith`, set `TOOL_SERVER_RETRIEVAL_CONDA_ENV` to an env that has the dependencies listed in `SceneSmithRetrieval/pyproject.toml`.
+- When `TOOL_SERVER_RETRIEVAL_PROVIDER=assetretrieval3d`, local shell mode does not start PostgreSQL; point `TOOL_SERVER_RETRIEVAL_DB_HOST` and `TOOL_SERVER_RETRIEVAL_DB_PORT` at an existing database.
+- When `TOOL_SERVER_RETRIEVAL_PROVIDER=scenesmith`, configure the `HSSD_*` / `AMBIENTCG_*` dataset paths in `.env` to real data. The default repository layout is `tool_servers/SceneSmithRetrieval/data/...`.
 - Runtime logs and pid files are written under `tool_servers/.run/` by default.
 
 ## 4) Build & push images (for the two newly dockerized services)

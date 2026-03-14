@@ -209,7 +209,7 @@ The output includes `requested_topology`, `effective_topology`, `effective_task_
 | Camera and Rendering | `render_from_objects`, `render_from_camera`, `camera_observe`, `camera_act`, `camera_set_pose` |
 | Session Persistence | `undo_last_snapshot` |
 | PolyHaven | `search_polyhaven_assets`, `download_polyhaven_asset`, `set_texture` |
-| Objaverse Retrieval | `search_3d_assets_by_text`, `import_retrieved_asset` |
+| Objaverse / SceneSmith Retrieval | `search_3d_assets_by_text`, `import_retrieved_asset`, `search_hssd_assets`, `import_hssd_asset`, `search_ambientcg_materials`, `apply_ambientcg_material` |
 | Sketchfab | `search_sketchfab_models`, `get_sketchfab_model_preview`, `download_sketchfab_model` |
 | 3DGen (Hunyuan/Rodin/trellis2) | `generate_trellis2_model`, `generate_hyper3d_model_via_text`, `generate_hyper3d_model_via_images`, `poll_rodin_job_status`, `import_generated_asset`, `generate_hunyuan3d_model` |
 | PCG | `get_infinigen_available_assets`, `generate_infinigen_assets` |
@@ -225,7 +225,7 @@ Conditional tool gates:
   - Both `ENABLE_RETRIEVAL=true` and `ENABLE_SKETCHFAB=true`.
 
 ### 3.2 Tool Servers (Sub-deployments, Optional)
-> Some of the tools above require a local deployment, all of them are dockerized.
+> Some of the tools above require a local deployment. Docker Compose is supported, and local shell mode is also available for selected services.
 
 `tool_servers/` includes Docker Compose deployment for:
 - [TRELLIS2](https://github.com/FishWoWater/TRELLIS.2/tree/api) (`:8001`)
@@ -249,6 +249,20 @@ Stop:
 cd tool_servers
 ./stop_tool_servers.sh
 ```
+
+Local shell mode is also available:
+
+```bash
+cd tool_servers
+cp .env.example .env
+
+# choose local services and retrieval provider in .env
+./manage_tool_servers_local.sh start
+```
+
+The retrieval slot can run either:
+- `AssetRetrieval3D`
+- `SceneSmithRetrieval`, a self-contained retrieval submodule under `tool_servers/SceneSmithRetrieval`
 
 If you change ports in `tool_servers/.env`, sync the root `.env` values used by MCP runtime:
 - `TRELLIS2_HOST` / `TRELLIS2_PORT`

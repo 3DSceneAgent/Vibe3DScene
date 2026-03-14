@@ -38,6 +38,30 @@ def test_sam_reconstruct_gate_disabled_by_default(monkeypatch):
     assert runtime.is_sam_reconstruct_tool_enabled() is False
 
 
+def test_scenesmith_hssd_gate_enabled_by_default_for_scenesmith_provider(monkeypatch):
+    monkeypatch.setenv("ENABLE_RETRIEVAL", "true")
+    monkeypatch.setenv("RETRIEVAL_PROVIDER", "scenesmith")
+    monkeypatch.delenv("SCENESMITH_ENABLE_HSSD", raising=False)
+
+    assert runtime.is_scenesmith_hssd_tool_enabled() is True
+
+
+def test_scenesmith_ambientcg_gate_disabled_by_default(monkeypatch):
+    monkeypatch.setenv("ENABLE_RETRIEVAL", "true")
+    monkeypatch.setenv("RETRIEVAL_PROVIDER", "scenesmith")
+    monkeypatch.delenv("SCENESMITH_ENABLE_AMBIENTCG", raising=False)
+
+    assert runtime.is_scenesmith_ambientcg_tool_enabled() is False
+
+
+def test_scenesmith_ambientcg_gate_respects_explicit_toggle(monkeypatch):
+    monkeypatch.setenv("ENABLE_RETRIEVAL", "true")
+    monkeypatch.setenv("RETRIEVAL_PROVIDER", "scenesmith")
+    monkeypatch.setenv("SCENESMITH_ENABLE_AMBIENTCG", "true")
+
+    assert runtime.is_scenesmith_ambientcg_tool_enabled() is True
+
+
 def test_probe_sketchfab_api_succeeds_on_http_response(monkeypatch):
     class FakeResponse:
         status_code = 401

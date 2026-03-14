@@ -44,6 +44,12 @@ def asset_creation_strategy_text(
     rodin_ready = runtime.is_rodin_tool_enabled() and bool(runtime.get_rodin_api_key())
     hunyuan_ready = runtime.is_hunyuan_tool_enabled()
     retrieval_ready = runtime.is_retrieval_tool_enabled() and service_status.get("retrieval", False)
+    scenesmith_hssd_ready = runtime.is_scenesmith_hssd_tool_enabled() and service_status.get(
+        "scenesmith_hssd", False
+    )
+    scenesmith_ambientcg_ready = runtime.is_scenesmith_ambientcg_tool_enabled() and service_status.get(
+        "scenesmith_ambientcg", False
+    )
     sam_reconstruct_ready = runtime.is_sam_reconstruct_tool_enabled() and service_status.get(
         "sam_reconstruct", False
     )
@@ -54,6 +60,8 @@ def asset_creation_strategy_text(
         rodin_ready=rodin_ready,
         hunyuan_ready=hunyuan_ready,
         retrieval_ready=retrieval_ready,
+        scenesmith_hssd_ready=scenesmith_hssd_ready,
+        scenesmith_ambientcg_ready=scenesmith_ambientcg_ready,
         sam_reconstruct_ready=sam_reconstruct_ready,
         undo_ready=True,
         clear_scene_ready=True,

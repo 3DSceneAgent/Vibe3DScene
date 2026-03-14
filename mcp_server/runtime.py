@@ -107,6 +107,30 @@ def is_retrieval_tool_enabled() -> bool:
     return parse_env_bool("ENABLE_RETRIEVAL", False)
 
 
+def get_retrieval_provider() -> str:
+    return os.getenv("RETRIEVAL_PROVIDER", "assetretrieval3d").strip().lower() or "assetretrieval3d"
+
+
+def is_scenesmith_retrieval_provider() -> bool:
+    return get_retrieval_provider() == "scenesmith"
+
+
+def is_scenesmith_hssd_tool_enabled() -> bool:
+    return (
+        is_retrieval_tool_enabled()
+        and is_scenesmith_retrieval_provider()
+        and parse_env_bool("SCENESMITH_ENABLE_HSSD", True)
+    )
+
+
+def is_scenesmith_ambientcg_tool_enabled() -> bool:
+    return (
+        is_retrieval_tool_enabled()
+        and is_scenesmith_retrieval_provider()
+        and parse_env_bool("SCENESMITH_ENABLE_AMBIENTCG", False)
+    )
+
+
 def is_infinigen_tool_enabled() -> bool:
     return parse_env_bool("ENABLE_INFINIGEN", False)
 
@@ -325,6 +349,10 @@ def probe_conditional_services(logger) -> dict[str, bool]:
         timeout=timeout,
     )
     service_names = ["trellis2", "retrieval", "pcg_integrator", "sam_reconstruct"]
+    if is_scenesmith_hssd_tool_enabled():
+        service_names.append("scenesmith_hssd")
+    if is_scenesmith_ambientcg_tool_enabled():
+        service_names.append("scenesmith_ambientcg")
 
     try:
         check_results = checker.check_services(service_names)

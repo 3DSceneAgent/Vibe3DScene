@@ -18,6 +18,8 @@ class AssetWorkflowAvailability(TypedDict):
     rodin_ready: bool
     hunyuan_ready: bool
     retrieval_ready: bool
+    scenesmith_hssd_ready: bool
+    scenesmith_ambientcg_ready: bool
     sam_reconstruct_ready: bool
     undo_ready: bool
     clear_scene_ready: bool
@@ -53,6 +55,18 @@ RETRIEVAL_WORKFLOW_TOOLS: frozenset[str] = frozenset(
         "import_retrieved_asset",
     }
 )
+SCENESMITH_HSSD_WORKFLOW_TOOLS: frozenset[str] = frozenset(
+    {
+        "search_hssd_assets",
+        "import_hssd_asset",
+    }
+)
+SCENESMITH_AMBIENTCG_WORKFLOW_TOOLS: frozenset[str] = frozenset(
+    {
+        "search_ambientcg_materials",
+        "apply_ambientcg_material",
+    }
+)
 SAM_RECONSTRUCT_WORKFLOW_TOOLS: frozenset[str] = frozenset(
     {
         "reconstruct_full_scene",
@@ -86,6 +100,8 @@ def infer_asset_workflow_availability(
         "rodin_ready": RODIN_WORKFLOW_TOOLS.issubset(tool_names),
         "hunyuan_ready": HUNYUAN_WORKFLOW_TOOLS.issubset(tool_names),
         "retrieval_ready": RETRIEVAL_WORKFLOW_TOOLS.issubset(tool_names),
+        "scenesmith_hssd_ready": SCENESMITH_HSSD_WORKFLOW_TOOLS.issubset(tool_names),
+        "scenesmith_ambientcg_ready": SCENESMITH_AMBIENTCG_WORKFLOW_TOOLS.issubset(tool_names),
         "sam_reconstruct_ready": SAM_RECONSTRUCT_WORKFLOW_TOOLS.issubset(tool_names),
         "undo_ready": UNDO_WORKFLOW_TOOLS.issubset(tool_names),
         "clear_scene_ready": CLEAR_SCENE_WORKFLOW_TOOLS.issubset(tool_names),
@@ -100,6 +116,8 @@ def build_asset_creation_strategy_text(
     rodin_ready: bool,
     hunyuan_ready: bool,
     retrieval_ready: bool,
+    scenesmith_hssd_ready: bool,
+    scenesmith_ambientcg_ready: bool,
     sam_reconstruct_ready: bool,
     undo_ready: bool,
     clear_scene_ready: bool,
@@ -252,6 +270,31 @@ def build_asset_creation_strategy_text(
             ]
         )
 
+    if scenesmith_hssd_ready:
+        lines.extend(
+            [
+                "   - SceneSmith HSSD Retrieval",
+                "     - Flow: search_hssd_assets(query=..., object_type=..., top_k=..., desired_dimensions_m=...)"
+                " -> import_hssd_asset(download_url=..., object_name=...)",
+                "     - Best for indoor scene objects when category and target dimensions matter",
+            ]
+        )
+
+    if scenesmith_ambientcg_ready:
+        lines.extend(
+            [
+                "   - SceneSmith AmbientCG Materials",
+                "     - Flow: search_ambientcg_materials(query=..., top_k=...)"
+                " -> apply_ambientcg_material(object_name=..., color_url=..., normal_url=..., roughness_url=...)",
+                "     - Use the texture URLs returned by search_ambientcg_materials() directly.",
+                "     - apply_ambientcg_material() downloads the maps, creates a Blender PBR material,"
+                " and assigns it to the target existing mesh object.",
+                "     - Do NOT manually download the package zip or route AmbientCG maps through set_texture().",
+                "     - After applying the material, re-render the target object to verify the result.",
+                "     - Best for fast PBR material search and assignment inside Blender",
+            ]
+        )
+
     if sam_reconstruct_ready:
         lines.extend(
             [
@@ -276,6 +319,8 @@ def build_asset_creation_strategy_text(
             rodin_ready,
             hunyuan_ready,
             retrieval_ready,
+            scenesmith_hssd_ready,
+            scenesmith_ambientcg_ready,
             sam_reconstruct_ready,
         ]
     ):
@@ -345,6 +390,14 @@ def build_asset_creation_strategy_text(
         priority_rules.append("For unique-object fallback: Retrieval first, then Hunyuan3D")
     elif hunyuan_ready:
         priority_rules.append("For unique-object fallback: Hunyuan3D")
+
+    if scenesmith_hssd_ready:
+        priority_rules.append(
+            "For indoor furniture or size-sensitive library objects: SceneSmith HSSD before generic generation"
+        )
+
+    if scenesmith_ambientcg_ready:
+        priority_rules.append("For PBR materials/textures on existing meshes: SceneSmith AmbientCG or PolyHaven")
 
     lines.append("4. Recommended source priority among available workflows:")
     if priority_rules:

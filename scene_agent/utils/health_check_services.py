@@ -77,6 +77,24 @@ class ServiceHealthChecker:
                 path="/",
                 expected_fields={"status": "running"},
             ),
+            "scenesmith_hssd": ServiceSpec(
+                name="scenesmith_hssd",
+                label="SceneSmith HSSD",
+                host_env_key="RETRIEVAL_API_HOST",
+                port_env_key="RETRIEVAL_API_PORT",
+                default_port=8002,
+                path="/hssd/healthz",
+                expected_fields={"status": "ok", "service": "hssd", "ready": True},
+            ),
+            "scenesmith_ambientcg": ServiceSpec(
+                name="scenesmith_ambientcg",
+                label="SceneSmith AmbientCG",
+                host_env_key="RETRIEVAL_API_HOST",
+                port_env_key="RETRIEVAL_API_PORT",
+                default_port=8002,
+                path="/ambientcg/healthz",
+                expected_fields={"status": "ok", "service": "ambientcg", "ready": True},
+            ),
             "pcg_integrator": ServiceSpec(
                 name="pcg_integrator",
                 label="PCGIntegrator",
@@ -258,7 +276,10 @@ def main() -> int:
     parser.add_argument(
         "--services",
         default=None,
-        help="Comma-separated service names (trellis2,retrieval,pcg_integrator,sam_reconstruct).",
+        help=(
+            "Comma-separated service names "
+            "(trellis2,retrieval,scenesmith_hssd,scenesmith_ambientcg,pcg_integrator,sam_reconstruct)."
+        ),
     )
     parser.add_argument(
         "--json",
