@@ -23,6 +23,7 @@ docker/.env.singleprocess
 .idea/
 
 .pytest_cache
+/tool_servers/
 
 # some helpers used during the development 
 scripts/helpers
@@ -32,11 +33,12 @@ legacy
 # codex is only used for dev 
 AGENTS.md
 
-# reference 
+reference 
 
 
 # remove all legacy vibe coding files 
 .cursor 
+.codex
 .specify 
 specs 
 docs/cursor_created 

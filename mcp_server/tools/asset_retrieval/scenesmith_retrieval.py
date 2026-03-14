@@ -14,6 +14,7 @@ from mcp.server.fastmcp import Context
 
 from mcp_server import runtime
 from mcp_server.tools.base import import_glb_model
+from scene_agent.utils.tool_service_endpoints import get_retrieval_base_url
 
 logger = logging.getLogger("BlenderMCPServer")
 _ALLOWED_HSSD_OBJECT_TYPES = {
@@ -25,9 +26,7 @@ _ALLOWED_HSSD_OBJECT_TYPES = {
 
 
 def _retrieval_base_url() -> str:
-    retrieval_host = os.getenv("RETRIEVAL_API_HOST", "localhost")
-    retrieval_port = os.getenv("RETRIEVAL_API_PORT", "8002")
-    return f"http://{retrieval_host}:{retrieval_port}"
+    return get_retrieval_base_url()
 
 
 def _format_request_error(exc: Exception) -> str:

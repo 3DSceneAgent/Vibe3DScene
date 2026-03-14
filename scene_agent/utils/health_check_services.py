@@ -13,6 +13,11 @@ from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 import requests
 
+from scene_agent.utils.tool_service_endpoints import (
+    get_sam_http_base_url,
+    get_shared_tool_service_host,
+)
+
 
 @dataclass(frozen=True)
 class ServiceSpec:
@@ -124,9 +129,14 @@ class ServiceHealthChecker:
     def _resolve_host(self, spec: ServiceSpec) -> str:
         if self.host_override:
             return self.host_override
-        return os.getenv(spec.host_env_key, "localhost")
+        configured_host = os.getenv(spec.host_env_key, "").strip() if spec.host_env_key else ""
+        if configured_host:
+            return configured_host
+        return get_shared_tool_service_host() or "localhost"
 
     def _resolve_port(self, spec: ServiceSpec) -> int:
+        if not spec.port_env_key:
+            return spec.default_port
         raw_value = os.getenv(spec.port_env_key)
         if not raw_value:
             return spec.default_port
@@ -137,11 +147,14 @@ class ServiceHealthChecker:
 
     def _resolve_url(self, spec: ServiceSpec) -> str:
         if spec.base_url_env_key:
-            base_url = (
-                os.getenv(spec.base_url_env_key, spec.default_base_url or "").strip()
-                or spec.default_base_url
-                or ""
-            )
+            if spec.base_url_env_key == "SAM_HTTP_BASE_URL":
+                base_url = get_sam_http_base_url()
+            else:
+                base_url = (
+                    os.getenv(spec.base_url_env_key, spec.default_base_url or "").strip()
+                    or spec.default_base_url
+                    or ""
+                )
             if base_url:
                 effective_base_url = base_url
                 if self.host_override:

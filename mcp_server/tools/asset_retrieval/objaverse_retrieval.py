@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import logging
-import os
 
 import requests
 from mcp.server.fastmcp import Context
 
 from mcp_server.tools.base import import_glb_model
+from scene_agent.utils.tool_service_endpoints import get_retrieval_base_url
 
 logger = logging.getLogger("BlenderMCPServer")
 
@@ -17,10 +17,8 @@ def search_3d_assets_by_text(
     top_k: int = 3,
 ) -> str:
     """Search for 3D assets in retrieval database using text queries."""
+    base_url = get_retrieval_base_url()
     try:
-        retrieval_host = os.getenv("RETRIEVAL_API_HOST", "localhost")
-        retrieval_port = os.getenv("RETRIEVAL_API_PORT", "8002")
-        base_url = f"http://{retrieval_host}:{retrieval_port}"
         if top_k < 1 or top_k > 100:
             return f"Error: top_k must be between 1 and 100, got {top_k}"
         payload = {"query": query, "top_k": top_k}
@@ -45,7 +43,7 @@ def search_3d_assets_by_text(
         output += "\nTo import an asset, use import_retrieved_asset() with the asset_id and model_url."
         return output
     except requests.exceptions.ConnectionError:
-        return f"Cannot connect to retrieval service at {retrieval_host}:{retrieval_port}."
+        return f"Cannot connect to retrieval service at {base_url}."
     except requests.exceptions.Timeout:
         return "Request to retrieval service timed out."
     except requests.exceptions.HTTPError as exc:

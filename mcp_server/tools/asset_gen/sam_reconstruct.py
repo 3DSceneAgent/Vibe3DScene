@@ -14,16 +14,14 @@ from typing import Any
 import requests
 from mcp.server.fastmcp import Context
 
+from scene_agent.utils.tool_repo_paths import get_agent_tools_glb_import_script
+from scene_agent.utils.tool_service_endpoints import get_sam_http_base_url
+
 logger = logging.getLogger("BlenderMCPServer")
 
-DEFAULT_SAM_HTTP_BASE_URL = "http://127.0.0.1:8004"
 DEFAULT_TIMEOUT_SECONDS = 300
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
 DEFAULT_STORAGE_DIR = "/tmp/scene_agent_sam_reconstruct"
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_GLB_IMPORT_SCRIPT = (
-    PROJECT_ROOT / "tool_servers" / "SAMServer" / "mcp_tools" / "blender" / "glb_import.py"
-)
 
 
 class ReconstructToolError(Exception):
@@ -231,7 +229,7 @@ def _resolve_output_dir(output_dir: str | None, job_id: str) -> Path:
 
 
 def _sam_http_base_url() -> str:
-    return (os.getenv("SAM_HTTP_BASE_URL", DEFAULT_SAM_HTTP_BASE_URL).strip() or DEFAULT_SAM_HTTP_BASE_URL).rstrip("/")
+    return get_sam_http_base_url().rstrip("/")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -437,11 +435,16 @@ def _run_blender_import(*, transforms_path: Path, blend_file_path: Path, output_
         or os.getenv("BLENDER_HEADLESS_CMD", "").strip()
         or "blender"
     )
-    import_script = DEFAULT_GLB_IMPORT_SCRIPT
+    import_script = get_agent_tools_glb_import_script()
     if not import_script.exists():
+        default_tools_root = import_script.parents[2]
         raise ReconstructToolError(
             status="validation_error",
-            message=f"GLB import script not found: {import_script}",
+            message=(
+                f"GLB import script not found: {import_script}. "
+                "Set AGENT_TOOLS_ROOT to your 3DAgentTools checkout or clone "
+                f"3DAgentTools next to this repo at {default_tools_root}."
+            ),
         )
 
     log_path = output_dir / "blender_import.log"
@@ -457,7 +460,7 @@ def _run_blender_import(*, transforms_path: Path, blend_file_path: Path, output_
                     str(transforms_path),
                     str(blend_file_path),
                 ],
-                cwd=PROJECT_ROOT,
+                cwd=output_dir,
                 check=True,
                 text=True,
                 stdout=log_handle,

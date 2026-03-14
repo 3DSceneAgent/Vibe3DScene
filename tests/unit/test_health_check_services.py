@@ -100,3 +100,48 @@ def test_scenesmith_ambientcg_health_check_uses_host_override(monkeypatch):
     assert result.url == "http://10.0.0.9:8124/ambientcg/healthz"
     assert captured["url"] == "http://10.0.0.9:8124/ambientcg/healthz"
     assert captured["timeout"] == 2.5
+
+
+def test_scenesmith_hssd_health_check_uses_shared_tool_service_host(monkeypatch):
+    checker = ServiceHealthChecker(timeout=1.0)
+    monkeypatch.delenv("RETRIEVAL_API_HOST", raising=False)
+    monkeypatch.setenv("TOOL_SERVICE_HOST", "10.0.0.9")
+
+    captured: dict[str, object] = {}
+
+    def fake_get(url, timeout):
+        captured["url"] = url
+        captured["timeout"] = timeout
+        return DummyResponse(200, {"status": "ok", "service": "hssd", "ready": True})
+
+    monkeypatch.setattr(checker._session, "get", fake_get)
+
+    result = checker.check_service("scenesmith_hssd")
+
+    assert result.ok is True
+    assert result.url == "http://10.0.0.9:8002/hssd/healthz"
+    assert captured["url"] == "http://10.0.0.9:8002/hssd/healthz"
+
+
+def test_sam_reconstruct_health_check_uses_shared_tool_service_host(monkeypatch):
+    checker = ServiceHealthChecker(timeout=1.0)
+    monkeypatch.delenv("SAM_HTTP_BASE_URL", raising=False)
+    monkeypatch.setenv("TOOL_SERVICE_HOST", "10.0.0.9")
+
+    captured: dict[str, object] = {}
+
+    def fake_get(url, timeout):
+        captured["url"] = url
+        captured["timeout"] = timeout
+        return DummyResponse(
+            200,
+            {"status": "ok", "sam_service": True, "sam3d_service": True},
+        )
+
+    monkeypatch.setattr(checker._session, "get", fake_get)
+
+    result = checker.check_service("sam_reconstruct")
+
+    assert result.ok is True
+    assert result.url == "http://10.0.0.9:8004/healthz"
+    assert captured["url"] == "http://10.0.0.9:8004/healthz"

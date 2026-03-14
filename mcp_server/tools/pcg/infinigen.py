@@ -10,6 +10,8 @@ from typing import Any, Dict, Optional
 import requests
 from mcp.server.fastmcp import Context
 
+from scene_agent.utils.tool_service_endpoints import get_infinigen_base_url
+
 logger = logging.getLogger("BlenderMCPServer")
 
 
@@ -18,9 +20,7 @@ def get_infinigen_available_assets(
     timeout: int = 30,
 ) -> Dict[str, Any]:
     """Fetch available Infinigen asset types from the API."""
-    infinigen_host = os.getenv("INFINIGEN_HOST", "localhost")
-    infinigen_port = os.getenv("INFINIGEN_PORT", "8003")
-    base_url = f"http://{infinigen_host}:{infinigen_port}/api/v1"
+    base_url = f"{get_infinigen_base_url()}/api/v1"
     endpoint = f"{base_url}/infinigen/assets/available"
     try:
         logger.info("Fetching available Infinigen assets from %s", endpoint)
@@ -64,9 +64,7 @@ def generate_infinigen_assets(
     if not asset_type:
         return {"error": "asset_type is required"}
 
-    infinigen_host = os.getenv("INFINIGEN_HOST", "localhost")
-    infinigen_port = os.getenv("INFINIGEN_PORT", "8003")
-    base_url = f"http://{infinigen_host}:{infinigen_port}/api/v1"
+    base_url = f"{get_infinigen_base_url()}/api/v1"
     endpoint = f"{base_url}/infinigen/assets/generate"
 
     temp_dir_created = False

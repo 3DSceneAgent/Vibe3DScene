@@ -63,7 +63,7 @@ scene_agent/     Core runtime: agent graph, sessions, VLM providers, API/CLI
 mcp_server/      MCP server runtime and tool registry
 web/             React + TypeScript frontend (Vite)
 addon/           Blender addon for **headless** mode (NOT the version that installed in blender GUI)
-tool_servers/    Dockerized TRELLIS2 / Retrieval / PCG services
+../3DAgentTools/ External tool-server checkout (TRELLIS2 / Retrieval / PCG / SAM)
 scripts/         Local launch helpers (headless/local-client)
 tests/           Unit / integration / contract / manual tests
 ```
@@ -87,6 +87,10 @@ git clone --recurse-submodules https://github.com/3DSceneAgent/Vibe3DScene
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+
+# optional self-hosted tool stack
+git clone --recurse-submodules https://github.com/3DSceneAgent/3DAgentTools ../3DAgentTools
+
 # required for non-docker multi-process deployment
 # for macos
 brew install redis nginx
@@ -227,7 +231,7 @@ Conditional tool gates:
 ### 3.2 Tool Servers (Sub-deployments, Optional)
 > Some of the tools above require a local deployment. Docker Compose is supported, and local shell mode is also available for selected services.
 
-`tool_servers/` includes Docker Compose deployment for:
+`../3DAgentTools/` includes Docker Compose deployment for:
 - [TRELLIS2](https://github.com/FishWoWater/TRELLIS.2/tree/api) (`:8001`)
 - [AssetRetrieval3D](https://github.com/3DSceneAgent/AssetRetrieval3D) (`:8002`)
 - [PCGIntegrator3D](https://github.com/3DSceneAgent/PCGIntegrator3D) (`:8003`)
@@ -236,7 +240,7 @@ Conditional tool gates:
 Deployment steps:
 
 ```bash
-cd tool_servers
+cd ../3DAgentTools
 cp .env.example .env
 
 # edit .env toggles(based on which tool server you want) and ports
@@ -246,14 +250,14 @@ cp .env.example .env
 Stop:
 
 ```bash
-cd tool_servers
+cd ../3DAgentTools
 ./stop_tool_servers.sh
 ```
 
 Local shell mode is also available:
 
 ```bash
-cd tool_servers
+cd ../3DAgentTools
 cp .env.example .env
 
 # choose local services and retrieval provider in .env
@@ -262,12 +266,17 @@ cp .env.example .env
 
 The retrieval slot can run either:
 - `AssetRetrieval3D`
-- `SceneSmithRetrieval`, a self-contained retrieval submodule under `tool_servers/SceneSmithRetrieval`
+- `SceneSmithRetrieval`, a self-contained retrieval submodule under `../3DAgentTools/SceneSmithRetrieval`
 
-If you change ports in `tool_servers/.env`, sync the root `.env` values used by MCP runtime:
-- `TRELLIS2_HOST` / `TRELLIS2_PORT`
-- `RETRIEVAL_API_HOST` / `RETRIEVAL_API_PORT`
-- `INFINIGEN_HOST` / `INFINIGEN_PORT`
+If self-hosted tool services run on the same machine, prefer setting `TOOL_SERVICE_HOST` once in the
+root `.env` and leave per-service host overrides blank. If you change ports in `../3DAgentTools/.env`,
+sync the matching root `.env` values used by MCP runtime:
+- `TOOL_SERVICE_HOST` for the shared host or IP
+- `TRELLIS2_PORT`
+- `RETRIEVAL_API_PORT`
+- `INFINIGEN_PORT`
+- `SAM_HTTP_BASE_URL` only if SAMServer uses a custom scheme / host / port / path
+- `AGENT_TOOLS_ROOT` only if `3DAgentTools` is not cloned as a sibling directory
 
 ## 4. Use Cases
 
@@ -370,11 +379,14 @@ npm run lint
 
 | Variable | Description |
 | --- | --- |
+| `TOOL_SERVICE_HOST` | Shared host/IP for TRELLIS2, retrieval/SceneSmith, Infinigen, and SAMServer when they are co-located. |
 | `ENABLE_RODIN`, `RODIN_API_KEY`, `RODIN_MODE` | Enable Hyper3D Rodin generation tools. |
 | `ENABLE_HUNYUAN`, `HUNYUAN3D_SECRET_ID`, `HUNYUAN3D_SECRET_KEY` | Enable Tencent Hunyuan3D generation tool. |
 | `ENABLE_TRELLIS2`, `TRELLIS2_HOST`, `TRELLIS2_PORT` | Enable TRELLIS2 generation tool and endpoint routing. |
 | `ENABLE_RETRIEVAL`, `RETRIEVAL_API_HOST`, `RETRIEVAL_API_PORT` | Enable retrieval search/import tools. |
 | `ENABLE_INFINIGEN`, `INFINIGEN_HOST`, `INFINIGEN_PORT` | Enable PCG/Infinigen tools. |
+| `ENABLE_SAM_RECONSTRUCT`, `SAM_HTTP_BASE_URL` | Enable SAM-based scene reconstruction; leave `SAM_HTTP_BASE_URL` blank to inherit `http://{TOOL_SERVICE_HOST}:8004`. |
+| `AGENT_TOOLS_ROOT` | Optional checkout path for the sibling `3DAgentTools` repo. Leave blank to use `../3DAgentTools`. |
 | `ENABLE_SKETCHFAB`, `SKETCHFAB_API_KEY` | Enable Sketchfab search/download tools. |
 
 ## 7. TODO

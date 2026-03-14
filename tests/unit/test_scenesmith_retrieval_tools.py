@@ -21,7 +21,7 @@ class DummyResponse:
 
 def test_search_hssd_assets_formats_results(monkeypatch):
     def fake_post(url, json, timeout):
-        assert url.endswith("/hssd/v1/search")
+        assert url == "http://10.0.0.9:8002/hssd/v1/search"
         assert json["object_type"] == "FURNITURE"
         assert json["top_k"] == 2
         assert timeout == 60
@@ -42,6 +42,7 @@ def test_search_hssd_assets_formats_results(monkeypatch):
             }
         )
 
+    monkeypatch.setenv("TOOL_SERVICE_HOST", "10.0.0.9")
     monkeypatch.setattr(tools.requests, "post", fake_post)
 
     result = tools.search_hssd_assets(None, query="chair", top_k=2)

@@ -1,5 +1,0 @@
-services:
-  trellis2:
-    gpus: all
-    environment:
-      NVIDIA_VISIBLE_DEVICES: ${TRELLIS2_VISIBLE_DEVICES:-all}

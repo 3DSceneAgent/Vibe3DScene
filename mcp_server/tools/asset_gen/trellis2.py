@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import logging
-import os
 
 import requests
 from mcp.server.fastmcp import Context
 
 from mcp_server.tools.base import import_glb_model
+from scene_agent.utils.tool_service_endpoints import get_trellis2_base_url
 
 logger = logging.getLogger("BlenderMCPServer")
 
@@ -21,9 +21,7 @@ def generate_trellis2_model(
 ) -> str:
     """Generate a 3D model using TRELLIS2 and auto-import in Blender."""
     try:
-        trellis_host = os.getenv("TRELLIS2_HOST", "localhost")
-        trellis_port = os.getenv("TRELLIS2_PORT", "8001")
-        base_url = f"http://{trellis_host}:{trellis_port}"
+        base_url = get_trellis2_base_url()
         endpoint = f"{base_url}/api/v1/text-to-3d"
         payload = {
             "prompt": text_prompt,

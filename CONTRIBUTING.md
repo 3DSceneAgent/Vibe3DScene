@@ -34,7 +34,7 @@ npm install
 - `mcp_server/`: MCP server runtime and tool registration
 - `web/`: React + TypeScript frontend
 - `addon/`: Blender addon
-- `tool_servers/`: Dockerized external services (TRELLIS2 / retrieval / PCG)
+- `../3DAgentTools/`: external tool-server checkout (TRELLIS2 / retrieval / PCG / SAM)
 - `tests/`: unit, integration, contract, and manual tests
 
 When making changes, keep concerns separated:
@@ -91,7 +91,7 @@ npm run build
 npm run lint
 ```
 
-If your change affects tool-server integration, include any tool-server startup commands you used in the PR notes.
+If your change affects tool-server integration, include any `../3DAgentTools` startup commands you used in the PR notes.
 
 ## 6. Pull Request Checklist
 

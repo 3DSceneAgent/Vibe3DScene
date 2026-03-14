@@ -40,15 +40,25 @@ def _make_zip(entries: dict[str, bytes]) -> bytes:
     return buf.getvalue()
 
 
+def _prepare_tools_checkout(monkeypatch, tmp_path: Path) -> Path:
+    tools_root = tmp_path / "3DAgentTools"
+    import_script = tools_root / "scripts" / "blender" / "glb_import.py"
+    import_script.parent.mkdir(parents=True, exist_ok=True)
+    import_script.write_text("# blender script fixture\n", encoding="utf-8")
+    monkeypatch.setenv("AGENT_TOOLS_ROOT", str(tools_root))
+    return import_script
+
+
 def test_reconstruct_full_scene_success(monkeypatch, tmp_path):
     image_path = tmp_path / "input.png"
     image_path.write_bytes(b"png")
     output_dir = tmp_path / "output"
     status_calls = {"count": 0}
+    import_script = _prepare_tools_checkout(monkeypatch, tmp_path)
 
     def fake_post(url, files=None, data=None, timeout=None):
         del files, timeout
-        assert url.endswith("/v1/jobs/reconstruct-scene")
+        assert url == "http://10.0.0.9:8004/v1/jobs/reconstruct-scene"
         assert json.loads(data["options"])["seed"] == 42
         return DummyResponse(json_data={"job_id": "job-123"})
 
@@ -81,12 +91,14 @@ def test_reconstruct_full_scene_success(monkeypatch, tmp_path):
         raise AssertionError(f"Unexpected GET URL: {url}")
 
     def fake_run(cmd, **kwargs):
-        del kwargs
         transforms_path = Path(cmd[-2])
         payload = json.loads(transforms_path.read_text(encoding="utf-8"))
         assert payload == [{"glb_path": str(output_dir / "chair.glb")}]
+        assert Path(cmd[3]) == import_script
+        assert Path(kwargs["cwd"]) == output_dir
         Path(cmd[-1]).write_bytes(b"blend")
 
+    monkeypatch.setenv("TOOL_SERVICE_HOST", "10.0.0.9")
     monkeypatch.setattr(sam_reconstruct.requests, "post", fake_post)
     monkeypatch.setattr(sam_reconstruct.requests, "get", fake_get)
     monkeypatch.setattr(sam_reconstruct.time, "sleep", lambda _: None)
@@ -208,6 +220,7 @@ def test_reconstruct_full_scene_reports_blender_failure(monkeypatch, tmp_path):
     image_path = tmp_path / "input.png"
     image_path.write_bytes(b"png")
     output_dir = tmp_path / "output"
+    _prepare_tools_checkout(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
         sam_reconstruct.requests,
@@ -259,6 +272,7 @@ def test_reconstruct_full_scene_generates_fallback_transforms(monkeypatch, tmp_p
     image_path = tmp_path / "input.png"
     image_path.write_bytes(b"png")
     output_dir = tmp_path / "output"
+    import_script = _prepare_tools_checkout(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
         sam_reconstruct.requests,
@@ -278,10 +292,11 @@ def test_reconstruct_full_scene_generates_fallback_transforms(monkeypatch, tmp_p
         raise AssertionError(f"Unexpected GET URL: {url}")
 
     def fake_run(cmd, **kwargs):
-        del kwargs
         transforms_path = Path(cmd[-2])
         payload = json.loads(transforms_path.read_text(encoding="utf-8"))
         assert payload == [{"glb_path": str(output_dir / "lamp.glb")}]
+        assert Path(cmd[3]) == import_script
+        assert Path(kwargs["cwd"]) == output_dir
         Path(cmd[-1]).write_bytes(b"blend")
 
     monkeypatch.setattr(sam_reconstruct.requests, "get", fake_get)
@@ -297,3 +312,45 @@ def test_reconstruct_full_scene_generates_fallback_transforms(monkeypatch, tmp_p
     assert result["success"] is True
     assert (output_dir / "object_transforms.json").exists()
     assert "json_paths" not in result
+
+
+def test_reconstruct_full_scene_reports_missing_tools_checkout(monkeypatch, tmp_path):
+    image_path = tmp_path / "input.png"
+    image_path.write_bytes(b"png")
+    output_dir = tmp_path / "output"
+
+    monkeypatch.setenv("AGENT_TOOLS_ROOT", str(tmp_path / "missing-tools"))
+    monkeypatch.setattr(
+        sam_reconstruct.requests,
+        "post",
+        lambda *args, **kwargs: DummyResponse(json_data={"job_id": "job-missing-script"}),
+    )
+
+    def fake_get(url, params=None, **kwargs):
+        del kwargs
+        if url.endswith("/v1/jobs/job-missing-script"):
+            return DummyResponse(
+                json_data={
+                    "job_id": "job-missing-script",
+                    "status": "succeeded",
+                    "result": {"num_masks": 1},
+                }
+            )
+        if url.endswith("/v1/jobs/job-missing-script/artifacts/download"):
+            assert params == {"extensions": "glb,json"}
+            return DummyResponse(content=_make_zip({"chair.glb": b"glb-bytes"}))
+        raise AssertionError(f"Unexpected GET URL: {url}")
+
+    monkeypatch.setattr(sam_reconstruct.requests, "get", fake_get)
+    monkeypatch.setattr(sam_reconstruct.time, "sleep", lambda _: None)
+
+    result = sam_reconstruct.reconstruct_full_scene(
+        None,
+        str(image_path),
+        output_dir=str(output_dir),
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "validation_error"
+    assert "AGENT_TOOLS_ROOT" in result["error"]
+    assert "3DAgentTools" in result["error"]

@@ -1,18 +1,3 @@
 [submodule "addon"]
 	path = addon
 	url = https://github.com/3DSceneAgent/blender-mcp-vision.git
-[submodule "tool_servers/AssetRetrieval3D"]
-	path = tool_servers/AssetRetrieval3D
-	url = https://github.com/3DSceneAgent/AssetRetrieval3D
-[submodule "tool_servers/PCGIntegrator3D"]
-	path = tool_servers/PCGIntegrator3D
-	url = https://github.com/3DSceneAgent/PCGIntegrator3D
-[submodule "tool_servers/TRELLIS.2"]
-	path = tool_servers/TRELLIS.2
-	url = https://github.com/FishWoWater/TRELLIS.2
-[submodule "tool_servers/SAMServer"]
-	path = tool_servers/SAMServer
-	url = git@github.com:3DSceneAgent/SAMServer.git
-[submodule "tool_servers/SceneSmithRetrieval"]
-	path = tool_servers/SceneSmithRetrieval
-	url = https://github.com/FishWoWater/SceneSmithRetrieval
