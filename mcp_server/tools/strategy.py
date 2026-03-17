@@ -43,7 +43,9 @@ def asset_creation_strategy_text(
     trellis2_ready = runtime.is_trellis2_tool_enabled() and service_status.get("trellis2", False)
     rodin_ready = runtime.is_rodin_tool_enabled() and bool(runtime.get_rodin_api_key())
     hunyuan_ready = runtime.is_hunyuan_tool_enabled()
-    retrieval_ready = runtime.is_retrieval_tool_enabled() and service_status.get("retrieval", False)
+    objaverse_retrieval_ready = runtime.is_objaverse_retrieval_tool_enabled() and service_status.get(
+        "objaverse_retrieval", False
+    )
     scenesmith_hssd_ready = runtime.is_scenesmith_hssd_tool_enabled() and service_status.get(
         "scenesmith_hssd", False
     )
@@ -54,12 +56,13 @@ def asset_creation_strategy_text(
         "sam_reconstruct", False
     )
     strategy_text = build_asset_creation_strategy_text(
+        polyhaven_ready=runtime.is_polyhaven_tool_enabled(),
         sketchfab_ready=sketchfab_ready,
         infinigen_ready=infinigen_ready,
         trellis2_ready=trellis2_ready,
         rodin_ready=rodin_ready,
         hunyuan_ready=hunyuan_ready,
-        retrieval_ready=retrieval_ready,
+        objaverse_retrieval_ready=objaverse_retrieval_ready,
         scenesmith_hssd_ready=scenesmith_hssd_ready,
         scenesmith_ambientcg_ready=scenesmith_ambientcg_ready,
         sam_reconstruct_ready=sam_reconstruct_ready,

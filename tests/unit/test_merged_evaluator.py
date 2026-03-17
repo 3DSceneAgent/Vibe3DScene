@@ -1,4 +1,5 @@
 from scene_agent.agent.nodes import evaluator_node, finalize_node
+from scene_agent.agent.nodes.constants_runtime import FAST_MODE_EVIDENCE_REQUIRED_MESSAGE_ID
 
 
 def _todo(todo_id: str, description: str, status: str) -> dict:
@@ -89,3 +90,60 @@ def test_evaluator_finalizes_when_last_todo_is_skipped():
 
     summary = finalize_node({**state, **result})
     assert "skipped" in summary["messages"][0].content.lower()
+
+
+def test_fast_mode_finalizes_without_mutation_when_agent_stops():
+    result = evaluator_node(
+        {
+            "fast_mode": True,
+            "assistant_turn_kind": "no_calls",
+            "routed_to_plan": False,
+            "request_tool_batches": 1,
+            "workflow_topology": "single_agent",
+            "verification_result": None,
+            "fast_mode_last_mutation_batch": 0,
+            "fast_mode_last_evidence_batch": 0,
+        }
+    )
+
+    assert result["transition_next"] == "finalize"
+    assert result["transition_reason"] == "fast_mode_direct_complete"
+    assert result["evaluator_result"]["reason"] == "fast_mode_no_mutation"
+
+
+def test_fast_mode_finalizes_when_evidence_covers_latest_mutation():
+    result = evaluator_node(
+        {
+            "fast_mode": True,
+            "assistant_turn_kind": "no_calls",
+            "routed_to_plan": False,
+            "request_tool_batches": 2,
+            "workflow_topology": "single_agent",
+            "verification_result": None,
+            "fast_mode_last_mutation_batch": 2,
+            "fast_mode_last_evidence_batch": 2,
+        }
+    )
+
+    assert result["transition_next"] == "finalize"
+    assert result["transition_reason"] == "fast_mode_direct_complete"
+    assert result["evaluator_result"]["reason"] == "fast_mode_evidence_covers_latest_mutation"
+
+
+def test_fast_mode_requires_fresh_evidence_before_finalize_after_mutation():
+    result = evaluator_node(
+        {
+            "fast_mode": True,
+            "assistant_turn_kind": "no_calls",
+            "routed_to_plan": False,
+            "request_tool_batches": 2,
+            "workflow_topology": "single_agent",
+            "verification_result": None,
+            "fast_mode_last_mutation_batch": 2,
+            "fast_mode_last_evidence_batch": 1,
+        }
+    )
+
+    assert result["transition_next"] == "agent"
+    assert result["transition_reason"] == "fast_mode_evidence_required"
+    assert result["messages"][0].id == FAST_MODE_EVIDENCE_REQUIRED_MESSAGE_ID

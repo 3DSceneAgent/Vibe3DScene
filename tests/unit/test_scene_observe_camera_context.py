@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from mcp_server.tools.multimodal.camera_tools import SCENE_CAMERA_NAMES, update_scene_cameras
-from scene_agent.agent.nodes import scene_observe_node
+from scene_agent.agent.nodes import SCENE_OBSERVE_MESSAGE_ID, scene_observe_node
 from scene_agent.agent.state import AgentState
 
 
@@ -339,7 +339,9 @@ def test_scene_observe_node_invalidates_render_path_on_failure(monkeypatch):
     result = scene_observe_node(state)
 
     # Should invalidate the stale render path, not return empty dict
-    assert result == {"last_render_path": None}
+    assert result["last_render_path"] is None
+    assert result["messages"][0].id == SCENE_OBSERVE_MESSAGE_ID
+    assert "Do not use prior auto-observe screenshots" in result["messages"][0].content[0]["text"]
 
 
 def test_scene_observe_node_skips_in_fast_mode(monkeypatch):
@@ -361,7 +363,9 @@ def test_scene_observe_node_skips_in_fast_mode(monkeypatch):
 
     result = scene_observe_node(state)
 
-    assert result == {}
+    assert result["last_render_path"] is None
+    assert result["messages"][0].id == SCENE_OBSERVE_MESSAGE_ID
+    assert "Auto scene observation is unavailable for this turn" in result["messages"][0].content[0]["text"]
 
 
 def test_scene_observe_node_invalidates_render_path_when_no_images(monkeypatch):
@@ -390,7 +394,8 @@ def test_scene_observe_node_invalidates_render_path_when_no_images(monkeypatch):
     result = scene_observe_node(state)
 
     # Should invalidate the stale render path
-    assert result == {"last_render_path": None}
+    assert result["last_render_path"] is None
+    assert result["messages"][0].id == SCENE_OBSERVE_MESSAGE_ID
 
 
 def test_scene_observe_node_invalidates_render_path_on_exception(monkeypatch):
@@ -418,7 +423,8 @@ def test_scene_observe_node_invalidates_render_path_on_exception(monkeypatch):
     result = scene_observe_node(state)
 
     # Should invalidate the stale render path
-    assert result == {"last_render_path": None}
+    assert result["last_render_path"] is None
+    assert result["messages"][0].id == SCENE_OBSERVE_MESSAGE_ID
 
 
 def test_scene_observe_node_treats_delete_objects_as_scene_mutation(monkeypatch):
@@ -589,4 +595,5 @@ def test_scene_observe_node_invalidates_render_path_when_local_screenshot_fails(
 
     result = scene_observe_node(state)
 
-    assert result == {"last_render_path": None}
+    assert result["last_render_path"] is None
+    assert result["messages"][0].id == SCENE_OBSERVE_MESSAGE_ID

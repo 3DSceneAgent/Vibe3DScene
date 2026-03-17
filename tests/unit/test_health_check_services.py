@@ -10,9 +10,10 @@ class DummyResponse:
         return self._payload
 
 
-def test_sam_reconstruct_health_check_uses_base_url(monkeypatch):
+def test_sam_reconstruct_health_check_uses_host_and_port(monkeypatch):
     checker = ServiceHealthChecker(timeout=1.5)
-    monkeypatch.setenv("SAM_HTTP_BASE_URL", "http://127.0.0.1:8123")
+    monkeypatch.setenv("SAM_HOST", "127.0.0.1")
+    monkeypatch.setenv("SAM_PORT", "8123")
 
     captured: dict[str, object] = {}
 
@@ -34,9 +35,10 @@ def test_sam_reconstruct_health_check_uses_base_url(monkeypatch):
     assert captured["timeout"] == 1.5
 
 
-def test_sam_reconstruct_health_check_applies_host_override_to_base_url(monkeypatch):
+def test_sam_reconstruct_health_check_applies_host_override(monkeypatch):
     checker = ServiceHealthChecker(host_override="10.0.0.9", timeout=2.0)
-    monkeypatch.setenv("SAM_HTTP_BASE_URL", "http://127.0.0.1:8123")
+    monkeypatch.setenv("SAM_HOST", "127.0.0.1")
+    monkeypatch.setenv("SAM_PORT", "8123")
 
     captured: dict[str, object] = {}
 
@@ -58,10 +60,34 @@ def test_sam_reconstruct_health_check_applies_host_override_to_base_url(monkeypa
     assert captured["timeout"] == 2.0
 
 
-def test_scenesmith_hssd_health_check_uses_retrieval_host_and_port(monkeypatch):
+def test_objaverse_health_check_uses_objaverse_host_and_port(monkeypatch):
     checker = ServiceHealthChecker(timeout=1.25)
-    monkeypatch.setenv("RETRIEVAL_API_HOST", "127.0.0.1")
-    monkeypatch.setenv("RETRIEVAL_API_PORT", "8124")
+    monkeypatch.setenv("ASSET_RETRIEVAL_BACKEND", "objaverse")
+    monkeypatch.setenv("OBJAVERSE_HOST", "127.0.0.1")
+    monkeypatch.setenv("OBJAVERSE_PORT", "8124")
+
+    captured: dict[str, object] = {}
+
+    def fake_get(url, timeout):
+        captured["url"] = url
+        captured["timeout"] = timeout
+        return DummyResponse(200, {"status": "running"})
+
+    monkeypatch.setattr(checker._session, "get", fake_get)
+
+    result = checker.check_service("objaverse_retrieval")
+
+    assert result.ok is True
+    assert result.url == "http://127.0.0.1:8124/"
+    assert captured["url"] == "http://127.0.0.1:8124/"
+    assert captured["timeout"] == 1.25
+
+
+def test_scenesmith_hssd_health_check_uses_scenesmith_host_and_port(monkeypatch):
+    checker = ServiceHealthChecker(timeout=1.25)
+    monkeypatch.setenv("ASSET_RETRIEVAL_BACKEND", "scenesmith")
+    monkeypatch.setenv("SCENESMITH_COMPAT_HOST", "127.0.0.1")
+    monkeypatch.setenv("SCENESMITH_COMPAT_PORT", "8125")
 
     captured: dict[str, object] = {}
 
@@ -75,15 +101,16 @@ def test_scenesmith_hssd_health_check_uses_retrieval_host_and_port(monkeypatch):
     result = checker.check_service("scenesmith_hssd")
 
     assert result.ok is True
-    assert result.url == "http://127.0.0.1:8124/hssd/healthz"
-    assert captured["url"] == "http://127.0.0.1:8124/hssd/healthz"
+    assert result.url == "http://127.0.0.1:8125/hssd/healthz"
+    assert captured["url"] == "http://127.0.0.1:8125/hssd/healthz"
     assert captured["timeout"] == 1.25
 
 
 def test_scenesmith_ambientcg_health_check_uses_host_override(monkeypatch):
     checker = ServiceHealthChecker(host_override="10.0.0.9", timeout=2.5)
-    monkeypatch.setenv("RETRIEVAL_API_HOST", "127.0.0.1")
-    monkeypatch.setenv("RETRIEVAL_API_PORT", "8124")
+    monkeypatch.setenv("ASSET_RETRIEVAL_BACKEND", "scenesmith")
+    monkeypatch.setenv("SCENESMITH_COMPAT_HOST", "127.0.0.1")
+    monkeypatch.setenv("SCENESMITH_COMPAT_PORT", "8125")
 
     captured: dict[str, object] = {}
 
@@ -97,14 +124,16 @@ def test_scenesmith_ambientcg_health_check_uses_host_override(monkeypatch):
     result = checker.check_service("scenesmith_ambientcg")
 
     assert result.ok is True
-    assert result.url == "http://10.0.0.9:8124/ambientcg/healthz"
-    assert captured["url"] == "http://10.0.0.9:8124/ambientcg/healthz"
+    assert result.url == "http://10.0.0.9:8125/ambientcg/healthz"
+    assert captured["url"] == "http://10.0.0.9:8125/ambientcg/healthz"
     assert captured["timeout"] == 2.5
 
 
 def test_scenesmith_hssd_health_check_uses_shared_tool_service_host(monkeypatch):
     checker = ServiceHealthChecker(timeout=1.0)
-    monkeypatch.delenv("RETRIEVAL_API_HOST", raising=False)
+    monkeypatch.setenv("ASSET_RETRIEVAL_BACKEND", "scenesmith")
+    monkeypatch.delenv("SCENESMITH_COMPAT_HOST", raising=False)
+    monkeypatch.delenv("SCENESMITH_COMPAT_PORT", raising=False)
     monkeypatch.setenv("TOOL_SERVICE_HOST", "10.0.0.9")
 
     captured: dict[str, object] = {}
@@ -119,13 +148,14 @@ def test_scenesmith_hssd_health_check_uses_shared_tool_service_host(monkeypatch)
     result = checker.check_service("scenesmith_hssd")
 
     assert result.ok is True
-    assert result.url == "http://10.0.0.9:8002/hssd/healthz"
-    assert captured["url"] == "http://10.0.0.9:8002/hssd/healthz"
+    assert result.url == "http://10.0.0.9:8005/hssd/healthz"
+    assert captured["url"] == "http://10.0.0.9:8005/hssd/healthz"
 
 
 def test_sam_reconstruct_health_check_uses_shared_tool_service_host(monkeypatch):
     checker = ServiceHealthChecker(timeout=1.0)
-    monkeypatch.delenv("SAM_HTTP_BASE_URL", raising=False)
+    monkeypatch.delenv("SAM_HOST", raising=False)
+    monkeypatch.delenv("SAM_PORT", raising=False)
     monkeypatch.setenv("TOOL_SERVICE_HOST", "10.0.0.9")
 
     captured: dict[str, object] = {}

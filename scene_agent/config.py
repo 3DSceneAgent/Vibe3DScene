@@ -99,6 +99,10 @@ class Settings(BaseSettings):
         default="local-client",
         description="Blender connection mode: local-client or headless"
     )
+    enable_polyhaven: bool = Field(
+        default=True,
+        description="Enable PolyHaven MCP tools"
+    )
     enable_rodin: bool = Field(
         default=False,
         description="Enable Rodin MCP tools in local-client mode"
@@ -141,6 +145,10 @@ class Settings(BaseSettings):
     api_plan_stream_timeout_seconds: int = Field(
         default=1800,
         description="Max seconds to allow an idle plan_mode stream before timing out; <= 0 disables the idle timeout"
+    )
+    fast_mode_default: bool = Field(
+        default=False,
+        description="Default fast mode for chat requests when the client omits fast_mode"
     )
     plan_mode_max_agent_turns: int = Field(
         default=50,

@@ -82,6 +82,7 @@ def test_health_endpoint_reports_fast_mode_feature(monkeypatch):
 
     monkeypatch.setattr(api_routes_system, "get_session_coordinator", lambda: DummyCoordinator())
     monkeypatch.setenv("BLENDER_MODE", "headless")
+    monkeypatch.setenv("FAST_MODE_DEFAULT", "1")
     reload_settings()
 
     with TestClient(api_module.app) as client:
@@ -89,6 +90,9 @@ def test_health_endpoint_reports_fast_mode_feature(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["features"] == {"fast_mode": True}
+    assert response.json()["defaults"] == {"fast_mode": True}
+    monkeypatch.delenv("FAST_MODE_DEFAULT", raising=False)
+    reload_settings()
 
 
 def test_extract_available_tool_hints_filters_invalid_entries():
@@ -181,6 +185,89 @@ def test_chat_endpoint_passes_enabled_tool_names(monkeypatch):
     assert captured_payloads[0]["fast_mode"] is True
 
 
+def test_chat_endpoint_uses_fast_mode_default_when_request_omits_field(monkeypatch):
+    thread_id = f"thread-chat-fast-default-{uuid4().hex}"
+    captured_payloads = []
+
+    class DummyAgent:
+        _available_tool_names = []
+
+        async def ainvoke(self, payload, config=None):
+            _ = config
+            captured_payloads.append(payload)
+            return {"messages": ["ok"], "todos": []}
+
+    async def fake_get_agent(thread_id: str):
+        assert thread_id == thread_id_expected
+        return DummyAgent()
+
+    thread_id_expected = thread_id
+    monkeypatch.setattr(api_routes_chat, "get_agent", fake_get_agent)
+    monkeypatch.setattr(
+        api_routes_chat,
+        "resolve_thread_vlm_for_chat",
+        lambda *_args, **_kwargs: {"provider": "openai", "model": "gpt-4o", "api_key": "test"},
+    )
+    monkeypatch.setenv("FAST_MODE_DEFAULT", "true")
+    reload_settings()
+
+    with TestClient(api_module.app) as client:
+        response = client.post(
+            "/chat",
+            json={
+                "message": "hello",
+                "thread_id": thread_id,
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured_payloads[0]["fast_mode"] is True
+    monkeypatch.delenv("FAST_MODE_DEFAULT", raising=False)
+    reload_settings()
+
+
+def test_chat_endpoint_explicit_fast_mode_false_overrides_default(monkeypatch):
+    thread_id = f"thread-chat-fast-explicit-{uuid4().hex}"
+    captured_payloads = []
+
+    class DummyAgent:
+        _available_tool_names = []
+
+        async def ainvoke(self, payload, config=None):
+            _ = config
+            captured_payloads.append(payload)
+            return {"messages": ["ok"], "todos": []}
+
+    async def fake_get_agent(thread_id: str):
+        assert thread_id == thread_id_expected
+        return DummyAgent()
+
+    thread_id_expected = thread_id
+    monkeypatch.setattr(api_routes_chat, "get_agent", fake_get_agent)
+    monkeypatch.setattr(
+        api_routes_chat,
+        "resolve_thread_vlm_for_chat",
+        lambda *_args, **_kwargs: {"provider": "openai", "model": "gpt-4o", "api_key": "test"},
+    )
+    monkeypatch.setenv("FAST_MODE_DEFAULT", "true")
+    reload_settings()
+
+    with TestClient(api_module.app) as client:
+        response = client.post(
+            "/chat",
+            json={
+                "message": "hello",
+                "thread_id": thread_id,
+                "fast_mode": False,
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured_payloads[0]["fast_mode"] is False
+    monkeypatch.delenv("FAST_MODE_DEFAULT", raising=False)
+    reload_settings()
+
+
 def test_chat_endpoint_serializes_list_content_to_string(monkeypatch):
     thread_id = f"thread-list-content-{uuid4().hex}"
 
@@ -261,3 +348,48 @@ def test_chat_stream_passes_enabled_tool_names(monkeypatch):
     assert captured_payloads
     assert captured_payloads[0]["enabled_tool_names"] == ["get_scene_info"]
     assert captured_payloads[0]["fast_mode"] is True
+
+
+def test_chat_stream_uses_fast_mode_default_when_request_omits_field(monkeypatch):
+    thread_id = f"thread-chat-stream-fast-default-{uuid4().hex}"
+    captured_payloads = []
+
+    class DummyAgent:
+        _available_tool_names = []
+
+        async def astream(self, payload, config=None, stream_mode=None):
+            _ = (config, stream_mode)
+            captured_payloads.append(payload)
+            yield ("messages", [{"type": "ai", "content": "ok"}])
+
+    async def fake_get_agent(thread_id: str):
+        assert thread_id == thread_id_expected
+        return DummyAgent()
+
+    thread_id_expected = thread_id
+    monkeypatch.setattr(api_routes_chat, "get_agent", fake_get_agent)
+    monkeypatch.setattr(
+        api_routes_chat,
+        "resolve_thread_vlm_for_chat",
+        lambda *_args, **_kwargs: {"provider": "openai", "model": "gpt-4o", "api_key": "test"},
+    )
+    monkeypatch.setenv("FAST_MODE_DEFAULT", "true")
+    reload_settings()
+
+    with TestClient(api_module.app) as client:
+        with client.stream(
+            "POST",
+            "/chat/stream",
+            json={
+                "message": "hello",
+                "thread_id": thread_id,
+            },
+        ) as response:
+            assert response.status_code == 200
+            for _ in response.iter_lines():
+                pass
+
+    assert captured_payloads
+    assert captured_payloads[0]["fast_mode"] is True
+    monkeypatch.delenv("FAST_MODE_DEFAULT", raising=False)
+    reload_settings()

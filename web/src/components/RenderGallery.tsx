@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react'
 import type { RenderImage } from '../api/types'
 import { resolveMediaUrl } from '../utils/url'
 
@@ -7,6 +8,7 @@ type RenderGalleryProps = {
   backendUrl: string
   includeLocalWork: boolean
   onIncludeLocalWorkChange: (enabled: boolean) => void
+  style?: CSSProperties
 }
 
 export function RenderGallery({
@@ -14,12 +16,13 @@ export function RenderGallery({
   isLoading,
   backendUrl,
   includeLocalWork,
-  onIncludeLocalWorkChange
+  onIncludeLocalWorkChange,
+  style
 }: RenderGalleryProps) {
   const hasRenders = renders.length > 0
 
   return (
-    <div className={`scene-renders-panel ${hasRenders ? 'has-renders' : 'is-empty'}`}>
+    <div className={`scene-renders-panel ${hasRenders ? 'has-renders' : 'is-empty'}`} style={style}>
       <div className="panel-header">
         <div className="panel-title">Camera Renders</div>
         <label className="toggle-switch">

@@ -18,6 +18,7 @@ type GltfViewerProps = {
   environment: EnvironmentPreset
   viewportTheme?: ViewportTheme
   uiTheme?: UiTheme
+  twoSidedRendering?: boolean
   onHierarchyChange?: (nodes: SceneHierarchyNode[]) => void
   isFullscreen?: boolean
   onToggleFullscreen?: () => void
@@ -274,11 +275,48 @@ function disposeObject3D(object: THREE.Object3D | null): void {
   })
 }
 
+function visitMaterials(
+  material: THREE.Material | THREE.Material[] | undefined,
+  visitor: (entry: THREE.Material) => void
+): void {
+  if (!material) return
+  if (Array.isArray(material)) {
+    material.forEach((entry) => visitor(entry))
+    return
+  }
+  visitor(material)
+}
+
+function applyTwoSidedRenderingState(
+  object: THREE.Object3D | null,
+  enabled: boolean,
+  originalSides: WeakMap<THREE.Material, number>
+): void {
+  if (!object) return
+  object.traverse((entry: THREE.Object3D) => {
+    const material = (entry as { material?: THREE.Material | THREE.Material[] }).material
+    visitMaterials(material, (currentMaterial) => {
+      if (!originalSides.has(currentMaterial)) {
+        originalSides.set(currentMaterial, currentMaterial.side as number)
+      }
+      const originalSide = originalSides.get(currentMaterial)
+      if (typeof originalSide !== 'number') return
+
+      const nextSide = enabled ? THREE.DoubleSide : originalSide
+      if (currentMaterial.side === nextSide) return
+
+      currentMaterial.side = nextSide as THREE.Side
+      currentMaterial.needsUpdate = true
+    })
+  })
+}
+
 export function GltfViewer({
   gltfUrl,
   environment,
   viewportTheme = 'auto',
   uiTheme = 'dark',
+  twoSidedRendering = false,
   onHierarchyChange,
   isFullscreen = false,
   onToggleFullscreen,
@@ -304,6 +342,8 @@ export function GltfViewer({
   const cameraViewRef = useRef<{ position: THREE.Vector3; target: THREE.Vector3 } | null>(null)
   const hasUserCameraOverrideRef = useRef(false)
   const resizeRendererRef = useRef<(() => void) | null>(null)
+  const originalMaterialSidesRef = useRef<WeakMap<THREE.Material, number>>(new WeakMap())
+  const twoSidedRenderingRef = useRef(twoSidedRendering)
   const [useFallbackLighting, setUseFallbackLighting] = useState(true)
 
   const preset = useMemo(() => environmentPresets[environment], [environment])
@@ -328,6 +368,11 @@ export function GltfViewer({
   useEffect(() => {
     alwaysAutoFrameCameraRef.current = alwaysAutoFrameCamera
   }, [alwaysAutoFrameCamera])
+
+  useEffect(() => {
+    twoSidedRenderingRef.current = twoSidedRendering
+    applyTwoSidedRenderingState(modelRef.current, twoSidedRendering, originalMaterialSidesRef.current)
+  }, [twoSidedRendering])
 
   useEffect(() => {
     if (alwaysAutoFrameCamera) {
@@ -645,6 +690,11 @@ export function GltfViewer({
           normalizeEmbeddedLightIntensities(gltf.scene)
         }
         setUseFallbackLighting(!hasEmbeddedLights)
+        applyTwoSidedRenderingState(
+          gltf.scene,
+          twoSidedRenderingRef.current,
+          originalMaterialSidesRef.current
+        )
         modelRef.current = gltf.scene
         scene.add(gltf.scene)
 

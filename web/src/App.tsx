@@ -147,6 +147,33 @@ function formatThreadCreateError(error: unknown): string {
   return 'Unable to create a new session. Please try again later.'
 }
 
+function resolveFastModeHealthState(health: {
+  features?: { fast_mode?: boolean }
+  defaults?: { fast_mode?: boolean }
+}): { available: boolean; defaultEnabled: boolean } {
+  const available = health.features?.fast_mode === true
+  return {
+    available,
+    defaultEnabled: available && health.defaults?.fast_mode === true
+  }
+}
+
+function finalizeStreamingAssistants(messages: Message[], keepAssistantId?: string | null): Message[] {
+  let changed = false
+  const nextMessages = messages.map((message): Message => {
+    if (
+      message.role !== 'assistant' ||
+      message.status !== 'streaming' ||
+      (keepAssistantId != null && message.id === keepAssistantId)
+    ) {
+      return message
+    }
+    changed = true
+    return { ...message, thinkingActive: false, status: 'final' as const }
+  })
+  return changed ? nextMessages : messages
+}
+
 function App() {
   const REQUEST_TIMEOUT_MS = 35000
   // Claiming a headless runtime can cold-start Blender + MCP on the first request.
@@ -165,6 +192,7 @@ function App() {
   const [backendStatus, setBackendStatus] = useState<'online' | 'offline' | 'checking'>('checking')
   const [backendMode, setBackendMode] = useState<'headless' | 'local-client' | null>(null)
   const [fastModeAvailable, setFastModeAvailable] = useState(false)
+  const [fastModeDefault, setFastModeDefault] = useState(false)
   const [examplePrompts, setExamplePrompts] = useState<string[]>([])
   const [mcpToolsByThread, setMcpToolsByThread] = useState<Record<string, string[]>>({})
   const [mcpToolHintsByThread, setMcpToolHintsByThread] = useState<Record<string, Record<string, string>>>({})
@@ -209,6 +237,10 @@ function App() {
   const activeThreadLoading = useMemo(
     () => (activeThread ? loadingByThread[activeThread.id] ?? createThreadLoadingState() : createThreadLoadingState()),
     [activeThread, loadingByThread]
+  )
+  const activeThreadFastMode = useMemo(
+    () => Boolean(activeThread?.fastMode ?? fastModeDefault),
+    [activeThread, fastModeDefault]
   )
   const activeSceneActionError = useMemo(
     () => (activeThread ? sceneActionErrorByThread[activeThread.id] ?? null : null),
@@ -417,6 +449,7 @@ function App() {
           setBackendStatus('offline')
           setBackendMode(null)
           setFastModeAvailable(false)
+          setFastModeDefault(false)
         }
         return
       }
@@ -428,16 +461,19 @@ function App() {
       const timeoutId = window.setTimeout(() => controller.abort(), 3000)
       try {
         const health = await getHealth(settings.backendUrl, controller.signal)
+        const fastModeState = resolveFastModeHealthState(health)
         if (isActive) {
           setBackendStatus('online')
           setBackendMode(health.blender_mode ?? null)
-          setFastModeAvailable(health.features?.fast_mode === true)
+          setFastModeAvailable(fastModeState.available)
+          setFastModeDefault(fastModeState.defaultEnabled)
         }
       } catch {
         if (isActive) {
           setBackendStatus('offline')
           setBackendMode(null)
           setFastModeAvailable(false)
+          setFastModeDefault(false)
         }
       } finally {
         window.clearTimeout(timeoutId)
@@ -672,7 +708,7 @@ function App() {
         createdAt: Date.now(),
         messages: [],
         mcpToolEnabled: {},
-        fastMode: false,
+        fastMode: fastModeAvailable ? fastModeDefault : undefined,
         vlmProvider: initialProvider,
         vlmModel: initialModel,
         vlmLocked: false,
@@ -857,15 +893,11 @@ function App() {
     }
     
     if (currentStreamRef.current) {
-      const { threadId, assistantId, runId } = currentStreamRef.current
-      updateThread(threadId, (thread) => ({
-        ...thread,
-        messages: thread.messages.map((message) =>
-          message.id === assistantId && message.status === 'streaming'
-            ? { ...message, status: 'final' }
-            : message
-        )
-      }))
+      const { threadId, runId } = currentStreamRef.current
+      updateThread(threadId, (thread) => {
+        const messages = finalizeStreamingAssistants(thread.messages)
+        return messages === thread.messages ? thread : { ...thread, messages }
+      })
       setThreadStreamStatus(threadId, 'complete')
       if (streamRunIdRef.current === runId) {
         streamRunIdRef.current += 1
@@ -911,6 +943,7 @@ function App() {
       id: assistantId,
       role: 'assistant',
       content: '',
+      thinkingActive: false,
       createdAt: now,
       streamId: null,
       status: 'streaming'
@@ -940,6 +973,7 @@ function App() {
               ? {
                   ...item,
                   content: `Unable to send message: ${message}`,
+                  thinkingActive: false,
                   status: 'error'
                 }
               : item
@@ -998,25 +1032,31 @@ function App() {
     }
 
     let resolvedFastModeAvailable = fastModeAvailable
+    let resolvedFastModeDefault = fastModeDefault
     try {
       let resolvedBackendStatus = backendStatus
       let resolvedBackendMode = backendMode
       if ((resolvedBackendStatus === 'checking' || !resolvedFastModeAvailable) && settings.backendUrl) {
         try {
           const health = await getHealth(settings.backendUrl)
+          const fastModeState = resolveFastModeHealthState(health)
           setBackendStatus('online')
           setBackendMode(health.blender_mode ?? null)
-          setFastModeAvailable(health.features?.fast_mode === true)
+          setFastModeAvailable(fastModeState.available)
+          setFastModeDefault(fastModeState.defaultEnabled)
           resolvedBackendStatus = 'online'
           resolvedBackendMode = health.blender_mode ?? null
-          resolvedFastModeAvailable = health.features?.fast_mode === true
+          resolvedFastModeAvailable = fastModeState.available
+          resolvedFastModeDefault = fastModeState.defaultEnabled
         } catch {
           setBackendStatus('offline')
           setBackendMode(null)
           setFastModeAvailable(false)
+          setFastModeDefault(false)
           resolvedBackendStatus = 'offline'
           resolvedBackendMode = null
           resolvedFastModeAvailable = false
+          resolvedFastModeDefault = false
         }
       }
 
@@ -1112,21 +1152,19 @@ function App() {
     const enabledMcpTools = hasMcpToolSnapshot
       ? availableMcpTools.filter((toolName) => activeThread.mcpToolEnabled?.[toolName] !== false)
       : undefined
-    const requestedFastMode = Boolean(resolvedFastModeAvailable && activeThread.fastMode)
+    const requestedFastMode = resolvedFastModeAvailable
+      ? Boolean(activeThread.fastMode ?? resolvedFastModeDefault)
+      : false
 
     if (streamAbortRef.current) {
       streamAbortRef.current.abort()
     }
     if (currentStreamRef.current) {
-      const { threadId: previousThreadId, assistantId: previousAssistantId } = currentStreamRef.current
-      updateThread(previousThreadId, (thread) => ({
-        ...thread,
-        messages: thread.messages.map((message) =>
-          message.id === previousAssistantId && message.status === 'streaming'
-            ? { ...message, status: 'final' }
-            : message
-        )
-      }))
+      const { threadId: previousThreadId } = currentStreamRef.current
+      updateThread(previousThreadId, (thread) => {
+        const messages = finalizeStreamingAssistants(thread.messages)
+        return messages === thread.messages ? thread : { ...thread, messages }
+      })
       setThreadStreamStatus(previousThreadId, 'complete')
       currentStreamRef.current = null
     }
@@ -1164,7 +1202,7 @@ function App() {
       updateThread(threadId, (thread) => {
         const finalizedMessages: Message[] = thread.messages.map((message): Message => (
           message.status === 'streaming'
-            ? { ...message, status: 'final' as const }
+            ? { ...message, thinkingActive: false, status: 'final' as const }
             : message
         ))
         const errorMessage: Message = {
@@ -1227,13 +1265,14 @@ function App() {
           id: newAssistantId,
           role: 'assistant',
           content: '',
+          thinkingActive: false,
           createdAt: Date.now(),
           streamId: messageId,
           status: 'streaming'
         }
         updateThread(threadId, (thread) => ({
           ...thread,
-          messages: [...thread.messages, newMessage]
+          messages: [...finalizeStreamingAssistants(thread.messages), newMessage]
         }))
         return newAssistantId
       }
@@ -1291,6 +1330,7 @@ function App() {
         updateAssistantById(targetAssistantId, (message) => ({
           ...message,
           thinking: `${message.thinking ?? ''}${event.thinking_delta ?? ''}`,
+          thinkingActive: true,
           streamId: event.message_id ?? message.streamId ?? null,
           status: 'streaming'
         }))
@@ -1312,7 +1352,10 @@ function App() {
           return {
             ...message,
             content: next.text,
-            thinking: next.thinking,
+            // Some providers stream reasoning separately from visible text.
+            // Preserve previously received thinking when the text delta itself carries none.
+            thinking: next.thinking ?? message.thinking,
+            thinkingActive: false,
             raw: next.raw,
             streamId: next.messageId,
             status: 'streaming'
@@ -1354,7 +1397,7 @@ function App() {
         if (toolEntries.length > 0) {
           updateThread(threadId, (thread) => ({
             ...thread,
-            messages: [...thread.messages, ...toolEntries]
+            messages: [...finalizeStreamingAssistants(thread.messages), ...toolEntries]
           }))
         }
 
@@ -1398,6 +1441,7 @@ function App() {
           ...message,
           content: parsed.text,
           thinking: providerThinking || parsed.thinking || message.thinking,
+          thinkingActive: false,
           raw,
           streamId,
           status: 'streaming'
@@ -1442,7 +1486,7 @@ function App() {
           ...thread,
           messages: thread.messages.map((message) =>
             message.status === 'streaming'
-              ? { ...message, status: 'final' }
+              ? { ...message, thinkingActive: false, status: 'final' }
               : message
             )
         }))
@@ -1553,28 +1597,6 @@ function App() {
       setThreadLoading(targetId, { gltf: false })
     }
   }, [activeThread?.id, requireHeadlessRuntimeForAction, settings.backendUrl, setSceneActionError, setThreadLoading, updateThread])
-
-  const uploadDebugGltf = useCallback(
-    (file: File) => {
-      if (!activeThread) return
-      const targetId = activeThread.id
-      const filename = file.name.trim().toLowerCase()
-      if (!(filename.endsWith('.glb') || filename.endsWith('.gltf'))) {
-        setSceneActionError(targetId, 'Debug upload only supports .glb / .gltf files.')
-        return
-      }
-
-      const nextUrl = URL.createObjectURL(file)
-      setSceneActionError(targetId, null)
-      updateThread(targetId, (thread) => {
-        if (thread.gltfUrl) {
-          URL.revokeObjectURL(thread.gltfUrl)
-        }
-        return { ...thread, gltfUrl: nextUrl }
-      })
-    },
-    [activeThread, setSceneActionError, updateThread]
-  )
 
   const triggerAutoFetch = useCallback(
     (threadId: string, force: boolean = false) => {
@@ -1721,79 +1743,84 @@ function App() {
             </div>
           )}
           <button
-            className="ghost-btn icon-btn"
+            className="ghost-btn icon-btn sidebar-toggle-btn"
+            type="button"
             onClick={() => setIsSidebarCollapsed((prev) => !prev)}
             aria-label={isSidebarCollapsed ? 'Expand conversation history' : 'Collapse conversation history'}
+            title={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           >
             {isSidebarCollapsed ? '›' : '‹'}
           </button>
         </div>
-        <ThreadList
-          threads={threads}
-          activeId={activeThreadId}
-          onSelect={(id) => {
-            setActiveThreadId(id)
-          }}
-          onDelete={deleteThread}
-          onNew={() => {
-            void createThread()
-          }}
-          onReleaseRuntime={(threadId) => {
-            void releaseThreadRuntimeForThread(threadId)
-          }}
-          creating={creatingThread}
-          createDisabled={creatingThread || releasingThreadId !== null}
-          releasingThreadId={releasingThreadId}
-          createError={threadCreateError}
-          createHint={threadCreateHint}
-          quotaHint={quotaHint}
-          collapsed={isSidebarCollapsed}
-        />
-        <div className="sidebar-footer">
-          <div className={`sidebar-status-card ${isSidebarCollapsed ? 'compact' : ''}`} title={`Backend: ${settings.backendUrl}`}>
-            <span className={`status-dot ${backendStatus}`} />
-            {!isSidebarCollapsed && <span className="status-text">{statusText}</span>}
-          </div>
-          <div className="sidebar-shortcuts">
-            <button
-              className="ghost-btn sidebar-icon-btn"
-              type="button"
-              onClick={() => setShowSettings(true)}
-              title="Settings"
-              aria-label="Open settings"
-            >
-              <svg className="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M12.22 2h-.44a2 2 0 0 0-1.99 1.82l-.2 2.09a7.5 7.5 0 0 0-1.67.96L6 5.74a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l1.8 1.04a7.5 7.5 0 0 0 0 1.92l-1.8 1.04a2 2 0 0 0-.73 2.73l.22.38A2 2 0 0 0 6 18.26l1.92-1.13a7.5 7.5 0 0 0 1.67.96l.2 2.09A2 2 0 0 0 11.78 22h.44a2 2 0 0 0 1.99-1.82l.2-2.09a7.5 7.5 0 0 0 1.67-.96L18 18.26a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-1.8-1.04a7.5 7.5 0 0 0 0-1.92l1.8-1.04a2 2 0 0 0 .73-2.73l-.22-.38A2 2 0 0 0 18 5.74l-1.92 1.13a7.5 7.5 0 0 0-1.67-.96l-.2-2.09A2 2 0 0 0 12.22 2z" />
-                <circle cx="12" cy="12" r="2.7" />
-              </svg>
-            </button>
-            <a
-              className="ghost-btn sidebar-icon-btn"
-              href={projectWebsiteUrl}
-              target="_blank"
-              rel="noreferrer"
-              title="Website"
-              aria-label="Open project website"
-            >
-              <svg className="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <circle cx="12" cy="12" r="8.5" />
-                <path d="M3.5 12h17M12 3.5c2.3 2.1 3.5 5.3 3.5 8.5S14.3 18.4 12 20.5c-2.3-2.1-3.5-5.3-3.5-8.5S9.7 5.6 12 3.5" />
-              </svg>
-            </a>
-            <a
-              className="ghost-btn sidebar-icon-btn"
-              href={projectGithubUrl}
-              target="_blank"
-              rel="noreferrer"
-              title="GitHub"
-              aria-label="Open project GitHub"
-            >
-              <svg className="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M9 19c-4.7 1.4-4.7-2.2-6.6-2.6M15 21v-3.1a2.7 2.7 0 0 0-.8-2.1c2.8-.3 5.8-1.4 5.8-6.2a4.8 4.8 0 0 0-1.3-3.3a4.5 4.5 0 0 0-.1-3.2s-1.1-.3-3.6 1.3a12.5 12.5 0 0 0-6 0C6.5 2.8 5.4 3.1 5.4 3.1a4.5 4.5 0 0 0-.1 3.2A4.8 4.8 0 0 0 4 9.6c0 4.8 2.9 5.9 5.8 6.2a2.6 2.6 0 0 0-.8 2.1V21" />
-              </svg>
-            </a>
-          </div>
-        </div>
+        {!isSidebarCollapsed && (
+          <>
+            <ThreadList
+              threads={threads}
+              activeId={activeThreadId}
+              onSelect={(id) => {
+                setActiveThreadId(id)
+              }}
+              onDelete={deleteThread}
+              onNew={() => {
+                void createThread()
+              }}
+              onReleaseRuntime={(threadId) => {
+                void releaseThreadRuntimeForThread(threadId)
+              }}
+              creating={creatingThread}
+              createDisabled={creatingThread || releasingThreadId !== null}
+              releasingThreadId={releasingThreadId}
+              createError={threadCreateError}
+              createHint={threadCreateHint}
+              quotaHint={quotaHint}
+            />
+            <div className="sidebar-footer">
+              <div className="sidebar-status-card" title={`Backend: ${settings.backendUrl}`}>
+                <span className={`status-dot ${backendStatus}`} />
+                <span className="status-text">{statusText}</span>
+              </div>
+              <div className="sidebar-shortcuts">
+                <button
+                  className="ghost-btn sidebar-icon-btn"
+                  type="button"
+                  onClick={() => setShowSettings(true)}
+                  title="Settings"
+                  aria-label="Open settings"
+                >
+                  <svg className="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12.22 2h-.44a2 2 0 0 0-1.99 1.82l-.2 2.09a7.5 7.5 0 0 0-1.67.96L6 5.74a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l1.8 1.04a7.5 7.5 0 0 0 0 1.92l-1.8 1.04a2 2 0 0 0-.73 2.73l.22.38A2 2 0 0 0 6 18.26l1.92-1.13a7.5 7.5 0 0 0 1.67.96l.2 2.09A2 2 0 0 0 11.78 22h.44a2 2 0 0 0 1.99-1.82l.2-2.09a7.5 7.5 0 0 0 1.67-.96L18 18.26a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-1.8-1.04a7.5 7.5 0 0 0 0-1.92l1.8-1.04a2 2 0 0 0 .73-2.73l-.22-.38A2 2 0 0 0 18 5.74l-1.92 1.13a7.5 7.5 0 0 0-1.67-.96l-.2-2.09A2 2 0 0 0 12.22 2z" />
+                    <circle cx="12" cy="12" r="2.7" />
+                  </svg>
+                </button>
+                <a
+                  className="ghost-btn sidebar-icon-btn"
+                  href={projectWebsiteUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  title="Website"
+                  aria-label="Open project website"
+                >
+                  <svg className="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="12" cy="12" r="8.5" />
+                    <path d="M3.5 12h17M12 3.5c2.3 2.1 3.5 5.3 3.5 8.5S14.3 18.4 12 20.5c-2.3-2.1-3.5-5.3-3.5-8.5S9.7 5.6 12 3.5" />
+                  </svg>
+                </a>
+                <a
+                  className="ghost-btn sidebar-icon-btn"
+                  href={projectGithubUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  title="GitHub"
+                  aria-label="Open project GitHub"
+                >
+                  <svg className="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M9 19c-4.7 1.4-4.7-2.2-6.6-2.6M15 21v-3.1a2.7 2.7 0 0 0-.8-2.1c2.8-.3 5.8-1.4 5.8-6.2a4.8 4.8 0 0 0-1.3-3.3a4.5 4.5 0 0 0-.1-3.2s-1.1-.3-3.6 1.3a12.5 12.5 0 0 0-6 0C6.5 2.8 5.4 3.1 5.4 3.1a4.5 4.5 0 0 0-.1 3.2A4.8 4.8 0 0 0 4 9.6c0 4.8 2.9 5.9 5.8 6.2a2.6 2.6 0 0 0-.8 2.1V21" />
+                  </svg>
+                </a>
+              </div>
+            </div>
+          </>
+        )}
       </aside>
 
       <main className="main">
@@ -1835,7 +1862,7 @@ function App() {
                   vlmProviders={vlmProviders}
                   vlmProvider={activeThread.vlmProvider ?? vlmDefaultProvider}
                   vlmModel={activeThread.vlmModel ?? vlmDefaultModel}
-                  fastMode={Boolean(activeThread.fastMode)}
+                  fastMode={activeThreadFastMode}
                   fastModeAvailable={fastModeAvailable}
                   vlmLoading={vlmLoadingThreadId === activeThread.id}
                   vlmError={vlmErrorByThread[activeThread.id] ?? null}
@@ -1864,7 +1891,6 @@ function App() {
                   onEnvironmentChange={setEnvironment}
                   onFetchRenders={(includeLocalWork) => void fetchRenders(undefined, includeLocalWork ?? false)}
                   onFetchGltf={() => void fetchGltf()}
-                  onDebugUploadGltf={uploadDebugGltf}
                   onDownloadGltf={() => void downloadGltf()}
                   onDownloadBlend={() => void downloadBlend()}
                   onDownloadBlendFile={(relativePath, filename) => void downloadBlendFile(relativePath, filename)}

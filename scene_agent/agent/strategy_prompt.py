@@ -12,12 +12,13 @@ from typing import TypedDict
 
 
 class AssetWorkflowAvailability(TypedDict):
+    polyhaven_ready: bool
     sketchfab_ready: bool
     infinigen_ready: bool
     trellis2_ready: bool
     rodin_ready: bool
     hunyuan_ready: bool
-    retrieval_ready: bool
+    objaverse_retrieval_ready: bool
     scenesmith_hssd_ready: bool
     scenesmith_ambientcg_ready: bool
     sam_reconstruct_ready: bool
@@ -25,6 +26,13 @@ class AssetWorkflowAvailability(TypedDict):
     clear_scene_ready: bool
 
 
+POLYHAVEN_WORKFLOW_TOOLS: frozenset[str] = frozenset(
+    {
+        "search_polyhaven_assets",
+        "download_polyhaven_asset",
+        "set_texture",
+    }
+)
 SKETCHFAB_WORKFLOW_TOOLS: frozenset[str] = frozenset(
     {
         "search_sketchfab_models",
@@ -49,7 +57,7 @@ RODIN_WORKFLOW_TOOLS: frozenset[str] = frozenset(
     }
 )
 HUNYUAN_WORKFLOW_TOOLS: frozenset[str] = frozenset({"generate_hunyuan3d_model"})
-RETRIEVAL_WORKFLOW_TOOLS: frozenset[str] = frozenset(
+OBJAVERSE_RETRIEVAL_WORKFLOW_TOOLS: frozenset[str] = frozenset(
     {
         "search_3d_assets_by_text",
         "import_retrieved_asset",
@@ -94,12 +102,13 @@ def infer_asset_workflow_availability(
 ) -> AssetWorkflowAvailability:
     tool_names = _normalize_tool_names(available_tool_names)
     return {
+        "polyhaven_ready": POLYHAVEN_WORKFLOW_TOOLS.issubset(tool_names),
         "sketchfab_ready": SKETCHFAB_WORKFLOW_TOOLS.issubset(tool_names),
         "infinigen_ready": INFINIGEN_WORKFLOW_TOOLS.issubset(tool_names),
         "trellis2_ready": TRELLIS2_WORKFLOW_TOOLS.issubset(tool_names),
         "rodin_ready": RODIN_WORKFLOW_TOOLS.issubset(tool_names),
         "hunyuan_ready": HUNYUAN_WORKFLOW_TOOLS.issubset(tool_names),
-        "retrieval_ready": RETRIEVAL_WORKFLOW_TOOLS.issubset(tool_names),
+        "objaverse_retrieval_ready": OBJAVERSE_RETRIEVAL_WORKFLOW_TOOLS.issubset(tool_names),
         "scenesmith_hssd_ready": SCENESMITH_HSSD_WORKFLOW_TOOLS.issubset(tool_names),
         "scenesmith_ambientcg_ready": SCENESMITH_AMBIENTCG_WORKFLOW_TOOLS.issubset(tool_names),
         "sam_reconstruct_ready": SAM_RECONSTRUCT_WORKFLOW_TOOLS.issubset(tool_names),
@@ -110,12 +119,13 @@ def infer_asset_workflow_availability(
 
 def build_asset_creation_strategy_text(
     *,
+    polyhaven_ready: bool,
     sketchfab_ready: bool,
     infinigen_ready: bool,
     trellis2_ready: bool,
     rodin_ready: bool,
     hunyuan_ready: bool,
-    retrieval_ready: bool,
+    objaverse_retrieval_ready: bool,
     scenesmith_hssd_ready: bool,
     scenesmith_ambientcg_ready: bool,
     sam_reconstruct_ready: bool,
@@ -194,18 +204,20 @@ def build_asset_creation_strategy_text(
     )
 
     # Phase 2: Available asset workflows
-    lines.extend(
-        [
-            "2. Available asset workflows (no status-check tools needed):",
-            "   - PolyHaven (always available)",
-            "     - Flow: search_polyhaven_assets() -> download_polyhaven_asset()",
-            '     - Objects/models: download_polyhaven_asset(asset_type="models")',
-            '     - Materials/textures: download_polyhaven_asset(asset_type="textures")',
-            "       then set_texture() to apply downloaded textures to existing meshes",
-            '     - Environment lighting: download_polyhaven_asset(asset_type="hdris")',
-            "     - Best for physically plausible materials and HDRI lighting setup",
-        ]
-    )
+    lines.append("2. Available asset workflows (no status-check tools needed):")
+
+    if polyhaven_ready:
+        lines.extend(
+            [
+                "   - PolyHaven",
+                "     - Flow: search_polyhaven_assets() -> download_polyhaven_asset()",
+                '     - Objects/models: download_polyhaven_asset(asset_type="models")',
+                '     - Materials/textures: download_polyhaven_asset(asset_type="textures")',
+                "       then set_texture() to apply downloaded textures to existing meshes",
+                '     - Environment lighting: download_polyhaven_asset(asset_type="hdris")',
+                "     - Best for physically plausible materials and HDRI lighting setup",
+            ]
+        )
 
     if sketchfab_ready:
         lines.extend(
@@ -260,13 +272,16 @@ def build_asset_creation_strategy_text(
             ]
         )
 
-    if retrieval_ready:
+    if objaverse_retrieval_ready:
         lines.extend(
             [
                 "   - 3D Asset Retrieval Database",
                 "     - Flow: search_3d_assets_by_text(query=..., top_k=...)"
                 " -> import_retrieved_asset(model_url=..., object_name=...)",
                 "     - Best for common real-world objects and fast scene assembly",
+                "     - Retrieval captions and similarity scores can be noisy; do not reject a candidate solely from its text label.",
+                "     - If a top result is even plausibly relevant, import the best candidate first.",
+                "     - Only abandon retrieval after imported candidates are visually wrong or the top results are clearly unrelated.",
             ]
         )
 
@@ -277,6 +292,7 @@ def build_asset_creation_strategy_text(
                 "     - Flow: search_hssd_assets(query=..., object_type=..., top_k=..., desired_dimensions_m=...)"
                 " -> import_hssd_asset(download_url=..., object_name=...)",
                 "     - Best for indoor scene objects when category and target dimensions matter",
+                "     - Prefer importing a plausible candidate instead of judging only from returned names/categories.",
             ]
         )
 
@@ -313,12 +329,29 @@ def build_asset_creation_strategy_text(
 
     if not any(
         [
+            polyhaven_ready,
             sketchfab_ready,
             infinigen_ready,
             trellis2_ready,
             rodin_ready,
             hunyuan_ready,
-            retrieval_ready,
+            objaverse_retrieval_ready,
+            scenesmith_hssd_ready,
+            scenesmith_ambientcg_ready,
+            sam_reconstruct_ready,
+        ]
+    ):
+        lines.append(
+            "   - Note: No asset-library or generator workflow is currently enabled; rely on direct Blender edits and imports."
+        )
+    elif polyhaven_ready and not any(
+        [
+            sketchfab_ready,
+            infinigen_ready,
+            trellis2_ready,
+            rodin_ready,
+            hunyuan_ready,
+            objaverse_retrieval_ready,
             scenesmith_hssd_ready,
             scenesmith_ambientcg_ready,
             sam_reconstruct_ready,
@@ -350,11 +383,11 @@ def build_asset_creation_strategy_text(
 
     # Phase 4: Source priority
     priority_rules: list[str] = []
-    if sketchfab_ready and retrieval_ready:
+    if sketchfab_ready and objaverse_retrieval_ready:
         priority_rules.append("For realistic authored objects: Sketchfab -> Retrieval")
     elif sketchfab_ready:
         priority_rules.append("For realistic authored objects: Sketchfab")
-    elif retrieval_ready:
+    elif objaverse_retrieval_ready:
         priority_rules.append("For realistic authored objects: Retrieval")
 
     if sam_reconstruct_ready:
@@ -363,30 +396,30 @@ def build_asset_creation_strategy_text(
         )
 
     if infinigen_ready:
-        if sketchfab_ready and retrieval_ready:
+        if sketchfab_ready and objaverse_retrieval_ready:
             priority_rules.append(
                 "For natural or indoor procedural assets: Infinigen first, then Sketchfab, then Retrieval"
             )
         elif sketchfab_ready:
             priority_rules.append("For natural or indoor procedural assets: Infinigen first, then Sketchfab")
-        elif retrieval_ready:
+        elif objaverse_retrieval_ready:
             priority_rules.append("For natural or indoor procedural assets: Infinigen first, then Retrieval")
         else:
             priority_rules.append("For natural or indoor procedural assets: Infinigen")
 
-    if rodin_ready and retrieval_ready:
+    if rodin_ready and objaverse_retrieval_ready:
         priority_rules.append("For unique custom objects: Retrieval first, then Rodin")
     elif rodin_ready:
         priority_rules.append("For unique custom objects: Rodin")
-    elif retrieval_ready:
+    elif objaverse_retrieval_ready:
         priority_rules.append("For unique custom objects: Retrieval")
 
-    if trellis2_ready and retrieval_ready:
+    if trellis2_ready and objaverse_retrieval_ready:
         priority_rules.append("For custom generation fallback: Retrieval first, then TRELLIS2")
     elif trellis2_ready:
         priority_rules.append("For custom generation fallback: TRELLIS2")
 
-    if hunyuan_ready and retrieval_ready:
+    if hunyuan_ready and objaverse_retrieval_ready:
         priority_rules.append("For unique-object fallback: Retrieval first, then Hunyuan3D")
     elif hunyuan_ready:
         priority_rules.append("For unique-object fallback: Hunyuan3D")
@@ -396,17 +429,30 @@ def build_asset_creation_strategy_text(
             "For indoor furniture or size-sensitive library objects: SceneSmith HSSD before generic generation"
         )
 
-    if scenesmith_ambientcg_ready:
+    if scenesmith_ambientcg_ready and polyhaven_ready:
         priority_rules.append("For PBR materials/textures on existing meshes: SceneSmith AmbientCG or PolyHaven")
+    elif scenesmith_ambientcg_ready:
+        priority_rules.append("For PBR materials/textures on existing meshes: SceneSmith AmbientCG")
 
     lines.append("4. Recommended source priority among available workflows:")
     if priority_rules:
         for rule in priority_rules:
             lines.append(f"   - {rule}")
-    else:
+    elif polyhaven_ready:
         lines.append("   - Use PolyHaven for materials/textures/HDRIs; rely on scripting for custom geometry.")
+    else:
+        lines.append(
+            "   - No asset-library workflow is enabled; rely on direct scripting/import tools for geometry and materials."
+        )
 
-    lines.append("   - Environment lighting and PBR textures: PolyHaven first.")
+    if polyhaven_ready:
+        lines.append("   - Environment lighting and PBR textures: PolyHaven first.")
+    elif scenesmith_ambientcg_ready:
+        lines.append("   - PBR textures on existing meshes: SceneSmith AmbientCG first.")
+    else:
+        lines.append(
+            "   - Environment lighting and PBR textures: configure them explicitly via scripting or imported assets."
+        )
     lines.append("   - Simple primitives (cube/sphere/plane): create directly via scripting.")
 
     # Phase 5: Multimodal feedback loop

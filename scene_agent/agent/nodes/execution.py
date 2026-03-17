@@ -21,6 +21,7 @@ from scene_agent.utils.todo_helpers import (
     coerce_non_negative_int,
 )
 from .constants_runtime import (
+    FAST_MODE_EVIDENCE_TOOLS,
     RENDER_VISION_MESSAGE_ID,
     SCENE_MUTATING_TOOLS,
     SCENE_OBSERVE_MESSAGE_ID,
@@ -35,6 +36,30 @@ from .shared import (
     run_viewport_scene_observe,
     should_use_viewport_scene_observe,
 )
+
+
+def _clear_scene_observe_context() -> Dict[str, Any]:
+    """Replace any prior auto-observe image with a non-visual placeholder."""
+    return {
+        "messages": [
+            HumanMessage(
+                id=SCENE_OBSERVE_MESSAGE_ID,
+                content=[
+                    {
+                        "type": "text",
+                        "text": (
+                            "Auto scene observation is unavailable for this turn. "
+                            "Do not use prior auto-observe screenshots as current evidence."
+                        ),
+                    }
+                ],
+            )
+        ],
+        "last_render_path": None,
+        "last_render_source": "",
+        "scene_camera_params": {},
+        "scene_bbox": {},
+    }
 
 
 def update_memory_node(state: AgentState) -> Dict[str, Any]:
@@ -55,6 +80,11 @@ def update_memory_node(state: AgentState) -> Dict[str, Any]:
         result["tool_round_count"] = coerce_non_negative_int(state.get("tool_round_count")) + 1
         next_request_batches = coerce_non_negative_int(state.get("request_tool_batches")) + 1
         result["request_tool_batches"] = next_request_batches
+        if state.get("fast_mode") is True:
+            if any(name in SCENE_MUTATING_TOOLS for name in latest_tool_batch_names):
+                result["fast_mode_last_mutation_batch"] = next_request_batches
+            if any(name in FAST_MODE_EVIDENCE_TOOLS for name in latest_tool_batch_names):
+                result["fast_mode_last_evidence_batch"] = next_request_batches
 
     for msg in last_messages:
         if isinstance(msg, ToolMessage) and "get_scene_info" in str(msg.name):
@@ -176,7 +206,7 @@ def scene_observe_node(state: AgentState) -> Dict[str, Any]:
     directly to verify.
     """
     if state.get("fast_mode") is True:
-        return {}
+        return _clear_scene_observe_context()
 
     latest_tools = state.get("last_tool_batch_names")
     if not isinstance(latest_tools, list):
@@ -217,7 +247,7 @@ def scene_observe_node(state: AgentState) -> Dict[str, Any]:
             send_blender_command=send_blender_command,
         )
         if not viewport_result.get("last_render_path"):
-            return {"last_render_path": None}
+            return _clear_scene_observe_context()
         return viewport_result
 
     try:
@@ -240,20 +270,20 @@ def scene_observe_node(state: AgentState) -> Dict[str, Any]:
     except Exception as exc:
         logger = get_logger()
         logger.warning("scene_observe_node: update_scene_cameras failed: %s", exc)
-        # Scene mutated but render failed — invalidate stale render path
-        return {"last_render_path": None}
+        # Scene mutated but render failed — invalidate stale auto-observe evidence
+        return _clear_scene_observe_context()
 
     if not result.get("success"):
-        # Scene mutated but render failed — invalidate stale render path
-        return {"last_render_path": None}
+        # Scene mutated but render failed — invalidate stale auto-observe evidence
+        return _clear_scene_observe_context()
 
     cameras = result.get("cameras", [])
     image_urls = result.get("image_urls", [])
     scene_bbox = result.get("scene_bbox", {})
 
     if not image_urls:
-        # Scene mutated but render failed — invalidate stale render path
-        return {"last_render_path": None}
+        # Scene mutated but render failed — invalidate stale auto-observe evidence
+        return _clear_scene_observe_context()
 
     content: list[dict] = [
         {

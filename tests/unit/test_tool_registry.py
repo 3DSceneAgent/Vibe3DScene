@@ -23,8 +23,9 @@ def _configure_runtime(
     monkeypatch,
     *,
     mode: str = "headless",
-    retrieval_provider: str = "assetretrieval3d",
+    retrieval_provider: str = "objaverse",
     hunyuan: bool = False,
+    polyhaven: bool = True,
     rodin: bool = False,
     rodin_key: str = "",
     trellis2: bool = False,
@@ -40,11 +41,12 @@ def _configure_runtime(
     scenesmith_hssd_service: bool = True,
     scenesmith_ambientcg_service: bool = True,
 ) -> None:
+    asset_retrieval_backend = retrieval_provider if retrieval else "disabled"
     switch_values = {
         "ENABLE_HUNYUAN": hunyuan,
+        "ENABLE_POLYHAVEN": polyhaven,
         "ENABLE_RODIN": rodin,
         "ENABLE_TRELLIS2": trellis2,
-        "ENABLE_RETRIEVAL": retrieval,
         "ENABLE_INFINIGEN": infinigen,
         "ENABLE_SAM_RECONSTRUCT": sam_reconstruct,
         "ENABLE_SKETCHFAB": sketchfab,
@@ -56,27 +58,38 @@ def _configure_runtime(
         lambda name, default=False: switch_values.get(name, default),
     )
     monkeypatch.setattr(tool_registry.runtime, "is_hunyuan_tool_enabled", lambda: hunyuan)
+    monkeypatch.setattr(tool_registry.runtime, "is_polyhaven_tool_enabled", lambda: polyhaven)
     monkeypatch.setattr(tool_registry.runtime, "is_rodin_tool_enabled", lambda: rodin)
     monkeypatch.setattr(tool_registry.runtime, "is_trellis2_tool_enabled", lambda: trellis2)
-    monkeypatch.setattr(tool_registry.runtime, "is_retrieval_tool_enabled", lambda: retrieval)
+    monkeypatch.setattr(
+        tool_registry.runtime,
+        "get_retrieval_provider",
+        lambda: asset_retrieval_backend,
+    )
+    monkeypatch.setattr(
+        tool_registry.runtime,
+        "is_retrieval_tool_enabled",
+        lambda: asset_retrieval_backend != "disabled",
+    )
+    monkeypatch.setattr(
+        tool_registry.runtime,
+        "is_objaverse_retrieval_tool_enabled",
+        lambda: asset_retrieval_backend == "objaverse",
+    )
     monkeypatch.setattr(
         tool_registry.runtime,
         "is_scenesmith_retrieval_provider",
-        lambda: retrieval_provider == "scenesmith",
+        lambda: asset_retrieval_backend == "scenesmith",
     )
     monkeypatch.setattr(
         tool_registry.runtime,
         "is_scenesmith_hssd_tool_enabled",
-        lambda: retrieval
-        and retrieval_provider == "scenesmith"
-        and scenesmith_hssd,
+        lambda: asset_retrieval_backend == "scenesmith" and scenesmith_hssd,
     )
     monkeypatch.setattr(
         tool_registry.runtime,
         "is_scenesmith_ambientcg_tool_enabled",
-        lambda: retrieval
-        and retrieval_provider == "scenesmith"
-        and scenesmith_ambientcg,
+        lambda: asset_retrieval_backend == "scenesmith" and scenesmith_ambientcg,
     )
     monkeypatch.setattr(tool_registry.runtime, "is_infinigen_tool_enabled", lambda: infinigen)
     monkeypatch.setattr(
@@ -93,7 +106,7 @@ def _configure_runtime(
         "probe_conditional_services",
         lambda _logger: {
             "trellis2": True,
-            "retrieval": True,
+            "objaverse_retrieval": asset_retrieval_backend == "objaverse",
             "scenesmith_hssd": scenesmith_hssd_service,
             "scenesmith_ambientcg": scenesmith_ambientcg_service,
             "pcg_integrator": True,
@@ -133,7 +146,7 @@ def test_register_mcp_tools_fails_on_retrieval_sketchfab_conflict(monkeypatch):
         sketchfab_key="configured",
     )
 
-    with pytest.raises(RuntimeError, match="ENABLE_RETRIEVAL and ENABLE_SKETCHFAB"):
+    with pytest.raises(RuntimeError, match="ASSET_RETRIEVAL_BACKEND"):
         tool_registry.register_mcp_tools(FakeMCP(), logging.getLogger(__name__))
 
 
@@ -204,6 +217,18 @@ def test_register_mcp_tools_respects_retrieval_and_infinigen_switches(monkeypatc
     assert "get_session_persistence_status" not in enabled
 
 
+def test_register_mcp_tools_skips_polyhaven_when_disabled(monkeypatch):
+    _reset_registry_state(monkeypatch)
+    _configure_runtime(monkeypatch, polyhaven=False)
+    mcp = FakeMCP()
+
+    enabled = tool_registry.register_mcp_tools(mcp, logging.getLogger(__name__))
+
+    assert "search_polyhaven_assets" not in enabled
+    assert "download_polyhaven_asset" not in enabled
+    assert "set_texture" not in enabled
+
+
 def test_register_mcp_tools_enables_scenesmith_retrieval_tools_when_provider_matches(monkeypatch):
     _reset_registry_state(monkeypatch)
     _configure_runtime(
@@ -217,6 +242,8 @@ def test_register_mcp_tools_enables_scenesmith_retrieval_tools_when_provider_mat
 
     enabled = tool_registry.register_mcp_tools(mcp, logging.getLogger(__name__))
 
+    assert "search_3d_assets_by_text" not in enabled
+    assert "import_retrieved_asset" not in enabled
     assert "search_hssd_assets" in enabled
     assert "import_hssd_asset" in enabled
     assert "search_ambientcg_materials" in enabled
@@ -236,6 +263,8 @@ def test_register_mcp_tools_respects_independent_scenesmith_switches(monkeypatch
 
     enabled = tool_registry.register_mcp_tools(mcp, logging.getLogger(__name__))
 
+    assert "search_3d_assets_by_text" not in enabled
+    assert "import_retrieved_asset" not in enabled
     assert "search_hssd_assets" in enabled
     assert "import_hssd_asset" in enabled
     assert "search_ambientcg_materials" not in enabled
@@ -256,6 +285,8 @@ def test_register_mcp_tools_skips_unhealthy_scenesmith_subservice(monkeypatch):
 
     enabled = tool_registry.register_mcp_tools(mcp, logging.getLogger(__name__))
 
+    assert "search_3d_assets_by_text" not in enabled
+    assert "import_retrieved_asset" not in enabled
     assert "search_hssd_assets" in enabled
     assert "import_hssd_asset" in enabled
     assert "search_ambientcg_materials" not in enabled
@@ -267,7 +298,7 @@ def test_register_mcp_tools_skips_scenesmith_retrieval_tools_for_legacy_provider
     _configure_runtime(
         monkeypatch,
         retrieval=True,
-        retrieval_provider="assetretrieval3d",
+        retrieval_provider="objaverse",
     )
     mcp = FakeMCP()
 

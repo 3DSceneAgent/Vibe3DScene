@@ -65,7 +65,9 @@ def register_mcp_tools(mcp, logger) -> list[str]:
         return _enabled_tool_names
 
     mode_name = runtime.get_blender_mode() or "<unset>"
+    retrieval_backend = runtime.get_retrieval_provider()
     enable_hunyuan = runtime.is_hunyuan_tool_enabled()
+    enable_polyhaven = runtime.is_polyhaven_tool_enabled()
     enable_rodin = runtime.is_rodin_tool_enabled()
     enable_trellis2 = runtime.is_trellis2_tool_enabled()
     enable_retrieval = runtime.is_retrieval_tool_enabled()
@@ -119,23 +121,25 @@ def register_mcp_tools(mcp, logger) -> list[str]:
         )
     if enable_retrieval and _is_sketchfab_fully_enabled():
         raise RuntimeError(
-            "Invalid tool configuration: ENABLE_RETRIEVAL and ENABLE_SKETCHFAB cannot both be enabled."
+            "Invalid tool configuration: ASSET_RETRIEVAL_BACKEND must be 'disabled' when ENABLE_SKETCHFAB=true."
         )
 
     service_status = runtime.probe_conditional_services(logger)
     logger.info(
         (
             "Tool-gating context: BLENDER_MODE=%s ENABLE_HUNYUAN=%s "
-            "ENABLE_RODIN=%s ENABLE_TRELLIS2=%s ENABLE_RETRIEVAL=%s "
-            "SCENESMITH_ENABLE_HSSD=%s SCENESMITH_ENABLE_AMBIENTCG=%s "
+            "ENABLE_POLYHAVEN=%s "
+            "ENABLE_RODIN=%s ENABLE_TRELLIS2=%s ASSET_RETRIEVAL_BACKEND=%s "
+            "SCENESMITH_HSSD=%s ENABLE_AMBIENTCG=%s "
             "ENABLE_INFINIGEN=%s ENABLE_SKETCHFAB=%s RODIN_API_KEY_SET=%s "
             "SKETCHFAB_API_KEY_SET=%s SKETCHFAB_API_REACHABLE=%s"
         ),
         mode_name,
         enable_hunyuan,
+        enable_polyhaven,
         enable_rodin,
         enable_trellis2,
-        enable_retrieval,
+        retrieval_backend,
         enable_scenesmith_hssd,
         enable_scenesmith_ambientcg,
         enable_infinigen,
@@ -159,9 +163,24 @@ def register_mcp_tools(mcp, logger) -> list[str]:
         (clear_scene, None, None, None),
         (delete_objects, None, None, None),
         (execute_blender_code, None, None, None),
-        (search_polyhaven_assets, None, None, None),
-        (download_polyhaven_asset, None, None, None),
-        (set_texture, None, None, None),
+        (
+            search_polyhaven_assets,
+            None,
+            runtime.is_polyhaven_tool_enabled,
+            "requires ENABLE_POLYHAVEN=true",
+        ),
+        (
+            download_polyhaven_asset,
+            None,
+            runtime.is_polyhaven_tool_enabled,
+            "requires ENABLE_POLYHAVEN=true",
+        ),
+        (
+            set_texture,
+            None,
+            runtime.is_polyhaven_tool_enabled,
+            "requires ENABLE_POLYHAVEN=true",
+        ),
         (import_glb_model, None, None, None),
         (import_blend_contents, None, None, None),
         (
@@ -238,43 +257,41 @@ def register_mcp_tools(mcp, logger) -> list[str]:
         ),
         (
             search_3d_assets_by_text,
-            "retrieval",
-            runtime.is_retrieval_tool_enabled,
-            "requires ENABLE_RETRIEVAL=true",
+            "objaverse_retrieval",
+            runtime.is_objaverse_retrieval_tool_enabled,
+            "requires ASSET_RETRIEVAL_BACKEND=objaverse",
         ),
         (
             import_retrieved_asset,
-            "retrieval",
-            runtime.is_retrieval_tool_enabled,
-            "requires ENABLE_RETRIEVAL=true",
+            "objaverse_retrieval",
+            runtime.is_objaverse_retrieval_tool_enabled,
+            "requires ASSET_RETRIEVAL_BACKEND=objaverse",
         ),
         (
             search_hssd_assets,
-            "retrieval",
+            "scenesmith_hssd",
             _is_scenesmith_hssd_fully_enabled,
-            "requires ENABLE_RETRIEVAL=true, RETRIEVAL_PROVIDER=scenesmith, "
-            "SCENESMITH_ENABLE_HSSD=true, and healthy /hssd/healthz",
+            "requires ASSET_RETRIEVAL_BACKEND=scenesmith and healthy /hssd/healthz",
         ),
         (
             import_hssd_asset,
-            "retrieval",
+            "scenesmith_hssd",
             _is_scenesmith_hssd_fully_enabled,
-            "requires ENABLE_RETRIEVAL=true, RETRIEVAL_PROVIDER=scenesmith, "
-            "SCENESMITH_ENABLE_HSSD=true, and healthy /hssd/healthz",
+            "requires ASSET_RETRIEVAL_BACKEND=scenesmith and healthy /hssd/healthz",
         ),
         (
             search_ambientcg_materials,
-            "retrieval",
+            "scenesmith_ambientcg",
             _is_scenesmith_ambientcg_fully_enabled,
-            "requires ENABLE_RETRIEVAL=true, RETRIEVAL_PROVIDER=scenesmith, "
-            "SCENESMITH_ENABLE_AMBIENTCG=true, and healthy /ambientcg/healthz",
+            "requires ASSET_RETRIEVAL_BACKEND=scenesmith, "
+            "ENABLE_AMBIENTCG=true, and healthy /ambientcg/healthz",
         ),
         (
             apply_ambientcg_material,
-            "retrieval",
+            "scenesmith_ambientcg",
             _is_scenesmith_ambientcg_fully_enabled,
-            "requires ENABLE_RETRIEVAL=true, RETRIEVAL_PROVIDER=scenesmith, "
-            "SCENESMITH_ENABLE_AMBIENTCG=true, and healthy /ambientcg/healthz",
+            "requires ASSET_RETRIEVAL_BACKEND=scenesmith, "
+            "ENABLE_AMBIENTCG=true, and healthy /ambientcg/healthz",
         ),
         (
             render_from_objects,

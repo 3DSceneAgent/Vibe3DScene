@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import tempfile
@@ -199,6 +200,27 @@ def _ambientcg_texture_cache_dir() -> Path:
     return target
 
 
+def _ambientcg_cache_root(
+    *,
+    object_name: str,
+    color_url: str,
+    normal_url: Optional[str],
+    roughness_url: Optional[str],
+) -> Path:
+    safe_object_name = object_name.replace(os.sep, "_").strip() or "object"
+    fingerprint_payload = json.dumps(
+        {
+            "object_name": object_name,
+            "color_url": color_url,
+            "normal_url": normal_url or "",
+            "roughness_url": roughness_url or "",
+        },
+        sort_keys=True,
+    )
+    fingerprint = hashlib.sha1(fingerprint_payload.encode("utf-8")).hexdigest()[:12]
+    return _ambientcg_texture_cache_dir() / f"{safe_object_name}_{fingerprint}"
+
+
 def apply_ambientcg_material(
     ctx: Context,
     object_name: str,
@@ -214,7 +236,12 @@ def apply_ambientcg_material(
     if not color_url.strip():
         return "Error: color_url is required"
 
-    cache_root = _ambientcg_texture_cache_dir() / object_name.replace(os.sep, "_")
+    cache_root = _ambientcg_cache_root(
+        object_name=object_name,
+        color_url=color_url,
+        normal_url=normal_url,
+        roughness_url=roughness_url,
+    )
     cache_root.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -265,28 +292,43 @@ bsdf_node = nodes.new("ShaderNodeBsdfPrincipled")
 bsdf_node.location = (200, 0)
 links.new(bsdf_node.outputs["BSDF"], output_node.inputs["Surface"])
 
-def add_texture_node(image_path: str, label: str, location_x: int, location_y: int):
+def add_texture_node(
+    image_path: str,
+    label: str,
+    location_x: int,
+    location_y: int,
+    *,
+    is_color: bool,
+):
     if not image_path:
         return None
     image = bpy.data.images.load(image_path, check_existing=True)
+    try:
+        image.reload()
+    except Exception:
+        pass
+    try:
+        image.colorspace_settings.name = "sRGB" if is_color else "Non-Color"
+    except Exception:
+        pass
+    if not image.packed_file:
+        image.pack()
     tex_node = nodes.new("ShaderNodeTexImage")
     tex_node.label = label
     tex_node.image = image
     tex_node.location = (location_x, location_y)
     return tex_node
 
-color_node = add_texture_node(color_path, "Color", -300, 120)
+color_node = add_texture_node(color_path, "Color", -300, 120, is_color=True)
 if color_node is not None:
     links.new(color_node.outputs["Color"], bsdf_node.inputs["Base Color"])
 
-roughness_node = add_texture_node(roughness_path, "Roughness", -300, -20)
+roughness_node = add_texture_node(roughness_path, "Roughness", -300, -20, is_color=False)
 if roughness_node is not None:
-    roughness_node.image.colorspace_settings.name = "Non-Color"
     links.new(roughness_node.outputs["Color"], bsdf_node.inputs["Roughness"])
 
-normal_node = add_texture_node(normal_path, "Normal", -300, -180)
+normal_node = add_texture_node(normal_path, "Normal", -300, -180, is_color=False)
 if normal_node is not None:
-    normal_node.image.colorspace_settings.name = "Non-Color"
     normal_map_node = nodes.new("ShaderNodeNormalMap")
     normal_map_node.location = (-40, -180)
     links.new(normal_node.outputs["Color"], normal_map_node.inputs["Color"])

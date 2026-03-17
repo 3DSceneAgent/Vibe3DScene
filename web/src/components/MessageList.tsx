@@ -74,6 +74,7 @@ const MessageItem = memo(
       )
     }
     const showSpinner = message.role === 'assistant' && message.status === 'streaming'
+    const showThinkingSpinner = message.role === 'assistant' && message.thinkingActive === true
     const isAssistantError = message.role === 'assistant' && message.status === 'error'
     return (
       <div className={`message-row ${message.role} ${isAssistantError ? 'error' : ''}`}>
@@ -81,7 +82,7 @@ const MessageItem = memo(
           {message.thinking && (
             <ThinkingBlock
               thinking={message.thinking}
-              autoOpen={showSpinner || !message.content.trim()}
+              isThinking={showThinkingSpinner}
             />
           )}
           {todos.length > 0 && <TodosBlock todos={todos} />}
@@ -96,12 +97,16 @@ const MessageItem = memo(
   (prev, next) => prev.message === next.message && prev.backendUrl === next.backendUrl
 )
 
-function ThinkingBlock({ thinking, autoOpen = false }: { thinking: string; autoOpen?: boolean }) {
-  const [open, setOpen] = useState(autoOpen)
+function ThinkingBlock({ thinking, isThinking = false }: { thinking: string; isThinking?: boolean }) {
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null)
+  const open = manualOpen ?? isThinking
 
   return (
     <div className="thinking-block">
-      <button className="text-btn" onClick={() => setOpen((prev) => !prev)}>
+      <button
+        className="text-btn"
+        onClick={() => setManualOpen((prev) => !(prev ?? isThinking))}
+      >
         {open ? 'Hide' : 'Show'} thinking
       </button>
       {open && <pre className="thinking-text">{thinking}</pre>}

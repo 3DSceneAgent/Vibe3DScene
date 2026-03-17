@@ -46,7 +46,9 @@ print(
 
 DEFAULT_SERVER_HOST = os.getenv("MCP_SERVER_HOST", "localhost")
 DEFAULT_SERVER_PORT = int(os.getenv("MCP_SERVER_PORT", "9877"))
-_polyhaven_meta_info = runtime.load_polyhaven_meta_info(logger)
+_polyhaven_meta_info = (
+    runtime.load_polyhaven_meta_info(logger) if runtime.is_polyhaven_tool_enabled() else {}
+)
 
 
 def record_startup() -> None:
@@ -90,11 +92,15 @@ mcp = FastMCP(
 
 @mcp.resource("resource://polyhaven_types")
 def get_polyhaven_types() -> str:
+    if not runtime.is_polyhaven_tool_enabled():
+        return "Error: PolyHaven resources are disabled. Set ENABLE_POLYHAVEN=true to enable them."
     return json.dumps(["hdris", "textures", "models"], indent=2)
 
 
 @mcp.resource("resource://polyhaven_categories/{category}")
 def get_polyhaven_categories(category: str) -> str:
+    if not runtime.is_polyhaven_tool_enabled():
+        return "Error: PolyHaven resources are disabled. Set ENABLE_POLYHAVEN=true to enable them."
     if category not in ["hdris", "textures", "models", "all"]:
         return (
             f"Error: Invalid asset type: {category}. Must be one of: "

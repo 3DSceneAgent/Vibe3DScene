@@ -253,6 +253,17 @@ def import_glb_model(ctx: Context, model_url: str, object_name: str = None) -> s
             ),
         }
 
+    def _format_bounding_box(raw_bbox: Any) -> str | None:
+        if isinstance(raw_bbox, dict):
+            return f"Bounding box: min={raw_bbox.get('min')}, max={raw_bbox.get('max')}"
+        if (
+            isinstance(raw_bbox, (list, tuple))
+            and len(raw_bbox) == 2
+            and all(isinstance(corner, (list, tuple)) for corner in raw_bbox)
+        ):
+            return f"Bounding box: min={raw_bbox[0]}, max={raw_bbox[1]}"
+        return None
+
     try:
         blender = runtime.get_blender_connection(logger)
         object_name = object_name or "ImportedModel"
@@ -273,8 +284,9 @@ def import_glb_model(ctx: Context, model_url: str, object_name: str = None) -> s
             message = f"Successfully imported model from '{model_url}'\n"
             message += f"Imported {len(imported_objects)} object(s): {', '.join(imported_objects)}\n"
             if result.get("bounding_box"):
-                bbox = result["bounding_box"]
-                message += f"Bounding box: min={bbox.get('min')}, max={bbox.get('max')}\n"
+                bbox_line = _format_bounding_box(result["bounding_box"])
+                if bbox_line:
+                    message += f"{bbox_line}\n"
             return message
         return f"Failed to import model: {result.get('message', 'Unknown error')}"
     except Exception as exc:

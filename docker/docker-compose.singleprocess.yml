@@ -1,9 +1,11 @@
+name: ${COMPOSE_PROJECT_NAME:-3dsceneagent}
+
 services:
   api:
     platform: linux/amd64
     image: fishwowater/scene-agent-api:latest
     build:
-      context: .
+      context: ..
       dockerfile: docker/Dockerfile.api
       args:
         INSTALL_BLENDER: ${INSTALL_BLENDER:-true}
@@ -15,7 +17,7 @@ services:
         https_proxy: ${https_proxy:-}
         no_proxy: ${no_proxy:-}
     env_file:
-      - docker/.env.singleprocess
+      - .env.singleprocess
     environment:
       API_WORKERS: "1"
       BLENDER_MODE: headless

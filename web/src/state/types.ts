@@ -20,6 +20,7 @@ export type Message = {
   role: MessageRole
   content: string
   thinking?: string
+  thinkingActive?: boolean
   createdAt: number
   raw?: string
   streamId?: string | null

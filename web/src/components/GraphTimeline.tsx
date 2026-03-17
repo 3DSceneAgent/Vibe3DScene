@@ -127,18 +127,6 @@ export function GraphTimeline({ events, isStreaming = false }: GraphTimelineProp
     () => (events.length > 0 ? events[events.length - 1] : null),
     [events]
   )
-  const latestTodos = useMemo(
-    () => extractTodosFromPatch(latestEvent?.state_patch),
-    [latestEvent]
-  )
-  const latestTodoSummary = useMemo(
-    () => summarizeTodoProgress(latestTodos),
-    [latestTodos]
-  )
-  const latestSummary = useMemo(
-    () => summarizePatch(latestEvent?.state_patch),
-    [latestEvent]
-  )
 
   useEffect(() => {
     if (collapsed) return
@@ -176,11 +164,6 @@ export function GraphTimeline({ events, isStreaming = false }: GraphTimelineProp
                 <span className="graph-timeline-node graph-timeline-collapsed-node">
                   {latestEvent.node}
                 </span>
-                {(latestTodoSummary || latestSummary) && (
-                  <span className="graph-timeline-collapsed-meta">
-                    {latestTodoSummary || latestSummary}
-                  </span>
-                )}
               </div>
             </div>
           ) : (

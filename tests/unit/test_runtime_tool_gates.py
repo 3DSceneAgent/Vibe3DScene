@@ -38,26 +38,50 @@ def test_sam_reconstruct_gate_disabled_by_default(monkeypatch):
     assert runtime.is_sam_reconstruct_tool_enabled() is False
 
 
-def test_scenesmith_hssd_gate_enabled_by_default_for_scenesmith_provider(monkeypatch):
-    monkeypatch.setenv("ENABLE_RETRIEVAL", "true")
-    monkeypatch.setenv("RETRIEVAL_PROVIDER", "scenesmith")
-    monkeypatch.delenv("SCENESMITH_ENABLE_HSSD", raising=False)
+def test_polyhaven_gate_enabled_by_default(monkeypatch):
+    monkeypatch.delenv("ENABLE_POLYHAVEN", raising=False)
 
+    assert runtime.is_polyhaven_tool_enabled() is True
+
+
+def test_polyhaven_gate_respects_explicit_toggle(monkeypatch):
+    monkeypatch.setenv("ENABLE_POLYHAVEN", "false")
+
+    assert runtime.is_polyhaven_tool_enabled() is False
+
+
+def test_asset_retrieval_gate_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("ASSET_RETRIEVAL_BACKEND", raising=False)
+
+    assert runtime.is_retrieval_tool_enabled() is False
+
+
+def test_asset_retrieval_gate_enabled_for_objaverse(monkeypatch):
+    monkeypatch.setenv("ASSET_RETRIEVAL_BACKEND", "objaverse")
+
+    assert runtime.is_retrieval_tool_enabled() is True
+    assert runtime.is_objaverse_retrieval_tool_enabled() is True
+    assert runtime.is_scenesmith_hssd_tool_enabled() is False
+
+
+def test_scenesmith_hssd_gate_enabled_for_scenesmith_backend(monkeypatch):
+    monkeypatch.setenv("ASSET_RETRIEVAL_BACKEND", "scenesmith")
+
+    assert runtime.is_retrieval_tool_enabled() is True
+    assert runtime.is_objaverse_retrieval_tool_enabled() is False
     assert runtime.is_scenesmith_hssd_tool_enabled() is True
 
 
 def test_scenesmith_ambientcg_gate_disabled_by_default(monkeypatch):
-    monkeypatch.setenv("ENABLE_RETRIEVAL", "true")
-    monkeypatch.setenv("RETRIEVAL_PROVIDER", "scenesmith")
-    monkeypatch.delenv("SCENESMITH_ENABLE_AMBIENTCG", raising=False)
+    monkeypatch.setenv("ASSET_RETRIEVAL_BACKEND", "scenesmith")
+    monkeypatch.delenv("ENABLE_AMBIENTCG", raising=False)
 
     assert runtime.is_scenesmith_ambientcg_tool_enabled() is False
 
 
 def test_scenesmith_ambientcg_gate_respects_explicit_toggle(monkeypatch):
-    monkeypatch.setenv("ENABLE_RETRIEVAL", "true")
-    monkeypatch.setenv("RETRIEVAL_PROVIDER", "scenesmith")
-    monkeypatch.setenv("SCENESMITH_ENABLE_AMBIENTCG", "true")
+    monkeypatch.setenv("ASSET_RETRIEVAL_BACKEND", "scenesmith")
+    monkeypatch.setenv("ENABLE_AMBIENTCG", "true")
 
     assert runtime.is_scenesmith_ambientcg_tool_enabled() is True
 

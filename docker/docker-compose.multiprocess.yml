@@ -1,9 +1,11 @@
+name: ${COMPOSE_PROJECT_NAME:-3dsceneagent}
+
 x-api-worker-common: &api_worker_common
   platform: linux/amd64
   image: fishwowater/scene-agent-api:latest
   entrypoint: ["python", "main.py"]
   env_file:
-    - docker/.env.multiprocess
+    - .env.multiprocess
   command: ["--mode", "api", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
   restart: unless-stopped
   depends_on:
@@ -26,7 +28,7 @@ x-api-env-common: &api_env_common
   no_proxy: ${no_proxy:-}
 
 x-api-build: &api_build
-  context: .
+  context: ..
   dockerfile: docker/Dockerfile.api
   args:
     INSTALL_BLENDER: ${INSTALL_BLENDER:-true}
@@ -110,7 +112,7 @@ services:
       - api_worker_3
       - api_worker_4
     volumes:
-      - ./docker/nginx/multiprocess.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/multiprocess.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
       - "8000:80"
 

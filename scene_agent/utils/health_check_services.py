@@ -14,6 +14,8 @@ from urllib.parse import SplitResult, urlsplit, urlunsplit
 import requests
 
 from scene_agent.utils.tool_service_endpoints import (
+    get_assetretrieval_base_url,
+    get_retrieval_base_url,
     get_sam_http_base_url,
     get_shared_tool_service_host,
 )
@@ -73,11 +75,11 @@ class ServiceHealthChecker:
                 path="/",
                 expected_fields={"status": "ok"},
             ),
-            "retrieval": ServiceSpec(
-                name="retrieval",
-                label="RETRIEVAL",
-                host_env_key="RETRIEVAL_API_HOST",
-                port_env_key="RETRIEVAL_API_PORT",
+            "objaverse_retrieval": ServiceSpec(
+                name="objaverse_retrieval",
+                label="Objaverse Retrieval",
+                host_env_key="OBJAVERSE_HOST",
+                port_env_key="OBJAVERSE_PORT",
                 default_port=8002,
                 path="/",
                 expected_fields={"status": "running"},
@@ -85,18 +87,18 @@ class ServiceHealthChecker:
             "scenesmith_hssd": ServiceSpec(
                 name="scenesmith_hssd",
                 label="SceneSmith HSSD",
-                host_env_key="RETRIEVAL_API_HOST",
-                port_env_key="RETRIEVAL_API_PORT",
-                default_port=8002,
+                host_env_key="SCENESMITH_COMPAT_HOST",
+                port_env_key="SCENESMITH_COMPAT_PORT",
+                default_port=8005,
                 path="/hssd/healthz",
                 expected_fields={"status": "ok", "service": "hssd", "ready": True},
             ),
             "scenesmith_ambientcg": ServiceSpec(
                 name="scenesmith_ambientcg",
                 label="SceneSmith AmbientCG",
-                host_env_key="RETRIEVAL_API_HOST",
-                port_env_key="RETRIEVAL_API_PORT",
-                default_port=8002,
+                host_env_key="SCENESMITH_COMPAT_HOST",
+                port_env_key="SCENESMITH_COMPAT_PORT",
+                default_port=8005,
                 path="/ambientcg/healthz",
                 expected_fields={"status": "ok", "service": "ambientcg", "ready": True},
             ),
@@ -112,12 +114,10 @@ class ServiceHealthChecker:
             "sam_reconstruct": ServiceSpec(
                 name="sam_reconstruct",
                 label="SAMServer",
-                host_env_key="",
-                port_env_key="",
+                host_env_key="SAM_HOST",
+                port_env_key="SAM_PORT",
                 default_port=8004,
                 path="/healthz",
-                base_url_env_key="SAM_HTTP_BASE_URL",
-                default_base_url="http://127.0.0.1:8004",
                 expected_fields={"status": "ok", "sam_service": True, "sam3d_service": True},
             ),
         }
@@ -146,15 +146,30 @@ class ServiceHealthChecker:
             return spec.default_port
 
     def _resolve_url(self, spec: ServiceSpec) -> str:
+        if spec.name == "objaverse_retrieval":
+            base_url = get_assetretrieval_base_url()
+            if self.host_override:
+                base_url = self._apply_host_override_to_base_url(base_url)
+            return f"{base_url.rstrip('/')}{spec.path}"
+
+        if spec.name in {"scenesmith_hssd", "scenesmith_ambientcg"}:
+            base_url = get_retrieval_base_url()
+            if self.host_override:
+                base_url = self._apply_host_override_to_base_url(base_url)
+            return f"{base_url.rstrip('/')}{spec.path}"
+
+        if spec.name == "sam_reconstruct":
+            base_url = get_sam_http_base_url()
+            if self.host_override:
+                base_url = self._apply_host_override_to_base_url(base_url)
+            return f"{base_url.rstrip('/')}{spec.path}"
+
         if spec.base_url_env_key:
-            if spec.base_url_env_key == "SAM_HTTP_BASE_URL":
-                base_url = get_sam_http_base_url()
-            else:
-                base_url = (
-                    os.getenv(spec.base_url_env_key, spec.default_base_url or "").strip()
-                    or spec.default_base_url
-                    or ""
-                )
+            base_url = (
+                os.getenv(spec.base_url_env_key, spec.default_base_url or "").strip()
+                or spec.default_base_url
+                or ""
+            )
             if base_url:
                 effective_base_url = base_url
                 if self.host_override:
@@ -291,7 +306,7 @@ def main() -> int:
         default=None,
         help=(
             "Comma-separated service names "
-            "(trellis2,retrieval,scenesmith_hssd,scenesmith_ambientcg,pcg_integrator,sam_reconstruct)."
+            "(trellis2,objaverse_retrieval,scenesmith_hssd,scenesmith_ambientcg,pcg_integrator,sam_reconstruct)."
         ),
     )
     parser.add_argument(

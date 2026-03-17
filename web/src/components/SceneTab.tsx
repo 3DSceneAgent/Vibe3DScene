@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
 import type { BlendFileEntry, RenderImage } from '../api/types'
 import type { SceneHierarchyNode } from '../state/types'
 import { GltfViewer } from './GltfViewer'
@@ -23,7 +24,6 @@ type SceneTabProps = {
   onEnvironmentChange: (preset: EnvironmentPreset) => void
   onFetchRenders: (includeLocalWork?: boolean) => void
   onFetchGltf: () => void
-  onDebugUploadGltf: (file: File) => void
   onDownloadGltf: () => void
   onDownloadBlend: () => void
   onDownloadBlendFile: (relativePath: string, filename: string) => void
@@ -48,6 +48,54 @@ type DownloadDropdownProps = {
   onListBlendFiles: () => Promise<BlendFileEntry[]>
   disabled: boolean
   loading: boolean
+}
+
+const DEFAULT_RENDER_PANEL_HEIGHT = 220
+const MIN_RENDER_PANEL_HEIGHT = 140
+const MIN_VIEWPORT_HEIGHT = 260
+const LAYOUT_RESIZER_HEIGHT = 14
+const KEYBOARD_RESIZE_STEP = 24
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max)
+}
+
+function getRenderLayoutBounds(totalHeight: number) {
+  const usableHeight = Math.max(totalHeight - LAYOUT_RESIZER_HEIGHT, 0)
+  if (usableHeight <= 0) {
+    return {
+      usableHeight: 0,
+      minRenderHeight: 0,
+      maxRenderHeight: 0
+    }
+  }
+
+  let minRenderHeight = MIN_RENDER_PANEL_HEIGHT
+  let minViewportHeight = MIN_VIEWPORT_HEIGHT
+  const minimumRequiredHeight = minRenderHeight + minViewportHeight
+
+  if (usableHeight < minimumRequiredHeight) {
+    const scale = usableHeight / minimumRequiredHeight
+    minRenderHeight = Math.max(96, Math.floor(minRenderHeight * scale))
+    minViewportHeight = Math.max(160, Math.floor(minViewportHeight * scale))
+
+    if (minRenderHeight + minViewportHeight > usableHeight) {
+      minViewportHeight = Math.max(120, usableHeight - minRenderHeight)
+    }
+
+    if (minRenderHeight + minViewportHeight > usableHeight) {
+      minRenderHeight = Math.max(80, usableHeight - minViewportHeight)
+    }
+  }
+
+  minRenderHeight = Math.min(minRenderHeight, usableHeight)
+  const maxRenderHeight = Math.min(Math.max(minRenderHeight, usableHeight - minViewportHeight), usableHeight)
+
+  return {
+    usableHeight,
+    minRenderHeight,
+    maxRenderHeight
+  }
 }
 
 function formatBlendFileSize(sizeBytes: number): string {
@@ -184,7 +232,6 @@ export function SceneTab({
   onEnvironmentChange,
   onFetchRenders,
   onFetchGltf,
-  onDebugUploadGltf,
   onDownloadGltf,
   onDownloadBlend,
   onDownloadBlendFile,
@@ -199,8 +246,13 @@ export function SceneTab({
   const [objectsCollapsed, setObjectsCollapsed] = useState(true)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [alwaysAutoFrameCamera, setAlwaysAutoFrameCamera] = useState(false)
+  const [twoSidedRendering, setTwoSidedRendering] = useState(false)
   const [includeLocalWorkRenders, setIncludeLocalWorkRenders] = useState(false)
-  const debugFileInputRef = useRef<HTMLInputElement | null>(null)
+  const [renderPanelHeight, setRenderPanelHeight] = useState(DEFAULT_RENDER_PANEL_HEIGHT)
+  const [layoutHeight, setLayoutHeight] = useState(0)
+  const [isResizingLayout, setIsResizingLayout] = useState(false)
+  const layoutRef = useRef<HTMLDivElement | null>(null)
+  const hasRenders = renders.length > 0
   const isSceneActionBusy = loading.scene || loading.renders || loading.gltf
   const fetchActionHint = !canRunActions ? idleActionHint : null
   const handleHierarchyChange = useCallback(
@@ -221,21 +273,94 @@ export function SceneTab({
     }
   }, [isFullscreen])
 
-  const handleDebugUploadClick = useCallback(() => {
-    debugFileInputRef.current?.click()
+  useEffect(() => {
+    const layoutElement = layoutRef.current
+    if (!layoutElement) return
+
+    const syncLayoutHeight = () => {
+      setLayoutHeight(layoutElement.clientHeight)
+    }
+
+    syncLayoutHeight()
+    const resizeObserver = new ResizeObserver(() => {
+      syncLayoutHeight()
+    })
+    resizeObserver.observe(layoutElement)
+    return () => {
+      resizeObserver.disconnect()
+    }
   }, [])
 
-  const handleDebugFileChange = useCallback(
-    (event: ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0]
-      if (file) {
-        onDebugUploadGltf(file)
-      }
-      // Allow selecting the same file again in subsequent debug attempts.
-      event.currentTarget.value = ''
-    },
-    [onDebugUploadGltf]
-  )
+  useEffect(() => {
+    document.body.classList.toggle('scene-layout-resizing', isResizingLayout)
+    return () => {
+      document.body.classList.remove('scene-layout-resizing')
+    }
+  }, [isResizingLayout])
+
+  useEffect(() => {
+    if (!isResizingLayout || !hasRenders) return
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const layoutElement = layoutRef.current
+      if (!layoutElement) return
+
+      const { minRenderHeight, maxRenderHeight } = getRenderLayoutBounds(layoutElement.clientHeight)
+      if (maxRenderHeight <= 0) return
+
+      const layoutBounds = layoutElement.getBoundingClientRect()
+      const nextHeight = clamp(event.clientY - layoutBounds.top, minRenderHeight, maxRenderHeight)
+      setRenderPanelHeight(nextHeight)
+    }
+
+    const stopResizing = () => {
+      setIsResizingLayout(false)
+    }
+
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', stopResizing)
+    window.addEventListener('pointercancel', stopResizing)
+    window.addEventListener('blur', stopResizing)
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', stopResizing)
+      window.removeEventListener('pointercancel', stopResizing)
+      window.removeEventListener('blur', stopResizing)
+    }
+  }, [hasRenders, isResizingLayout])
+
+  const handleLayoutResizeStart = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (!hasRenders || event.button !== 0) return
+    event.preventDefault()
+    setIsResizingLayout(true)
+  }
+
+  const handleLayoutResizeKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    const { minRenderHeight, maxRenderHeight } = getRenderLayoutBounds(layoutRef.current?.clientHeight ?? layoutHeight)
+    if (maxRenderHeight <= 0) return
+
+    if (event.key === 'Home') {
+      event.preventDefault()
+      setRenderPanelHeight(minRenderHeight)
+      return
+    }
+
+    if (event.key === 'End') {
+      event.preventDefault()
+      setRenderPanelHeight(maxRenderHeight)
+      return
+    }
+
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+
+    event.preventDefault()
+    const delta = event.key === 'ArrowUp' ? -KEYBOARD_RESIZE_STEP : KEYBOARD_RESIZE_STEP
+    setRenderPanelHeight((currentHeight) => clamp(currentHeight + delta, minRenderHeight, maxRenderHeight))
+  }
+
+  const { minRenderHeight, maxRenderHeight } = getRenderLayoutBounds(layoutHeight)
+  const appliedRenderPanelHeight =
+    hasRenders && maxRenderHeight > 0 ? clamp(renderPanelHeight, minRenderHeight, maxRenderHeight) : undefined
 
   const coreLayout = (fullscreen: boolean) => (
     <div className={`scene-core ${objectsCollapsed ? 'objects-collapsed' : ''}`}>
@@ -245,6 +370,7 @@ export function SceneTab({
           environment={environment}
           viewportTheme={viewportTheme}
           uiTheme={uiTheme}
+          twoSidedRendering={twoSidedRendering}
           alwaysAutoFrameCamera={alwaysAutoFrameCamera}
           onHierarchyChange={handleHierarchyChange}
           isFullscreen={fullscreen}
@@ -279,21 +405,15 @@ export function SceneTab({
                   <option value="cool">Cool</option>
                 </select>
               </label>
-              <input
-                ref={debugFileInputRef}
-                className="viewer-debug-file-input"
-                type="file"
-                accept=".glb,.gltf,model/gltf-binary,model/gltf+json"
-                onChange={handleDebugFileChange}
-              />
-              <button
-                className="ghost-btn viewer-debug-upload-btn"
-                type="button"
-                onClick={handleDebugUploadClick}
-                title="Upload local GLTF/GLB for viewport debug"
-              >
-                Debug Upload
-              </button>
+              <label className="toggle-switch compact">
+                <input
+                  type="checkbox"
+                  checked={twoSidedRendering}
+                  onChange={(event) => setTwoSidedRendering(event.target.checked)}
+                />
+                <span className="toggle-slider" />
+                <span className="toggle-label">Two-sided</span>
+              </label>
               {fullscreen && (
                 <DownloadDropdown
                   onDownloadGltf={onDownloadGltf}
@@ -369,15 +489,37 @@ export function SceneTab({
         </div>
       )}
 
-      <RenderGallery
-        renders={renders}
-        isLoading={loading.renders}
-        backendUrl={backendUrl}
-        includeLocalWork={includeLocalWorkRenders}
-        onIncludeLocalWorkChange={setIncludeLocalWorkRenders}
-      />
+      <div
+        ref={layoutRef}
+        className={`scene-layout-split ${hasRenders ? 'has-renders' : 'is-empty'} ${isResizingLayout ? 'is-resizing' : ''}`}
+      >
+        <RenderGallery
+          renders={renders}
+          isLoading={loading.renders}
+          backendUrl={backendUrl}
+          includeLocalWork={includeLocalWorkRenders}
+          onIncludeLocalWorkChange={setIncludeLocalWorkRenders}
+          style={appliedRenderPanelHeight ? { height: `${appliedRenderPanelHeight}px` } : undefined}
+        />
 
-      <div className="scene-core-shell">{coreLayout(false)}</div>
+        {hasRenders && (
+          <button
+            type="button"
+            className="scene-layout-resizer"
+            onPointerDown={handleLayoutResizeStart}
+            onKeyDown={handleLayoutResizeKeyDown}
+            aria-label="Resize camera renders and 3D viewport"
+            aria-orientation="horizontal"
+            aria-valuemin={Math.round(minRenderHeight)}
+            aria-valuemax={Math.round(maxRenderHeight)}
+            aria-valuenow={Math.round(appliedRenderPanelHeight ?? minRenderHeight)}
+            role="separator"
+            title="Drag to resize camera renders and 3D viewport"
+          />
+        )}
+
+        <div className="scene-core-shell">{coreLayout(false)}</div>
+      </div>
 
       {isFullscreen && (
         <div

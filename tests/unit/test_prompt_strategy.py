@@ -13,6 +13,8 @@ def test_get_full_system_prompt_reflects_runtime_available_workflows():
     )
 
     assert "3D Asset Retrieval Database" in prompt
+    assert "do not reject a candidate solely from its text label" in prompt
+    assert "import the best candidate first." in prompt
     assert "Sketchfab (server-side)" not in prompt
     assert "TRELLIS2 (headless)" not in prompt
 
@@ -28,6 +30,18 @@ def test_get_full_system_prompt_reports_when_only_polyhaven_available():
     )
 
     assert "No extra generator/retrieval workflow is currently available beyond PolyHaven." in prompt
+
+
+def test_get_full_system_prompt_omits_polyhaven_guidance_when_unavailable():
+    prompt = get_full_system_prompt(
+        [
+            "get_scene_info",
+            "execute_blender_code",
+        ]
+    )
+
+    assert "PolyHaven" not in prompt
+    assert "No asset-library or generator workflow is currently enabled" in prompt
 
 
 def test_get_full_system_prompt_preserves_legacy_strategy_guidance():
@@ -98,8 +112,10 @@ def test_get_full_system_prompt_includes_fast_mode_override():
 
     assert "Current request override:" in prompt
     assert "Fast mode is enabled for this request." in prompt
+    assert "Planner decomposition is disabled for this request" in prompt
     assert "automatic verification is skipped" in prompt
     assert "automatic scene observation is skipped" in prompt
+    assert "collect at least one fresh piece of evidence before you stop" in prompt
 
 
 def test_strategy_omits_undo_guidance_when_tool_unavailable():
@@ -178,6 +194,7 @@ def test_strategy_includes_scenesmith_specific_workflows_when_tools_are_availabl
 
     assert "SceneSmith HSSD Retrieval" in prompt
     assert "search_hssd_assets(query=..., object_type=..., top_k=..., desired_dimensions_m=...)" in prompt
+    assert "Prefer importing a plausible candidate instead of judging only from returned names/categories." in prompt
     assert "SceneSmith AmbientCG Materials" in prompt
     assert "apply_ambientcg_material(object_name=..., color_url=..., normal_url=..., roughness_url=...)" in prompt
     assert "Use the texture URLs returned by search_ambientcg_materials() directly." in prompt
@@ -228,7 +245,7 @@ def test_mcp_strategy_includes_sam_reconstruct_when_runtime_ready(monkeypatch):
         "probe_conditional_services",
         lambda _logger: {
             "trellis2": False,
-            "retrieval": False,
+            "objaverse_retrieval": False,
             "pcg_integrator": False,
             "sam_reconstruct": True,
         },
@@ -241,6 +258,9 @@ def test_mcp_strategy_includes_sam_reconstruct_when_runtime_ready(monkeypatch):
     monkeypatch.setattr(strategy_module.runtime, "get_rodin_api_key", lambda: "")
     monkeypatch.setattr(strategy_module.runtime, "is_hunyuan_tool_enabled", lambda: False)
     monkeypatch.setattr(strategy_module.runtime, "is_retrieval_tool_enabled", lambda: False)
+    monkeypatch.setattr(
+        strategy_module.runtime, "is_objaverse_retrieval_tool_enabled", lambda: False
+    )
     monkeypatch.setattr(strategy_module.runtime, "is_sam_reconstruct_tool_enabled", lambda: True)
 
     prompt = strategy_module.asset_creation_strategy_text()
@@ -254,7 +274,7 @@ def test_mcp_strategy_omits_sketchfab_when_api_unreachable(monkeypatch):
         "probe_conditional_services",
         lambda _logger: {
             "trellis2": False,
-            "retrieval": False,
+            "objaverse_retrieval": False,
             "pcg_integrator": False,
             "sam_reconstruct": False,
         },
@@ -268,11 +288,45 @@ def test_mcp_strategy_omits_sketchfab_when_api_unreachable(monkeypatch):
     monkeypatch.setattr(strategy_module.runtime, "get_rodin_api_key", lambda: "")
     monkeypatch.setattr(strategy_module.runtime, "is_hunyuan_tool_enabled", lambda: False)
     monkeypatch.setattr(strategy_module.runtime, "is_retrieval_tool_enabled", lambda: False)
+    monkeypatch.setattr(
+        strategy_module.runtime, "is_objaverse_retrieval_tool_enabled", lambda: False
+    )
     monkeypatch.setattr(strategy_module.runtime, "is_sam_reconstruct_tool_enabled", lambda: False)
 
     prompt = strategy_module.asset_creation_strategy_text()
 
     assert "Sketchfab (server-side)" not in prompt
+
+
+def test_mcp_strategy_omits_polyhaven_when_runtime_disabled(monkeypatch):
+    monkeypatch.setattr(
+        strategy_module.runtime,
+        "probe_conditional_services",
+        lambda _logger: {
+            "trellis2": False,
+            "objaverse_retrieval": False,
+            "pcg_integrator": False,
+            "sam_reconstruct": False,
+        },
+    )
+    monkeypatch.setattr(strategy_module.runtime, "is_polyhaven_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "is_sketchfab_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "get_sketchfab_api_key", lambda: "")
+    monkeypatch.setattr(strategy_module.runtime, "is_infinigen_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "is_trellis2_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "is_rodin_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "get_rodin_api_key", lambda: "")
+    monkeypatch.setattr(strategy_module.runtime, "is_hunyuan_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "is_retrieval_tool_enabled", lambda: False)
+    monkeypatch.setattr(
+        strategy_module.runtime, "is_objaverse_retrieval_tool_enabled", lambda: False
+    )
+    monkeypatch.setattr(strategy_module.runtime, "is_sam_reconstruct_tool_enabled", lambda: False)
+
+    prompt = strategy_module.asset_creation_strategy_text()
+
+    assert "PolyHaven" not in prompt
+    assert "No asset-library or generator workflow is currently enabled" in prompt
 
 
 def test_mcp_strategy_respects_independent_scenesmith_subservice_readiness(monkeypatch):
@@ -281,7 +335,7 @@ def test_mcp_strategy_respects_independent_scenesmith_subservice_readiness(monke
         "probe_conditional_services",
         lambda _logger: {
             "trellis2": False,
-            "retrieval": True,
+            "objaverse_retrieval": False,
             "scenesmith_hssd": True,
             "scenesmith_ambientcg": False,
             "pcg_integrator": False,
@@ -296,6 +350,9 @@ def test_mcp_strategy_respects_independent_scenesmith_subservice_readiness(monke
     monkeypatch.setattr(strategy_module.runtime, "get_rodin_api_key", lambda: "")
     monkeypatch.setattr(strategy_module.runtime, "is_hunyuan_tool_enabled", lambda: False)
     monkeypatch.setattr(strategy_module.runtime, "is_retrieval_tool_enabled", lambda: True)
+    monkeypatch.setattr(
+        strategy_module.runtime, "is_objaverse_retrieval_tool_enabled", lambda: False
+    )
     monkeypatch.setattr(strategy_module.runtime, "is_scenesmith_hssd_tool_enabled", lambda: True)
     monkeypatch.setattr(
         strategy_module.runtime, "is_scenesmith_ambientcg_tool_enabled", lambda: True
@@ -304,5 +361,6 @@ def test_mcp_strategy_respects_independent_scenesmith_subservice_readiness(monke
 
     prompt = strategy_module.asset_creation_strategy_text()
 
+    assert "3D Asset Retrieval Database" not in prompt
     assert "SceneSmith HSSD Retrieval" in prompt
     assert "SceneSmith AmbientCG Materials" not in prompt

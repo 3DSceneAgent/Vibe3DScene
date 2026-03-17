@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from scene_agent.agent.memory_scope import resolve_memory_profile
 from scene_agent.agent.state import AgentState
+from scene_agent.agent.todo_state import apply_todo_actions, project_latest_todos
 from scene_agent.agent.workflow_profiles import (
     normalize_workflow_topology_request,
     resolve_workflow_topology,
@@ -25,6 +26,10 @@ from .constants_workflow import (
     TOPOLOGY_DUAL,
 )
 from .shared import latest_human_message, unfinished_todo_count
+
+FAST_MODE_PLAN_TERMINATION_REASON = (
+    "Planner-managed todo was terminated because fast mode is enabled for this request."
+)
 
 
 class RouterDecision(BaseModel):
@@ -53,8 +58,6 @@ def _coerce_fast_mode(raw_value: Any) -> bool:
 
 def initialize_request_node(state: AgentState) -> dict[str, Any]:
     """Initialize request-scoped workflow counters and topology preferences."""
-    unfinished_todos = unfinished_todo_count(state)
-
     raw_topology_request = state.get("workflow_topology_request")
     if raw_topology_request is None:
         raw_topology_request = state.get("workflow_topology")
@@ -90,6 +93,45 @@ def initialize_request_node(state: AgentState) -> dict[str, Any]:
 
     requested_fast_mode = _coerce_fast_mode(state.get("fast_mode"))
     resolved_fast_mode = requested_fast_mode and workflow_topology != TOPOLOGY_DUAL
+    todo_updates: dict[str, Any] = {}
+    unfinished_todos = unfinished_todo_count(state)
+    if resolved_fast_mode and unfinished_todos > 0:
+        actions = []
+        current_todos = project_latest_todos(
+            state.get("todo_versions"),
+            fallback_todos_raw=state.get("todos"),
+        )
+        for todo in current_todos:
+            if not isinstance(todo, dict):
+                continue
+            todo_id = str(todo.get("id", "")).strip()
+            status = str(todo.get("status", "")).strip()
+            if not todo_id or status not in {"pending", "in_progress"}:
+                continue
+            actions.append(
+                {
+                    "action": "set_status",
+                    "todo_id": todo_id,
+                    "status": "skipped",
+                    "reason": FAST_MODE_PLAN_TERMINATION_REASON,
+                }
+            )
+        if actions:
+            todo_versions, todos, next_active_todo_id = apply_todo_actions(
+                state.get("todo_versions"),
+                actions,
+                fallback_todos_raw=state.get("todos"),
+                source="system",
+                role="system",
+                previous_active_todo_id=active_todo_id,
+            )
+            todo_updates = {
+                "todo_versions": todo_versions,
+                "todos": todos,
+                "active_todo_id": next_active_todo_id,
+            }
+            unfinished_todos = 0
+            active_todo_id = next_active_todo_id
 
     return {
         "task_mode": MODE_DIRECT,
@@ -101,6 +143,8 @@ def initialize_request_node(state: AgentState) -> dict[str, Any]:
         "workflow_topology": workflow_topology,
         "memory_profile": memory_profile,
         "fast_mode": resolved_fast_mode,
+        "fast_mode_last_mutation_batch": 0,
+        "fast_mode_last_evidence_batch": 0,
         "active_role": ROLE_BUILDER if workflow_topology == TOPOLOGY_DUAL else ROLE_GENERAL,
         "request_agent_turns": 0,
         "request_tool_batches": 0,
@@ -121,6 +165,7 @@ def initialize_request_node(state: AgentState) -> dict[str, Any]:
         "overall_stall_count": 0,
         "verification_result": None,
         "evaluator_result": {"status": "initialized", "reason": "not_evaluated"},
+        **todo_updates,
     }
 
 
@@ -131,7 +176,12 @@ def router_node(
 ) -> dict[str, Any]:
     """Lightweight router selecting direct execution or plan decomposition."""
     unfinished_todos = unfinished_todo_count(state)
-    if unfinished_todos > 0:
+    if state.get("fast_mode") is True:
+        decision = RouterDecision(
+            needs_plan=False,
+            reasoning="fast_mode_forces_direct_execution",
+        )
+    elif unfinished_todos > 0:
         decision = RouterDecision(
             needs_plan=True,
             reasoning=f"continue_existing_plan_with_{unfinished_todos}_unfinished_todos",
@@ -187,15 +237,18 @@ def router_node(
     next_role = ROLE_BUILDER if workflow_topology == TOPOLOGY_DUAL else ROLE_GENERAL
     task_mode = MODE_PLAN if decision.needs_plan else MODE_DIRECT
     task_intent = "planned_request" if decision.needs_plan else "direct_request"
-    if unfinished_todos > 0:
+    if unfinished_todos > 0 and state.get("fast_mode") is not True:
         task_intent = "continue_existing_plan"
+    transition_reason = "router_needs_plan" if decision.needs_plan else "router_direct_mode"
+    if state.get("fast_mode") is True:
+        transition_reason = "router_fast_mode_direct_mode"
 
     return {
         "task_mode": task_mode,
         "task_intent": task_intent,
         "routed_to_plan": bool(decision.needs_plan),
         "router_decision": decision.model_dump(mode="json"),
-        "transition_reason": "router_needs_plan" if decision.needs_plan else "router_direct_mode",
+        "transition_reason": transition_reason,
         "active_role": next_role,
     }
 

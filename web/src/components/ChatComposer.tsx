@@ -180,9 +180,17 @@ export function ChatComposer({
     return stem.slice(0, 10)
   }
 
+  const resolveToolHint = (toolName: string) => {
+    const hint = mcpToolHints[toolName]?.trim()
+    if (!hint || hint === `MCP tool: ${toolName}`) {
+      return null
+    }
+    return hint
+  }
+
   return (
     <div className="composer-shell">
-      <div className={`composer-top-row ${fastModeAvailable ? 'has-fast-mode' : ''}`}>
+      <div className="composer-top-row">
         <div className="composer-model-panel">
           <select
             id="composer-model-select"
@@ -212,29 +220,46 @@ export function ChatComposer({
             className="composer-tools-summary"
             onClick={() => setIsToolsOpen((prev) => !prev)}
             aria-expanded={isToolsOpen}
+            aria-haspopup="true"
           >
-            <span className="composer-tools-title">MCP tools ({enabledToolCount}/{mcpTools.length})</span>
-            {mcpToolsLoading && <span className="composer-tools-meta">Loading...</span>}
-            {!mcpToolsLoading && mcpToolsError && (
-              <span className="composer-tools-meta error">Unavailable</span>
-            )}
+            <span className="composer-tools-summary-copy">
+              <span className="composer-tools-title">MCP tools</span>
+              <span className="composer-tools-badge">
+                {enabledToolCount}/{mcpTools.length}
+              </span>
+            </span>
+            <span className="composer-tools-summary-side">
+              {mcpToolsLoading && <span className="composer-tools-meta">Loading...</span>}
+              {!mcpToolsLoading && mcpToolsError && (
+                <span className="composer-tools-meta error">Unavailable</span>
+              )}
+              <span className="composer-tools-caret" aria-hidden="true" />
+            </span>
           </button>
           {isToolsOpen && (
             <div className="composer-tools-body">
+              <div className="composer-tools-body-header">
+                <div className="composer-tools-body-title">Per-thread tool access</div>
+              </div>
               {mcpTools.length > 0 ? (
                 <ul className="composer-tools-list">
                   {mcpTools.map((toolName) => {
-                    const hint = mcpToolHints[toolName] || `MCP tool: ${toolName}`
+                    const hint = resolveToolHint(toolName)
                     return (
                       <li key={toolName} className="composer-tools-item">
-                        <label className="composer-tools-toggle" title={hint}>
-                        <input
-                          type="checkbox"
-                          checked={mcpToolEnabled[toolName] !== false}
-                          onChange={(event) => onMcpToolToggle?.(toolName, event.target.checked)}
-                          disabled={disabled || mcpToolsLoading}
-                        />
+                        <label className="composer-tools-toggle" title={hint ?? undefined}>
                           <span className="composer-tools-name">{toolName}</span>
+                          <span className="toggle-switch compact composer-tools-switch">
+                            <input
+                              type="checkbox"
+                              checked={mcpToolEnabled[toolName] !== false}
+                              onChange={(event) =>
+                                onMcpToolToggle?.(toolName, event.target.checked)
+                              }
+                              disabled={disabled || mcpToolsLoading}
+                            />
+                            <span className="toggle-slider" />
+                          </span>
                         </label>
                       </li>
                     )
@@ -252,25 +277,6 @@ export function ChatComposer({
             </div>
           )}
         </div>
-        {fastModeAvailable && (
-          <div className={`composer-fast-mode-panel ${fastModeDisabled ? 'is-disabled' : ''}`}>
-            <div className="composer-fast-mode-copy">
-              <div className="composer-fast-mode-title">Fast mode</div>
-              <div className="composer-fast-mode-meta">
-                Skip auto observe and verify. Faster, lower fidelity.
-              </div>
-            </div>
-            <label className="toggle-switch" aria-label="Toggle fast mode">
-              <input
-                type="checkbox"
-                checked={fastMode}
-                onChange={(event) => onFastModeToggle?.(event.target.checked)}
-                disabled={fastModeDisabled}
-              />
-              <span className="toggle-slider" />
-            </label>
-          </div>
-        )}
       </div>
       {(modelLoading || modelLocked || modelError) && (
         <div className="composer-model-meta muted">
@@ -352,34 +358,72 @@ export function ChatComposer({
           hidden
           onChange={(event) => handleFiles(event.target.files)}
         />
-        <button
-          type="button"
-          className="composer-plus-btn"
-          onClick={() => {
-            if (disabled) return
-            fileInputRef.current?.click()
-          }}
-          disabled={disabled || referenceImagesCount + pendingImages.length >= MAX_REFERENCE_IMAGES}
-          aria-label="Add images"
-        >
-          +
-        </button>
-        {disabled && onStop ? (
-          <button className="composer-send-fab stop" onClick={onStop} aria-label="Stop generating">
-            ■
-          </button>
-        ) : (
-          <button
-            className="composer-send-fab"
-            onClick={() => void handleSend()}
-            disabled={disabled || !canSend}
-            aria-label="Send"
-          >
-            ↑
-          </button>
-        )}
-        <div className="composer-attachment-count">
-          {referenceImagesCount + pendingImages.length} / {MAX_REFERENCE_IMAGES} images
+        <div className="composer-input-footer">
+          <div className="composer-input-footer-left">
+            <button
+              type="button"
+              className="composer-attach-btn"
+              onClick={() => {
+                if (disabled) return
+                fileInputRef.current?.click()
+              }}
+              disabled={disabled || referenceImagesCount + pendingImages.length >= MAX_REFERENCE_IMAGES}
+              aria-label="Add images"
+              title="Attach image"
+            >
+              <span className="composer-attach-btn-icon" aria-hidden="true">
+                +
+              </span>
+            </button>
+            <div className="composer-attachment-count">
+              {referenceImagesCount + pendingImages.length} / {MAX_REFERENCE_IMAGES} images
+            </div>
+          </div>
+          <div className="composer-input-footer-right">
+            {fastModeAvailable && (
+              <div
+                className={`composer-fast-mode-chip ${fastModeDisabled ? 'is-disabled' : ''}`}
+                title="Fast mode: skip auto observe and verify"
+              >
+                <div className="composer-fast-mode-chip-copy">
+                  <div className="composer-fast-mode-chip-title">Fast mode</div>
+                </div>
+                <label
+                  className="toggle-switch compact composer-fast-mode-toggle"
+                  aria-label="Toggle fast mode"
+                  title="Fast mode: skip auto observe and verify"
+                >
+                  <input
+                    type="checkbox"
+                    checked={fastMode}
+                    onChange={(event) => onFastModeToggle?.(event.target.checked)}
+                    disabled={fastModeDisabled}
+                  />
+                  <span className="toggle-slider" />
+                </label>
+              </div>
+            )}
+            {disabled && onStop ? (
+              <button
+                type="button"
+                className="composer-send-fab stop"
+                onClick={onStop}
+                aria-label="Stop generating"
+              >
+                ■
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="composer-send-fab"
+                onClick={() => void handleSend()}
+                disabled={disabled || !canSend}
+                aria-label="Send"
+              >
+                ↑
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>

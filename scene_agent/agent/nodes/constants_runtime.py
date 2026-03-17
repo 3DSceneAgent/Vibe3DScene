@@ -35,9 +35,22 @@ SCENE_MUTATING_TOOLS: frozenset[str] = frozenset(
     }
 )
 
+# Tools that count as fresh evidence in fast mode.
+FAST_MODE_EVIDENCE_TOOLS: frozenset[str] = frozenset(
+    {
+        "get_scene_info",
+        "observe_scene_global",
+        "camera_observe",
+        "render_from_camera",
+        "render_from_objects",
+        "get_viewport_screenshot",
+    }
+)
+
 # Fixed IDs for internal visual-context messages.
 # `add_messages` replaces by ID, preventing unbounded context growth.
 RENDER_VISION_MESSAGE_ID = "render_vision_current"
 SCENE_OBSERVE_MESSAGE_ID = "scene_observe_current"
+FAST_MODE_EVIDENCE_REQUIRED_MESSAGE_ID = "fast_mode_evidence_required_current"
 TODO_BLOCKED_RECOVERY_MESSAGE_ID = "todo_blocked_recovery_current"
 TODO_BLOCKED_RECOVERY_ACTION_MESSAGE_ID = "todo_blocked_recovery_action_current"

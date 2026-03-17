@@ -33,6 +33,7 @@ from .constants_workflow import (
     ROLE_VERIFIER,
     TOPOLOGY_DUAL,
 )
+from .constants_runtime import FAST_MODE_EVIDENCE_REQUIRED_MESSAGE_ID
 from .shared import (
     ai_message_has_tool_calls,
     coerce_workflow_topology,
@@ -96,6 +97,58 @@ def _mark_todo_status(
         "todo_versions": todo_versions,
         "todos": todos,
         "active_todo_id": next_active_todo_id,
+    }
+
+
+def _fast_mode_evidence_required_message() -> SystemMessage:
+    return SystemMessage(
+        id=FAST_MODE_EVIDENCE_REQUIRED_MESSAGE_ID,
+        content=(
+            "Fast mode requires fresh evidence before you stop after scene edits. "
+            "If your last tool batch changed the scene, call get_scene_info(), "
+            "observe_scene_global(), camera_observe(), render_from_camera(), "
+            "render_from_objects(), or get_viewport_screenshot() before finishing."
+        ),
+    )
+
+
+def _fast_mode_direct_resolution(state: AgentState, *, agent_target: str) -> dict[str, Any] | None:
+    if state.get("fast_mode") is not True:
+        return None
+    if state.get("assistant_turn_kind") != "no_calls":
+        return None
+    if unfinished_todo_count(state) > 0:
+        return None
+    if coerce_non_negative_int(state.get("request_tool_batches")) <= 0:
+        return None
+
+    last_mutation_batch = coerce_non_negative_int(state.get("fast_mode_last_mutation_batch"))
+    last_evidence_batch = coerce_non_negative_int(state.get("fast_mode_last_evidence_batch"))
+    if last_mutation_batch == 0 or last_evidence_batch >= last_mutation_batch:
+        return {
+            "overall_stall_count": 0,
+            "transition_next": "finalize",
+            "transition_reason": "fast_mode_direct_complete",
+            "evaluator_result": {
+                "status": "finalize",
+                "reason": (
+                    "fast_mode_evidence_covers_latest_mutation"
+                    if last_mutation_batch > 0
+                    else "fast_mode_no_mutation"
+                ),
+                "transition_next": "finalize",
+            },
+        }
+
+    return {
+        "transition_next": agent_target,
+        "transition_reason": "fast_mode_evidence_required",
+        "evaluator_result": {
+            "status": "continue",
+            "reason": "fast_mode_missing_fresh_evidence",
+            "transition_next": agent_target,
+        },
+        "messages": [_fast_mode_evidence_required_message()],
     }
 
 
@@ -335,6 +388,11 @@ def evaluator_node(state: AgentState) -> dict[str, Any]:
             "reason": hard_stop_reason,
             "transition_next": "finalize",
         }
+        return result
+
+    fast_mode_resolution = _fast_mode_direct_resolution(state, agent_target=agent_target)
+    if fast_mode_resolution is not None:
+        result.update(fast_mode_resolution)
         return result
 
     # Path B: planned workflow with pending todos.

@@ -149,14 +149,14 @@ Request routing behavior:
 cd /Users/fishwowater/projects/3DSceneAgent
 cp docker/.env.multiprocess.example docker/.env.multiprocess
 # edit docker/.env.multiprocess (provider and API keys)
-docker compose -f docker-compose.multiprocess.yml up --build
+docker compose -f docker/docker-compose.multiprocess.yml up --build
 ```
 
 Gateway endpoint:
 - `http://localhost:8000`
 
 Related files:
-- `docker-compose.multiprocess.yml`
+- `docker/docker-compose.multiprocess.yml`
 - `docker/nginx/multiprocess.conf`
 - `scene_agent/session/owner_proxy.py`
 - `docs/architecture/multiprocess-migration-plan.md`

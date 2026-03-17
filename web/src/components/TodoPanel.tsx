@@ -4,16 +4,20 @@ import type { TodoItem } from '../api/types'
 type TodoPanelProps = {
   todos: TodoItem[]
   activeTodoId?: string | null
+  fastMode?: boolean
 }
 
 type TodoDisplayItem = TodoItem & {
   displayStatus: TodoItem['status']
 }
 
-export function TodoPanel({ todos, activeTodoId = null }: TodoPanelProps) {
+export function TodoPanel({ todos, activeTodoId = null, fastMode = false }: TodoPanelProps) {
   const [collapsed, setCollapsed] = useState(true)
+  const hasOpenTodos = todos.some(
+    (todo) => todo.status === 'pending' || todo.status === 'in_progress'
+  )
 
-  if (todos.length === 0) {
+  if (todos.length === 0 || (fastMode && !hasOpenTodos)) {
     return null
   }
 

@@ -23,7 +23,9 @@ docker/.env.singleprocess
 .idea/
 
 .pytest_cache
+/tool_servers
 /tool_servers/
+/tool_servers.backup-*
 
 # some helpers used during the development 
 scripts/helpers
@@ -40,7 +42,10 @@ reference
 .cursor 
 .codex
 .specify 
+openspec
 specs 
 docs/cursor_created 
 docs/codex_created
 docs/issues.legacy
+
+outputs

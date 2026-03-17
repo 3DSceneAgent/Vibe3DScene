@@ -91,6 +91,10 @@ def is_hunyuan_tool_enabled() -> bool:
     return get_blender_mode() == "headless" and parse_env_bool("ENABLE_HUNYUAN", False)
 
 
+def is_polyhaven_tool_enabled() -> bool:
+    return parse_env_bool("ENABLE_POLYHAVEN", True)
+
+
 def is_rodin_tool_enabled() -> bool:
     return get_blender_mode() in {"local-client", "headless"} and parse_env_bool("ENABLE_RODIN", False)
 
@@ -104,11 +108,17 @@ def is_trellis2_tool_enabled() -> bool:
 
 
 def is_retrieval_tool_enabled() -> bool:
-    return parse_env_bool("ENABLE_RETRIEVAL", False)
+    return get_retrieval_provider() != "disabled"
+
+
+def is_objaverse_retrieval_tool_enabled() -> bool:
+    return get_retrieval_provider() == "objaverse"
 
 
 def get_retrieval_provider() -> str:
-    return os.getenv("RETRIEVAL_PROVIDER", "assetretrieval3d").strip().lower() or "assetretrieval3d"
+    return (
+        os.getenv("ASSET_RETRIEVAL_BACKEND", "disabled").strip().lower() or "disabled"
+    )
 
 
 def is_scenesmith_retrieval_provider() -> bool:
@@ -116,18 +126,13 @@ def is_scenesmith_retrieval_provider() -> bool:
 
 
 def is_scenesmith_hssd_tool_enabled() -> bool:
-    return (
-        is_retrieval_tool_enabled()
-        and is_scenesmith_retrieval_provider()
-        and parse_env_bool("SCENESMITH_ENABLE_HSSD", True)
-    )
+    return is_scenesmith_retrieval_provider()
 
 
 def is_scenesmith_ambientcg_tool_enabled() -> bool:
     return (
-        is_retrieval_tool_enabled()
-        and is_scenesmith_retrieval_provider()
-        and parse_env_bool("SCENESMITH_ENABLE_AMBIENTCG", False)
+        is_scenesmith_retrieval_provider()
+        and parse_env_bool("ENABLE_AMBIENTCG", False)
     )
 
 
@@ -348,7 +353,15 @@ def probe_conditional_services(logger) -> dict[str, bool]:
         host_override=os.getenv("MCP_TOOL_HEALTH_HOST"),
         timeout=timeout,
     )
-    service_names = ["trellis2", "retrieval", "pcg_integrator", "sam_reconstruct"]
+    service_names: list[str] = []
+    if is_trellis2_tool_enabled():
+        service_names.append("trellis2")
+    if is_objaverse_retrieval_tool_enabled():
+        service_names.append("objaverse_retrieval")
+    if is_infinigen_tool_enabled():
+        service_names.append("pcg_integrator")
+    if is_sam_reconstruct_tool_enabled():
+        service_names.append("sam_reconstruct")
     if is_scenesmith_hssd_tool_enabled():
         service_names.append("scenesmith_hssd")
     if is_scenesmith_ambientcg_tool_enabled():

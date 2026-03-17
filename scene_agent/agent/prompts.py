@@ -42,7 +42,7 @@ Guidelines for tool usage:
   after verification confirms layout/scale/object match.
 - If scene-level views cannot see the main subject due enclosure/occlusion, reopen or remove blocking geometry first.
 - Verify object bounding boxes to prevent clipping/overlap
-- Prefer asset libraries (Retrieval/PolyHaven/TRELLIS2) over procedural generation
+- Prefer enabled asset libraries over procedural generation when they can satisfy the request
 - For Infinigen outputs, do NOT write custom bpy import scripts unless import_blend_contents() fails
 - Use execute_blender_code() only when necessary, with retrieved examples
 If CURRENT_AVAILABLE_TOOLS is provided at runtime, never call tools outside that list.
@@ -125,8 +125,11 @@ def get_full_system_prompt(
 
 Current request override:
 - Fast mode is enabled for this request.
+- Planner decomposition is disabled for this request; execute directly instead of creating a todo plan.
 - Automatic scene observation and automatic verification mentioned elsewhere are disabled for this request.
 - You must rely on get_scene_info(), observe_scene_global(), camera tools, and manual renders to gather evidence.
+- If your edits changed the scene, collect at least one fresh piece of evidence before you stop.
+- When the latest evidence reflects your latest scene edits and no more tool calls are needed, stop calling tools and give a concise outcome summary.
 """.strip()
     if request_override:
         return f"{SYSTEM_PROMPT}\n\n{request_override}\n\n{dynamic_strategy}"

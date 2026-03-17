@@ -222,6 +222,24 @@ class TestUpdateMemoryNodeRenderExtraction:
         assert result.get("last_render_path") == "https://example.com/renders/scene_ne.jpg"
         assert result.get("last_render_source") == "scene_observe"
 
+    def test_fast_mode_tracks_mutation_batch(self):
+        tool_msg = ToolMessage(name="execute_blender_code", content="ok", tool_call_id="t1")
+        state = self._make_state([tool_msg], fast_mode=True, request_tool_batches=1)
+
+        result = update_memory_node(state)
+
+        assert result["request_tool_batches"] == 2
+        assert result["fast_mode_last_mutation_batch"] == 2
+
+    def test_fast_mode_tracks_evidence_batch(self):
+        tool_msg = ToolMessage(name="get_scene_info", content="scene data", tool_call_id="t1")
+        state = self._make_state([tool_msg], fast_mode=True, request_tool_batches=2)
+
+        result = update_memory_node(state)
+
+        assert result["request_tool_batches"] == 3
+        assert result["fast_mode_last_evidence_batch"] == 3
+
 
 # ── Test: verify_render_with_references with mocked VLM ─────────────────
 

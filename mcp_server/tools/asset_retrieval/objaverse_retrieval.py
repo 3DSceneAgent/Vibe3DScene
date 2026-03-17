@@ -40,7 +40,12 @@ def search_3d_assets_by_text(
             if asset.get("objaverse_id"):
                 output += f"   Objaverse ID: {asset.get('objaverse_id', '')}\n"
             output += "\n"
-        output += "\nTo import an asset, use import_retrieved_asset() with the asset_id and model_url."
+        output += (
+            "\nDescriptions and similarity scores can be noisy. "
+            "If a top result is plausibly relevant, import one candidate first instead of rejecting it only from the text.\n"
+            "To import one result, use import_retrieved_asset(model_url=..., object_name=...). "
+            "asset_id is only a reference label and is not required by the import tool."
+        )
         return output
     except requests.exceptions.ConnectionError:
         return f"Cannot connect to retrieval service at {base_url}."

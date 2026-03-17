@@ -181,7 +181,7 @@ export function ChatTab({
         </div>
       </div>
       <GraphTimeline events={graphEvents} isStreaming={streamStatus === 'streaming'} />
-      <TodoPanel todos={todos} activeTodoId={activeTodoId} />
+      <TodoPanel todos={todos} activeTodoId={activeTodoId} fastMode={fastMode} />
       <div className="chat-scroll-area">
         <MessageList messages={thread.messages} backendUrl={backendUrl} />
       </div>

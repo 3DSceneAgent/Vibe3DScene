@@ -53,6 +53,29 @@ def test_import_glb_model_handles_legacy_list_response(monkeypatch):
     assert "Imported 2 object(s): Table_A, Table_A.001" in result
 
 
+def test_import_glb_model_handles_structured_list_bbox_response(monkeypatch):
+    class FakeBlender:
+        def send_command(self, command_type: str, params=None):
+            _ = (command_type, params)
+            return {
+                "success": True,
+                "imported_objects": ["Dragon"],
+                "bounding_box": [[0, 0, 0], [1, 2, 3]],
+            }
+
+    monkeypatch.setattr(base.runtime, "get_blender_connection", lambda _logger: FakeBlender())
+
+    result = base.import_glb_model(
+        ctx=None,
+        model_url="https://example.com/dragon.glb",
+        object_name="Dragon",
+    )
+
+    assert "Successfully imported model" in result
+    assert "Imported 1 object(s): Dragon" in result
+    assert "Bounding box: min=[0, 0, 0], max=[1, 2, 3]" in result
+
+
 def test_import_glb_model_handles_json_string_list_response(monkeypatch):
     class FakeBlender:
         def send_command(self, command_type: str, params=None):

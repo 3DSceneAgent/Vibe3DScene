@@ -43,6 +43,12 @@ async def get_agent(thread_id: str | None = None):
     return await api_module.get_agent(thread_id)
 
 
+def _resolve_fast_mode_for_request(request: ChatRequest) -> bool:
+    if isinstance(request.fast_mode, bool):
+        return request.fast_mode
+    return bool(get_settings().fast_mode_default)
+
+
 router = APIRouter()
 _INTERNAL_NON_USER_MESSAGE_NODES = frozenset(
     {
@@ -446,6 +452,7 @@ async def _produce_stream_events(
             normalize_requested_tool_names(request.enabled_mcp_tools),
         )
         config = {"configurable": {"thread_id": request.thread_id}}
+        resolved_fast_mode = _resolve_fast_mode_for_request(request)
         try:
             state = await agent.aget_state(config)
             state_messages = []
@@ -476,7 +483,7 @@ async def _produce_stream_events(
                 "task_id": request.task_id,
                 "workflow_topology_request": request.workflow_topology,
                 "memory_profile_request": request.memory_profile,
-                "fast_mode": request.fast_mode,
+                "fast_mode": resolved_fast_mode,
             },
             config=config,
             stream_mode=["messages", "values", "updates"],
@@ -803,6 +810,7 @@ async def chat(request: ChatRequest, request_http: Request, response: Response):
             normalize_requested_tool_names(request.enabled_mcp_tools),
         )
         config = {"configurable": {"thread_id": request.thread_id}}
+        resolved_fast_mode = _resolve_fast_mode_for_request(request)
         
         # Run agent
         result = await agent.ainvoke(
@@ -814,7 +822,7 @@ async def chat(request: ChatRequest, request_http: Request, response: Response):
                 "task_id": request.task_id,
                 "workflow_topology_request": request.workflow_topology,
                 "memory_profile_request": request.memory_profile,
-                "fast_mode": request.fast_mode,
+                "fast_mode": resolved_fast_mode,
             },
             config=config
         )

@@ -21,7 +21,7 @@ class DummyResponse:
 
 def test_search_hssd_assets_formats_results(monkeypatch):
     def fake_post(url, json, timeout):
-        assert url == "http://10.0.0.9:8002/hssd/v1/search"
+        assert url == "http://10.0.0.9:8005/hssd/v1/search"
         assert json["object_type"] == "FURNITURE"
         assert json["top_k"] == 2
         assert timeout == 60
@@ -36,12 +36,13 @@ def test_search_hssd_assets_formats_results(monkeypatch):
                         "similarity_score": 0.91,
                         "bbox_score": 0.04,
                         "size_m": [0.8, 0.7, 1.0],
-                        "download_url": "http://localhost:8002/hssd/v1/artifacts/abc",
+                        "download_url": "http://localhost:8005/hssd/v1/artifacts/abc",
                     }
                 ],
             }
         )
 
+    monkeypatch.setenv("ASSET_RETRIEVAL_BACKEND", "scenesmith")
     monkeypatch.setenv("TOOL_SERVICE_HOST", "10.0.0.9")
     monkeypatch.setattr(tools.requests, "post", fake_post)
 
@@ -87,4 +88,25 @@ def test_apply_ambientcg_material_downloads_and_executes(monkeypatch, tmp_path: 
     assert "Applied AmbientCG material 'CubeMaterial' to 'Cube'" in result
     assert executed["command_type"] == "execute_code"
     assert "CubeMaterial" in executed["params"]["code"]
+    assert "image.pack()" in executed["params"]["code"]
+    assert "\"sRGB\" if is_color else \"Non-Color\"" in executed["params"]["code"]
     assert {name for name, _ in downloaded} == {"color.jpg", "normal.jpg", "roughness.jpg"}
+
+
+def test_ambientcg_cache_root_varies_by_texture_urls(tmp_path: Path):
+    first = tools._ambientcg_cache_root(
+        object_name="Cube",
+        color_url="http://localhost/a-color.jpg",
+        normal_url="http://localhost/a-normal.jpg",
+        roughness_url="http://localhost/a-roughness.jpg",
+    )
+    second = tools._ambientcg_cache_root(
+        object_name="Cube",
+        color_url="http://localhost/b-color.jpg",
+        normal_url="http://localhost/b-normal.jpg",
+        roughness_url="http://localhost/b-roughness.jpg",
+    )
+
+    assert first != second
+    assert first.name.startswith("Cube_")
+    assert second.name.startswith("Cube_")

@@ -132,6 +132,8 @@ class AgentState(TypedDict):
         workflow_topology: Effective workflow topology for this request
         memory_profile: Effective memory profile for this request
         fast_mode: Whether automatic scene observe and verification are skipped for this request
+        fast_mode_last_mutation_batch: Latest tool batch index that changed scene state in fast mode
+        fast_mode_last_evidence_batch: Latest tool batch index that gathered fresh evidence in fast mode
         active_role: Active role in current request (`general/builder/verifier`)
         builder_turn_count: Builder turns executed in this request run
         verifier_turn_count: Verifier turns executed in this request run
@@ -189,6 +191,8 @@ class AgentState(TypedDict):
     workflow_topology: NotRequired[WorkflowTopology]
     memory_profile: NotRequired[MemoryProfile]
     fast_mode: NotRequired[bool]
+    fast_mode_last_mutation_batch: NotRequired[int]
+    fast_mode_last_evidence_batch: NotRequired[int]
     active_role: NotRequired[AgentRole]
     transition_next: NotRequired[str]
 

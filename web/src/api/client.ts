@@ -247,8 +247,8 @@ export async function streamChat({
   if (enabledMcpTools) {
     payload.enabled_mcp_tools = enabledMcpTools
   }
-  if (fastMode === true) {
-    payload.fast_mode = true
+  if (typeof fastMode === 'boolean') {
+    payload.fast_mode = fastMode
   }
   if (attachedImageIds && attachedImageIds.length > 0) {
     payload.attached_image_ids = attachedImageIds
@@ -517,6 +517,7 @@ export async function getHealth(
   status: string
   blender_mode?: 'headless' | 'local-client'
   features?: { fast_mode?: boolean }
+  defaults?: { fast_mode?: boolean }
 }> {
   const response = await apiFetch(`${baseUrl}/health`, { signal })
   if (!response.ok) {
@@ -526,6 +527,7 @@ export async function getHealth(
     status: string
     blender_mode?: 'headless' | 'local-client'
     features?: { fast_mode?: boolean }
+    defaults?: { fast_mode?: boolean }
   }
 }
 

@@ -65,6 +65,38 @@ def test_initialize_request_node_disables_fast_mode_for_dual_agent():
     assert result["fast_mode"] is False
 
 
+def test_initialize_request_node_skips_open_todos_in_fast_mode():
+    result = initialize_request_node(
+        {
+            "messages": [HumanMessage(content="Finish this quickly.")],
+            "fast_mode": True,
+            "active_todo_id": "todo-1",
+            "todos": [
+                {
+                    "id": "todo-1",
+                    "description": "Arrange layout",
+                    "status": "in_progress",
+                    "created_at": "2026-01-01T00:00:00",
+                    "completed_at": None,
+                },
+                {
+                    "id": "todo-2",
+                    "description": "Polish lighting",
+                    "status": "pending",
+                    "created_at": "2026-01-01T00:00:00",
+                    "completed_at": None,
+                },
+            ],
+        }
+    )
+
+    assert result["fast_mode"] is True
+    assert result["task_mode"] == "direct_mode"
+    assert result["task_intent"] == "direct_request"
+    assert result["active_todo_id"] is None
+    assert [todo["status"] for todo in result["todos"]] == ["skipped", "skipped"]
+
+
 def test_router_node_forces_plan_when_unfinished_todos_exist():
     result = router_node(
         {
@@ -83,6 +115,29 @@ def test_router_node_forces_plan_when_unfinished_todos_exist():
     assert result["routed_to_plan"] is True
     assert result["task_mode"] == "plan_mode"
     assert result["task_intent"] == "continue_existing_plan"
+
+
+def test_router_node_forces_direct_mode_in_fast_mode_even_with_open_todos():
+    result = router_node(
+        {
+            "messages": [HumanMessage(content="continue")],
+            "fast_mode": True,
+            "todos": [
+                {
+                    "id": "todo-1",
+                    "description": "Arrange layout",
+                    "status": "in_progress",
+                    "created_at": "2026-01-01T00:00:00",
+                    "completed_at": None,
+                }
+            ],
+        }
+    )
+
+    assert result["routed_to_plan"] is False
+    assert result["task_mode"] == "direct_mode"
+    assert result["task_intent"] == "direct_request"
+    assert result["router_decision"]["reasoning"] == "fast_mode_forces_direct_execution"
 
 
 def test_router_node_uses_structured_output_when_model_available():

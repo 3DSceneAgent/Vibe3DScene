@@ -140,7 +140,7 @@ Minimum required environment variables:
 ```bash
 cp docker/.env.multiprocess.example docker/.env.multiprocess
 # edit docker/.env.multiprocess and set provider/API key
-docker compose -f docker-compose.multiprocess.yml up
+docker compose -f docker/docker-compose.multiprocess.yml up
 ```
 This profile builds a shared `scene-agent-api:latest` image once and reuses it across worker-1~worker-4.
 
@@ -149,7 +149,7 @@ This profile builds a shared `scene-agent-api:latest` image once and reuses it a
 ```bash
 cp docker/.env.singleprocess.example docker/.env.singleprocess
 # edit docker/.env.singleprocess and set provider/API key
-docker compose -f docker-compose.singleprocess.yml up
+docker compose -f docker/docker-compose.singleprocess.yml up
 ```
 
 ### 2.5 Tests 
@@ -220,13 +220,16 @@ The output includes `requested_topology`, `effective_topology`, `effective_task_
 
 Conditional tool gates:
 - TRELLIS2/Hunyuan3D are only available in headless mode, Rodin is available in both. TRELLIS2 is locally deployed, enable corresponding API keys for Hunyuan3D/Rodin. 
+- `ENABLE_POLYHAVEN=false` disables PolyHaven search/download/material tools.
 - Enable corresponding keys for 
-- `ENABLE_RETRIEVAL=true` for objaverse retrieval tools.
+- `ASSET_RETRIEVAL_BACKEND=objaverse|scenesmith` for asset retrieval tools.
+  - `objaverse`: exposes `search_3d_assets_by_text` and `import_retrieved_asset`.
+  - `scenesmith`: exposes `search_hssd_assets`, `import_hssd_asset`, and optional AmbientCG tools.
 - `ENABLE_INFINIGEN=true` for PCG tools.
 - `ENABLE_SKETCHFAB=true` and `SKETCHFAB_API_KEY` for Sketchfab tools.
 - Invalid combos fail MCP startup:
   - More than one of `ENABLE_RODIN`, `ENABLE_TRELLIS2`, `ENABLE_HUNYUAN`.
-  - Both `ENABLE_RETRIEVAL=true` and `ENABLE_SKETCHFAB=true`.
+  - `ASSET_RETRIEVAL_BACKEND!=disabled` together with `ENABLE_SKETCHFAB=true`.
 
 ### 3.2 Tool Servers (Sub-deployments, Optional)
 > Some of the tools above require a local deployment. Docker Compose is supported, and local shell mode is also available for selected services.
@@ -234,6 +237,7 @@ Conditional tool gates:
 `../3DAgentTools/` includes Docker Compose deployment for:
 - [TRELLIS2](https://github.com/FishWoWater/TRELLIS.2/tree/api) (`:8001`)
 - [AssetRetrieval3D](https://github.com/3DSceneAgent/AssetRetrieval3D) (`:8002`)
+- SceneSmith compatibility API (`:8005` when `ASSET_RETRIEVAL_BACKEND=scenesmith`)
 - [PCGIntegrator3D](https://github.com/3DSceneAgent/PCGIntegrator3D) (`:8003`)
 - PostgreSQL for retrieval backend
 
@@ -243,7 +247,7 @@ Deployment steps:
 cd ../3DAgentTools
 cp .env.example .env
 
-# edit .env toggles(based on which tool server you want) and ports
+# edit .env backends/toggles and ports
 ./start_tool_servers.sh
 ```
 
@@ -260,11 +264,11 @@ Local shell mode is also available:
 cd ../3DAgentTools
 cp .env.example .env
 
-# choose local services and retrieval provider in .env
+# choose local services and asset-retrieval backend in .env
 ./manage_tool_servers_local.sh start
 ```
 
-The retrieval slot can run either:
+The asset-retrieval slot can run either:
 - `AssetRetrieval3D`
 - `SceneSmithRetrieval`, a self-contained retrieval submodule under `../3DAgentTools/SceneSmithRetrieval`
 
@@ -273,9 +277,10 @@ root `.env` and leave per-service host overrides blank. If you change ports in `
 sync the matching root `.env` values used by MCP runtime:
 - `TOOL_SERVICE_HOST` for the shared host or IP
 - `TRELLIS2_PORT`
-- `RETRIEVAL_API_PORT`
+- `OBJAVERSE_PORT`
+- `SCENESMITH_COMPAT_PORT` when `ASSET_RETRIEVAL_BACKEND=scenesmith`
 - `INFINIGEN_PORT`
-- `SAM_HTTP_BASE_URL` only if SAMServer uses a custom scheme / host / port / path
+- `SAM_PORT` and, if needed, `SAM_HOST`
 - `AGENT_TOOLS_ROOT` only if `3DAgentTools` is not cloned as a sibling directory
 
 ## 4. Use Cases
@@ -379,13 +384,16 @@ npm run lint
 
 | Variable | Description |
 | --- | --- |
-| `TOOL_SERVICE_HOST` | Shared host/IP for TRELLIS2, retrieval/SceneSmith, Infinigen, and SAMServer when they are co-located. |
+| `TOOL_SERVICE_HOST` | Shared host/IP for TRELLIS2, Objaverse/SceneSmith asset retrieval, Infinigen, and SAMServer when they are co-located. |
+| `ENABLE_POLYHAVEN` | Enable or disable PolyHaven search/download/material tools; defaults to `true`. |
 | `ENABLE_RODIN`, `RODIN_API_KEY`, `RODIN_MODE` | Enable Hyper3D Rodin generation tools. |
 | `ENABLE_HUNYUAN`, `HUNYUAN3D_SECRET_ID`, `HUNYUAN3D_SECRET_KEY` | Enable Tencent Hunyuan3D generation tool. |
 | `ENABLE_TRELLIS2`, `TRELLIS2_HOST`, `TRELLIS2_PORT` | Enable TRELLIS2 generation tool and endpoint routing. |
-| `ENABLE_RETRIEVAL`, `RETRIEVAL_API_HOST`, `RETRIEVAL_API_PORT` | Enable retrieval search/import tools. |
+| `ASSET_RETRIEVAL_BACKEND`, `OBJAVERSE_HOST`, `OBJAVERSE_PORT` | Select the asset-retrieval backend (`disabled`, `objaverse`, or `scenesmith`). `OBJAVERSE_HOST` / `OBJAVERSE_PORT` apply when `objaverse` is selected. |
+| `SCENESMITH_COMPAT_HOST`, `SCENESMITH_COMPAT_PORT` | Override the SceneSmith compatibility API endpoint when `ASSET_RETRIEVAL_BACKEND=scenesmith`; default port is `8005`. |
+| `ENABLE_AMBIENTCG` | Enable SceneSmith AmbientCG material tools when `ASSET_RETRIEVAL_BACKEND=scenesmith`; HSSD is implicit in that backend. |
 | `ENABLE_INFINIGEN`, `INFINIGEN_HOST`, `INFINIGEN_PORT` | Enable PCG/Infinigen tools. |
-| `ENABLE_SAM_RECONSTRUCT`, `SAM_HTTP_BASE_URL` | Enable SAM-based scene reconstruction; leave `SAM_HTTP_BASE_URL` blank to inherit `http://{TOOL_SERVICE_HOST}:8004`. |
+| `ENABLE_SAM_RECONSTRUCT`, `SAM_HOST`, `SAM_PORT` | Enable SAM-based scene reconstruction; leave `SAM_HOST` blank to inherit `TOOL_SERVICE_HOST`, and use port `8004` unless your SAMServer is published elsewhere. |
 | `AGENT_TOOLS_ROOT` | Optional checkout path for the sibling `3DAgentTools` repo. Leave blank to use `../3DAgentTools`. |
 | `ENABLE_SKETCHFAB`, `SKETCHFAB_API_KEY` | Enable Sketchfab search/download tools. |
 
