@@ -22,6 +22,7 @@ type GltfViewerProps = {
   onHierarchyChange?: (nodes: SceneHierarchyNode[]) => void
   isFullscreen?: boolean
   onToggleFullscreen?: () => void
+  showFullscreenButton?: boolean
   headerControls?: ReactNode
   headerTrailingControls?: ReactNode
   alwaysAutoFrameCamera?: boolean
@@ -320,6 +321,7 @@ export function GltfViewer({
   onHierarchyChange,
   isFullscreen = false,
   onToggleFullscreen,
+  showFullscreenButton = true,
   headerControls,
   headerTrailingControls,
   alwaysAutoFrameCamera = false
@@ -770,9 +772,24 @@ export function GltfViewer({
         <div className="viewer-header-right">
           <div className="panel-subtitle"> </div>
           {headerControls}
-          {onToggleFullscreen && (
-            <button className="ghost-btn viewer-fullscreen-btn" onClick={onToggleFullscreen}>
-              {isFullscreen ? 'Exit' : 'Fullscreen'}
+          {showFullscreenButton && onToggleFullscreen && (
+            <button
+              className="ghost-btn viewer-fullscreen-btn"
+              onClick={onToggleFullscreen}
+              title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+              aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+            >
+              {isFullscreen ? (
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="4 14 4 10 0 10" /><polyline points="12 2 12 6 16 6" />
+                  <line x1="0" y1="16" x2="6" y2="10" /><line x1="16" y1="0" x2="10" y2="6" />
+                </svg>
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="10 0 10 4 14 4" /><polyline points="6 16 6 12 2 12" />
+                  <line x1="16" y1="0" x2="10" y2="6" /><line x1="0" y1="16" x2="6" y2="10" />
+                </svg>
+              )}
             </button>
           )}
           {headerTrailingControls}

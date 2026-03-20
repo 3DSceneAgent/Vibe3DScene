@@ -5,13 +5,14 @@ type TodoPanelProps = {
   todos: TodoItem[]
   activeTodoId?: string | null
   fastMode?: boolean
+  isStreaming?: boolean
 }
 
 type TodoDisplayItem = TodoItem & {
   displayStatus: TodoItem['status']
 }
 
-export function TodoPanel({ todos, activeTodoId = null, fastMode = false }: TodoPanelProps) {
+export function TodoPanel({ todos, activeTodoId = null, fastMode = false, isStreaming = false }: TodoPanelProps) {
   const [collapsed, setCollapsed] = useState(true)
   const hasOpenTodos = todos.some(
     (todo) => todo.status === 'pending' || todo.status === 'in_progress'
@@ -32,7 +33,7 @@ export function TodoPanel({ todos, activeTodoId = null, fastMode = false }: Todo
   const displayTodos: TodoDisplayItem[] = todos.map((todo) => {
     const isResolvedActive = resolvedActiveTodoId != null && todo.id === resolvedActiveTodoId
     const displayStatus =
-      isResolvedActive && (todo.status === 'pending' || todo.status === 'in_progress')
+      isStreaming && isResolvedActive && (todo.status === 'pending' || todo.status === 'in_progress')
         ? 'in_progress'
         : todo.status
     return { ...todo, displayStatus }

@@ -9,16 +9,13 @@ type ToolResultBlockProps = {
 }
 
 function formatContent(content: string): string {
-  // If this looks like markdown image content, keep as-is
   if (content.includes('![') && content.includes('](')) {
     return content
   }
-  // Try to parse as JSON and format compactly
   try {
     const parsed = JSON.parse(content)
     return JSON.stringify(parsed)
   } catch {
-    // Not JSON, return as-is
     return content
   }
 }
@@ -26,38 +23,48 @@ function formatContent(content: string): string {
 export function ToolResultBlock({ message, backendUrl }: ToolResultBlockProps) {
   const [collapsed, setCollapsed] = useState<boolean>(true)
   const media = message.toolMedia ?? []
+  const isStreaming = message.status === 'streaming'
   const formattedContent = formatContent(message.content || 'No tool output.')
   const hasMarkdownImage = formattedContent.includes('![') && formattedContent.includes('](')
 
-  return (
-    <div className="tool-block">
-      <div className="tool-block-header">
-        <span>{message.toolName ? `Tool: ${message.toolName}` : 'Tool output'}</span>
-        <button className="text-btn" onClick={() => setCollapsed((prev) => !prev)}>
-          {collapsed ? 'Show' : 'Hide'}
-        </button>
+  if (isStreaming) {
+    return (
+      <div className="tool-chip is-streaming">
+        <div className="tool-chip-toggle tool-chip-toggle-static sweep-active">
+          <span className="tool-chip-icon" aria-hidden="true">&#9881;</span>
+          <span className="tool-chip-name">{message.toolName || 'Running tool'}</span>
+          <span className="tool-chip-action">Running</span>
+        </div>
       </div>
+    )
+  }
+
+  return (
+    <div className="tool-chip">
+      <button className="tool-chip-toggle" onClick={() => setCollapsed((prev) => !prev)}>
+        <span className="tool-chip-icon" aria-hidden="true">&#9881;</span>
+        <span className="tool-chip-name">{message.toolName || 'Tool output'}</span>
+        <span className="tool-chip-action">{collapsed ? 'Show' : 'Hide'}</span>
+      </button>
       {!collapsed && (
-        <>
+        <div className="tool-chip-body">
           {hasMarkdownImage ? (
-            <div className="tool-block-body">
+            <div className="tool-chip-content">
               <MarkdownMessage content={formattedContent} backendUrl={backendUrl} />
             </div>
           ) : (
-            <pre className="tool-block-body">{formattedContent}</pre>
+            <pre className="tool-chip-content">{formattedContent}</pre>
           )}
           {!hasMarkdownImage && media.length > 0 && (
-            <div className="tool-block-media">
+            <div className="tool-chip-media">
               {media.map((item, index) => {
                 const src = resolveMediaUrl(item.value, backendUrl)
-                if (!src) {
-                  return null
-                }
+                if (!src) return null
                 return <img key={`${message.id}-media-${index}`} src={src} alt="tool output" />
               })}
             </div>
           )}
-        </>
+        </div>
       )}
     </div>
   )

@@ -3,6 +3,7 @@ import type {
   HeadlessSessionCapacityInfo,
   ImageAsset,
   McpToolsInfo,
+  RenameThreadTitleInfo,
   ReleaseRuntimeInfo,
   RenderImage,
   SceneInfo,
@@ -508,6 +509,26 @@ export async function deleteThread(
     // Best-effort: don't block frontend deletion if backend is unreachable.
     console.warn('Failed to delete thread on backend', error)
   }
+}
+
+export async function renameThreadTitle(
+  baseUrl: string,
+  threadId: string,
+  title: string,
+  signal?: AbortSignal
+): Promise<RenameThreadTitleInfo> {
+  const response = await apiFetch(`${baseUrl}/threads/${threadId}/title`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ title }),
+    signal
+  })
+  if (!response.ok) {
+    throw await buildHttpError(response, `Failed to rename thread '${threadId}' (${response.status})`)
+  }
+  return (await response.json()) as RenameThreadTitleInfo
 }
 
 export async function getHealth(

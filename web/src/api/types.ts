@@ -122,6 +122,11 @@ export type ReleaseRuntimeInfo = {
   cleaned: string[]
 }
 
+export type RenameThreadTitleInfo = {
+  thread_id: string
+  title: string
+}
+
 export type VlmProviderOption = {
   provider: string
   display_name: string

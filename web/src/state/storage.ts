@@ -32,11 +32,13 @@ export const defaultSettings: Settings = {
   theme: 'dark',
   autoRefreshScene: true,
   autoFetchIntervalSeconds: 10,
-  viewportTheme: 'auto'
+  viewportTheme: 'auto',
+  uiMode: 'default'
 }
 
 const legacyDarkThemes = new Set(['midnight', 'slate', 'warm'])
 const viewportThemes = new Set<Settings['viewportTheme']>(['auto', 'dark', 'light'])
+const uiModes = new Set<Settings['uiMode']>(['default', 'minimal'])
 const useIndexedDB = isIndexedDBSupported()
 
 function sanitizeMessageContent(content: string): string {
@@ -205,6 +207,11 @@ function normalizeSettings(settings: Partial<Settings> | null | undefined): Sett
     typeof rawViewportTheme === 'string' && viewportThemes.has(rawViewportTheme as Settings['viewportTheme'])
       ? (rawViewportTheme as Settings['viewportTheme'])
       : defaultSettings.viewportTheme
+  const rawUiMode = settings?.uiMode
+  const nextUiMode =
+    typeof rawUiMode === 'string' && uiModes.has(rawUiMode as Settings['uiMode'])
+      ? (rawUiMode as Settings['uiMode'])
+      : defaultSettings.uiMode
   const rawAutoFetchIntervalSeconds = Number(settings?.autoFetchIntervalSeconds)
   const nextAutoFetchIntervalSeconds =
     Number.isFinite(rawAutoFetchIntervalSeconds) && rawAutoFetchIntervalSeconds > 0
@@ -217,7 +224,8 @@ function normalizeSettings(settings: Partial<Settings> | null | undefined): Sett
     theme: nextTheme,
     autoRefreshScene: settings?.autoRefreshScene ?? defaultSettings.autoRefreshScene,
     autoFetchIntervalSeconds: nextAutoFetchIntervalSeconds,
-    viewportTheme: nextViewportTheme
+    viewportTheme: nextViewportTheme,
+    uiMode: nextUiMode
   }
 }
 

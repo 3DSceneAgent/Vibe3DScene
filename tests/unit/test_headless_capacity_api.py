@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from scene_agent.blender.session_manager import SessionResourceError
 from scene_agent.interfaces import api as api_module
+from scene_agent.interfaces.api import routes_runtime as api_routes_runtime
 from scene_agent.interfaces.api import routes_system as api_routes_system
 from scene_agent.interfaces.api import shared as api_shared
 
@@ -308,6 +309,85 @@ def test_ensure_frontend_client_can_manage_thread_binds_legacy_default(monkeypat
 
     assert coordinator.runtime_updates
     assert coordinator.meta_by_thread["thread-legacy"]["frontend_client_id"] == "client-new"
+    with api_module._thread_client_lock:
+        assert api_module._thread_frontend_clients["thread-legacy"] == "client-new"
+
+
+def test_rename_thread_title_rejects_foreign_client(monkeypatch):
+    class _Coordinator:
+        def __init__(self) -> None:
+            self.meta_by_thread = {"thread-1": {"frontend_client_id": "client-a"}}
+            self.runtime_updates: list[tuple[str, dict[str, object]]] = []
+
+        def get_session_meta(self, thread_id: str) -> dict[str, str] | None:
+            return self.meta_by_thread.get(thread_id)
+
+        def update_session_runtime_fields(self, thread_id: str, fields: dict[str, object]) -> None:
+            self.runtime_updates.append((thread_id, fields))
+
+    async def fake_claim_or_proxy_request(*, request, thread_id):  # type: ignore[no-untyped-def]
+        _ = request, thread_id
+        return SimpleNamespace(owner_worker_id="worker-a", lease_epoch=7), None
+
+    coordinator = _Coordinator()
+    monkeypatch.setattr(api_shared, "get_session_coordinator", lambda: coordinator)
+    monkeypatch.setattr(api_routes_runtime, "get_session_coordinator", lambda: coordinator)
+    monkeypatch.setattr(api_routes_runtime, "claim_or_proxy_request", fake_claim_or_proxy_request)
+
+    with api_module._thread_client_lock:
+        api_module._thread_frontend_clients.clear()
+
+    with TestClient(api_module.app) as client:
+        response = client.patch(
+            "/threads/thread-1/title",
+            headers={"X-Frontend-Client-Id": "client-b"},
+            json={"title": "Renamed thread"},
+        )
+
+    assert response.status_code == 403
+    assert coordinator.runtime_updates == []
+
+
+def test_rename_thread_title_binds_legacy_default_and_updates_meta(monkeypatch):
+    class _Coordinator:
+        def __init__(self) -> None:
+            self.meta_by_thread = {"thread-legacy": {}}
+            self.runtime_updates: list[tuple[str, dict[str, object]]] = []
+
+        def get_session_meta(self, thread_id: str) -> dict[str, str] | None:
+            return self.meta_by_thread.get(thread_id)
+
+        def update_session_runtime_fields(self, thread_id: str, fields: dict[str, object]) -> None:
+            self.runtime_updates.append((thread_id, fields))
+            meta = self.meta_by_thread.setdefault(thread_id, {})
+            for key, value in fields.items():
+                if value is None:
+                    continue
+                meta[str(key)] = str(value)
+
+    async def fake_claim_or_proxy_request(*, request, thread_id):  # type: ignore[no-untyped-def]
+        _ = request, thread_id
+        return SimpleNamespace(owner_worker_id="worker-a", lease_epoch=3), None
+
+    coordinator = _Coordinator()
+    monkeypatch.setattr(api_shared, "get_session_coordinator", lambda: coordinator)
+    monkeypatch.setattr(api_routes_runtime, "get_session_coordinator", lambda: coordinator)
+    monkeypatch.setattr(api_routes_runtime, "claim_or_proxy_request", fake_claim_or_proxy_request)
+
+    with api_module._thread_client_lock:
+        api_module._thread_frontend_clients.clear()
+
+    with TestClient(api_module.app) as client:
+        response = client.patch(
+            "/threads/thread-legacy/title",
+            headers={"X-Frontend-Client-Id": "client-new"},
+            json={"title": "  Renamed thread  "},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"thread_id": "thread-legacy", "title": "Renamed thread"}
+    assert coordinator.meta_by_thread["thread-legacy"]["frontend_client_id"] == "client-new"
+    assert coordinator.meta_by_thread["thread-legacy"]["title"] == "Renamed thread"
     with api_module._thread_client_lock:
         assert api_module._thread_frontend_clients["thread-legacy"] == "client-new"
 

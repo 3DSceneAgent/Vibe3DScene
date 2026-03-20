@@ -10,6 +10,7 @@ import {
   getSceneBlendFile,
   deleteThread as deleteThreadApi,
   getHealth,
+  renameThreadTitle as renameThreadTitleApi,
   uploadThreadImages,
   listThreadImages,
   getExamplePrompts,
@@ -35,6 +36,7 @@ import { loadSettings, loadThreads, loadSettingsAsync, loadThreadsAsync, saveSet
 import type { Message, SceneHierarchyNode, Thread } from './state/types'
 import {
   applyStreamingDeltaWithId,
+  extractAssistantToolCalls,
   extractMessageContent,
   extractMessageThinking,
   extractToolPayload,
@@ -42,6 +44,7 @@ import {
   isToolMessage,
   parseThinking
 } from './utils/message'
+import type { AssistantToolCall } from './utils/message'
 import { downloadBlob } from './utils/download'
 import './App.css'
 
@@ -158,6 +161,38 @@ function resolveFastModeHealthState(health: {
   }
 }
 
+function normalizeThreadTitle(title: string, maxLength: number = 120): string {
+  const normalized = title.trim()
+  if (normalized.length > maxLength) {
+    return normalized.slice(0, maxLength)
+  }
+  return normalized
+}
+
+function buildThreadTitleUpdate(
+  thread: Thread,
+  nextTitle: string,
+  options?: {
+    manual?: boolean
+  }
+): Pick<Thread, 'title' | 'titleEditedManually'> | null {
+  const normalized = normalizeThreadTitle(nextTitle)
+  if (!normalized) {
+    return null
+  }
+  const nextManualFlag =
+    typeof options?.manual === 'boolean'
+      ? options.manual
+      : Boolean(thread.titleEditedManually)
+  if (thread.title === normalized && Boolean(thread.titleEditedManually) === nextManualFlag) {
+    return null
+  }
+  return {
+    title: normalized,
+    titleEditedManually: nextManualFlag
+  }
+}
+
 function finalizeStreamingAssistants(messages: Message[], keepAssistantId?: string | null): Message[] {
   let changed = false
   const nextMessages = messages.map((message): Message => {
@@ -172,6 +207,112 @@ function finalizeStreamingAssistants(messages: Message[], keepAssistantId?: stri
     return { ...message, thinkingActive: false, status: 'final' as const }
   })
   return changed ? nextMessages : messages
+}
+
+function finalizeStreamingMessages(messages: Message[], keepAssistantId?: string | null): Message[] {
+  let changed = false
+  const nextMessages = messages.map((message): Message => {
+    if (message.status !== 'streaming') {
+      return message
+    }
+    if (keepAssistantId != null && message.role === 'assistant' && message.id === keepAssistantId) {
+      return message
+    }
+    changed = true
+    return { ...message, thinkingActive: false, status: 'final' as const }
+  })
+  return changed ? nextMessages : messages
+}
+
+function getCurrentTurnStartIndex(messages: Message[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === 'user') {
+      return index + 1
+    }
+  }
+  return 0
+}
+
+function createPendingToolMessage(toolCall: AssistantToolCall, createdAt: number): Message {
+  return {
+    id: `tool-pending-${toolCall.key}`,
+    role: 'tool',
+    content: '',
+    createdAt,
+    status: 'streaming',
+    toolCallKey: toolCall.key,
+    toolName: toolCall.name
+  }
+}
+
+function appendPendingToolMessages(messages: Message[], toolCalls: AssistantToolCall[]): Message[] {
+  const finalizedMessages = finalizeStreamingAssistants(messages)
+  if (toolCalls.length === 0) {
+    return finalizedMessages
+  }
+
+  const turnStartIndex = getCurrentTurnStartIndex(finalizedMessages)
+  const existingKeys = new Set(
+    finalizedMessages
+      .slice(turnStartIndex)
+      .map((message) => message.toolCallKey)
+      .filter((key): key is string => typeof key === 'string' && key.length > 0)
+  )
+  const nextMessages = [...finalizedMessages]
+  let changed = finalizedMessages !== messages
+  let timestamp = Date.now()
+
+  toolCalls.forEach((toolCall) => {
+    if (existingKeys.has(toolCall.key)) return
+    existingKeys.add(toolCall.key)
+    nextMessages.push(createPendingToolMessage(toolCall, timestamp))
+    timestamp += 1
+    changed = true
+  })
+
+  return changed ? nextMessages : messages
+}
+
+function resolveToolMessage(messages: Message[], toolEntry: Message): Message[] {
+  const finalizedMessages = finalizeStreamingAssistants(messages)
+  const turnStartIndex = getCurrentTurnStartIndex(finalizedMessages)
+  let oldestPendingIndex = -1
+  let matchingPendingIndex = -1
+
+  for (let index = turnStartIndex; index < finalizedMessages.length; index += 1) {
+    const message = finalizedMessages[index]
+    if (message.role !== 'tool' || message.status !== 'streaming') {
+      continue
+    }
+    if (oldestPendingIndex === -1) {
+      oldestPendingIndex = index
+    }
+    if (toolEntry.toolName && message.toolName === toolEntry.toolName) {
+      matchingPendingIndex = index
+      break
+    }
+  }
+
+  const targetIndex =
+    matchingPendingIndex !== -1
+      ? matchingPendingIndex
+      : !toolEntry.toolName && oldestPendingIndex !== -1
+        ? oldestPendingIndex
+        : -1
+
+  if (targetIndex === -1) {
+    return finalizedMessages === messages ? [...messages, toolEntry] : [...finalizedMessages, toolEntry]
+  }
+
+  const target = finalizedMessages[targetIndex]
+  const replacement: Message = {
+    ...toolEntry,
+    id: target.id,
+    createdAt: target.createdAt,
+    toolCallKey: target.toolCallKey
+  }
+
+  return finalizedMessages.map((message, index) => (index === targetIndex ? replacement : message))
 }
 
 function App() {
@@ -210,6 +351,7 @@ function App() {
   const [releasingThreadId, setReleasingThreadId] = useState<string | null>(null)
   const [threadCreateError, setThreadCreateError] = useState<string | null>(null)
   const [threadCreateHint, setThreadCreateHint] = useState<string | null>(null)
+  const [pendingWelcomePrompt, setPendingWelcomePrompt] = useState<string | null>(null)
   const [headlessQuotaInfo, setHeadlessQuotaInfo] = useState<{ inUse: number; quota: number } | null>(null)
   const streamAbortRef = useRef<AbortController | null>(null)
   const healthAbortRef = useRef<AbortController | null>(null)
@@ -218,6 +360,7 @@ function App() {
   const previousAssistantContentRef = useRef<string | null>(null)
   const knownStreamIdsRef = useRef<Set<string>>(new Set())
   const knownToolIdsRef = useRef<Set<string>>(new Set())
+  const knownToolCallKeysRef = useRef<Set<string>>(new Set())
   const receivedDeltaRef = useRef(false)
   const sceneChangeRef = useRef<Record<string, boolean>>({})
   const settingsRef = useRef(settings)
@@ -705,6 +848,7 @@ function App() {
       const newThread: Thread = {
         id: nextThreadId,
         title: 'New chat',
+        titleEditedManually: false,
         createdAt: Date.now(),
         messages: [],
         mcpToolEnabled: {},
@@ -807,6 +951,57 @@ function App() {
     }
   }
 
+  const deleteAllThreads = () => {
+    if (streamAbortRef.current) {
+      streamAbortRef.current.abort()
+    }
+    if (currentStreamRef.current) {
+      currentStreamRef.current = null
+    }
+    setIsStreaming(false)
+    setIsSending(false)
+    messageIdMapRef.current.clear()
+    knownToolCallKeysRef.current.clear()
+
+    setThreads((prev) => {
+      for (const thread of prev) {
+        if (settings.backendUrl) {
+          void deleteThreadApi(settings.backendUrl, thread.id)
+        }
+        if (thread.gltfUrl) URL.revokeObjectURL(thread.gltfUrl)
+        if (thread.images) {
+          thread.images.forEach((img) => {
+            if (img.previewUrl) URL.revokeObjectURL(img.previewUrl)
+          })
+        }
+      }
+      return []
+    })
+
+    loadedThreadImagesRef.current.clear()
+    autoFetchLastRunRef.current = {}
+    sceneChangeRef.current = {}
+    for (const ctrl of Object.values(rendersAbortRef.current)) ctrl.abort()
+    rendersAbortRef.current = {}
+    for (const ctrl of Object.values(gltfAbortRef.current)) ctrl.abort()
+    gltfAbortRef.current = {}
+    runtimeOccupancyRef.current = {}
+    setLoadingByThread({})
+    setSceneActionErrorByThread({})
+    setStreamStatusByThread({})
+    setMcpToolsByThread({})
+    setMcpToolHintsByThread({})
+    setMcpToolsErrorByThread({})
+    setVlmErrorByThread({})
+    setMcpToolsLoadingThreadId(null)
+    setVlmLoadingThreadId(null)
+    setActiveThreadId(null)
+
+    if (backendStatus === 'online' && backendMode === 'headless' && settings.backendUrl) {
+      void refreshHeadlessCapacity()
+    }
+  }
+
   const mergeTodos = (existing: TodoItem[], incoming: TodoItem[]) => {
     const map = new Map(existing.map((todo) => [todo.id, todo]))
     incoming.forEach((todo) => map.set(todo.id, todo))
@@ -887,6 +1082,30 @@ function App() {
     [updateThread]
   )
 
+  const renameThread = useCallback(
+    (threadId: string, nextTitle: string) => {
+      const thread = threads.find((entry) => entry.id === threadId)
+      if (!thread) {
+        return
+      }
+      const titleUpdate = buildThreadTitleUpdate(thread, nextTitle, { manual: true })
+      if (!titleUpdate) {
+        return
+      }
+      updateThread(threadId, (current) => ({
+        ...current,
+        ...titleUpdate
+      }))
+      if (!settings.backendUrl) {
+        return
+      }
+      void renameThreadTitleApi(settings.backendUrl, threadId, titleUpdate.title).catch((error) => {
+        console.warn(`Failed to sync renamed thread title for ${threadId}`, error)
+      })
+    },
+    [settings.backendUrl, threads, updateThread]
+  )
+
   const handleStop = useCallback(() => {
     if (streamAbortRef.current) {
       streamAbortRef.current.abort()
@@ -895,7 +1114,7 @@ function App() {
     if (currentStreamRef.current) {
       const { threadId, runId } = currentStreamRef.current
       updateThread(threadId, (thread) => {
-        const messages = finalizeStreamingAssistants(thread.messages)
+        const messages = finalizeStreamingMessages(thread.messages)
         return messages === thread.messages ? thread : { ...thread, messages }
       })
       setThreadStreamStatus(threadId, 'complete')
@@ -906,6 +1125,7 @@ function App() {
     }
     
     messageIdMapRef.current.clear()
+    knownToolCallKeysRef.current.clear()
     setIsStreaming(false)
     setIsSending(false)
   }, [setThreadStreamStatus, updateThread])
@@ -988,13 +1208,12 @@ function App() {
     setIsSending(true)
     setThreadStreamStatus(threadId, 'streaming')
     updateThread(threadId, (thread) => {
-      const title =
-        thread.title === 'New chat' || thread.messages.length === 0
-          ? text.slice(0, 32)
-          : thread.title
+      const shouldAutoTitle =
+        !thread.titleEditedManually && (thread.title === 'New chat' || thread.messages.length === 0)
+      const titleUpdate = shouldAutoTitle ? buildThreadTitleUpdate(thread, text.slice(0, 32)) : null
       return {
         ...thread,
-        title,
+        ...(titleUpdate ?? {}),
         vlmProvider: selectedProvider || thread.vlmProvider,
         vlmModel: selectedModel || thread.vlmModel,
         vlmLocked: thread.vlmLocked ?? false,
@@ -1162,7 +1381,7 @@ function App() {
     if (currentStreamRef.current) {
       const { threadId: previousThreadId } = currentStreamRef.current
       updateThread(previousThreadId, (thread) => {
-        const messages = finalizeStreamingAssistants(thread.messages)
+        const messages = finalizeStreamingMessages(thread.messages)
         return messages === thread.messages ? thread : { ...thread, messages }
       })
       setThreadStreamStatus(previousThreadId, 'complete')
@@ -1182,6 +1401,7 @@ function App() {
         .map((message) => message.id)
         .filter((id): id is string => typeof id === 'string' && id.length > 0)
     )
+    knownToolCallKeysRef.current.clear()
     receivedDeltaRef.current = false
 
     setIsStreaming(true)
@@ -1365,6 +1585,23 @@ function App() {
       }
 
       if (event.messages && event.messages.length > 0) {
+        const assistantToolCalls = event.messages
+          .filter((message) => !isHumanMessage(message) && !isToolMessage(message))
+          .flatMap((message) => extractAssistantToolCalls(message))
+          .filter((toolCall) => {
+            if (knownToolCallKeysRef.current.has(toolCall.key)) {
+              return false
+            }
+            knownToolCallKeysRef.current.add(toolCall.key)
+            return true
+          })
+        if (assistantToolCalls.length > 0) {
+          updateThread(threadId, (thread) => {
+            const nextMessages = appendPendingToolMessages(thread.messages, assistantToolCalls)
+            return nextMessages === thread.messages ? thread : { ...thread, messages: nextMessages }
+          })
+        }
+
         const toolEntries = event.messages
           .filter((message) => isToolMessage(message))
           .map((message) => {
@@ -1397,7 +1634,7 @@ function App() {
         if (toolEntries.length > 0) {
           updateThread(threadId, (thread) => ({
             ...thread,
-            messages: [...finalizeStreamingAssistants(thread.messages), ...toolEntries]
+            messages: toolEntries.reduce((currentMessages, toolEntry) => resolveToolMessage(currentMessages, toolEntry), thread.messages)
           }))
         }
 
@@ -1528,6 +1765,14 @@ function App() {
     },
     [isHeadlessRuntimeClaimed, setSceneActionError]
   )
+
+  useEffect(() => {
+    if (pendingWelcomePrompt && activeThread && activeThread.messages.length === 0 && !creatingThread) {
+      const prompt = pendingWelcomePrompt
+      setPendingWelcomePrompt(null)
+      void handleSend(prompt)
+    }
+  }, [pendingWelcomePrompt, activeThread, creatingThread]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchRenders = useCallback(async (threadId?: string, includeLocalWork: boolean = false) => {
     const targetId = threadId ?? activeThread?.id
@@ -1728,6 +1973,7 @@ function App() {
     backendStatus === 'online' && backendMode === 'headless' && headlessQuotaInfo
       ? `Runtime slots in use: ${headlessQuotaInfo.inUse}/${headlessQuotaInfo.quota}`
       : null
+  const isMinimalUi = settings.uiMode === 'minimal'
   const statusText = modeLabel ? `Server ${statusLabel} • ${modeLabel}` : `Server ${statusLabel}`
   const projectWebsiteUrl = 'https://3dsceneagent.github.io/vibe3dscene/'
   const projectGithubUrl = 'https://github.com/3DSceneAgent/Vibe3DScene'
@@ -1761,6 +2007,8 @@ function App() {
                 setActiveThreadId(id)
               }}
               onDelete={deleteThread}
+              onRename={renameThread}
+              onDeleteAll={deleteAllThreads}
               onNew={() => {
                 void createThread()
               }}
@@ -1838,7 +2086,7 @@ function App() {
           </div>
         )}
 
-        <div className={`workspace ${activeThread ? '' : 'is-empty'}`}>
+        <div className={`workspace ${activeThread ? '' : 'is-empty'} ${isMinimalUi ? 'minimal-ui' : ''}`}>
           {activeThread ? (
             <>
               <section className="workspace-chat">
@@ -1872,6 +2120,7 @@ function App() {
                   graphEvents={activeThread.graphEvents ?? []}
                   todos={activeThread.todos ?? []}
                   runtimeClaimHint={runtimeClaimHint}
+                  minimalUi={isMinimalUi}
                 />
               </section>
               <section className="workspace-scene">
@@ -1884,10 +2133,6 @@ function App() {
                   environment={environment}
                   viewportTheme={settings.viewportTheme}
                   uiTheme={settings.theme}
-                  autoFetch={settings.autoRefreshScene}
-                  onAutoFetchChange={(enabled) =>
-                    setSettings((prev) => ({ ...prev, autoRefreshScene: enabled }))
-                  }
                   onEnvironmentChange={setEnvironment}
                   onFetchRenders={(includeLocalWork) => void fetchRenders(undefined, includeLocalWork ?? false)}
                   onFetchGltf={() => void fetchGltf()}
@@ -1901,16 +2146,49 @@ function App() {
                   loading={activeThreadLoading}
                   canRunActions={canRunSceneActions}
                   idleActionHint={idleSceneActionHint}
+                  minimalUi={isMinimalUi}
                 />
               </section>
             </>
           ) : (
             <section className="workspace-empty">
               <div className="workspace-empty-card">
-                <div className="workspace-empty-badge">Vibe 3D Scene</div>
-                <div className="workspace-empty-title">Start Vibe Building 3D Scene</div>
-                <div className="workspace-empty-subtitle">
+                <div className="welcome-hero">
+                  <img src="/demo.gif" alt="3D scene creation demo" loading="lazy" />
                 </div>
+                <div className="workspace-empty-badge">
+                  <span className="sparkle" aria-hidden="true">&#10022;</span>{' '}AI-Powered 3D Creation
+                </div>
+                <div className="workspace-empty-title">Bring Your 3D Vision to Life</div>
+                <div className="workspace-empty-subtitle">
+                  Describe what you imagine — the AI scene agent will build, refine, and render your 3D scene in real time.
+                </div>
+
+                {examplePrompts.length > 0 && (
+                  <div className="welcome-prompt-grid">
+                    {examplePrompts.slice(0, 4).map((prompt, index) => (
+                      <button
+                        key={`${index}-${prompt}`}
+                        type="button"
+                        className="welcome-prompt-card"
+                        disabled={creatingThread || releasingThreadId !== null}
+                        onClick={() => {
+                          setPendingWelcomePrompt(prompt)
+                          void createThread()
+                        }}
+                        title={prompt}
+                      >
+                        <span className="welcome-prompt-icon" aria-hidden="true">
+                          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M3 13l3-3m0 0l7-7m-7 7l-3-3m10 3l-7 7" />
+                          </svg>
+                        </span>
+                        <span className="welcome-prompt-text">{prompt}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+
                 <button
                   className="primary-btn workspace-empty-cta"
                   onClick={() => {
@@ -1918,8 +2196,22 @@ function App() {
                   }}
                   disabled={creatingThread || releasingThreadId !== null}
                 >
-                  {releasingThreadId ? 'Releasing...' : creatingThread ? 'Creating...' : 'New Chat'}
+                  {releasingThreadId ? 'Releasing...' : creatingThread ? 'Creating...' : 'Start Creating'}
                 </button>
+                <div className="workspace-empty-features">
+                  <span className="workspace-empty-feature">
+                    <span className="workspace-empty-feature-icon" aria-hidden="true">&#128172;</span>
+                    Chat-Driven
+                  </span>
+                  <span className="workspace-empty-feature">
+                    <span className="workspace-empty-feature-icon" aria-hidden="true">&#9655;</span>
+                    Real-Time 3D
+                  </span>
+                  <span className="workspace-empty-feature">
+                    <span className="workspace-empty-feature-icon" aria-hidden="true">&#128247;</span>
+                    Render &amp; Export
+                  </span>
+                </div>
                 {threadCreateHint && <div className="thread-create-hint action">{threadCreateHint}</div>}
                 {threadCreateError && <div className="thread-create-error">{threadCreateError}</div>}
               </div>

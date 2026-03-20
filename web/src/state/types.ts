@@ -25,6 +25,7 @@ export type Message = {
   raw?: string
   streamId?: string | null
   status?: MessageStatus
+  toolCallKey?: string
   toolName?: string
   toolPayload?: unknown
   toolMedia?: ToolMedia[]
@@ -34,6 +35,7 @@ export type Message = {
 export type Thread = {
   id: string
   title: string
+  titleEditedManually?: boolean
   createdAt: number
   messages: Message[]
   mcpToolEnabled?: Record<string, boolean>
@@ -55,6 +57,7 @@ export type Thread = {
 
 export type ThemeId = 'dark' | 'light'
 export type ViewportThemeId = 'auto' | 'dark' | 'light'
+export type UiModeId = 'default' | 'minimal'
 
 export type Settings = {
   backendUrl: string
@@ -62,4 +65,5 @@ export type Settings = {
   autoRefreshScene: boolean
   autoFetchIntervalSeconds: number
   viewportTheme: ViewportThemeId
+  uiMode: UiModeId
 }

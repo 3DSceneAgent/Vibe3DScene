@@ -1,4 +1,4 @@
-import type { Settings, ThemeId, ViewportThemeId } from '../state/types'
+import type { Settings, ThemeId, UiModeId, ViewportThemeId } from '../state/types'
 
 type SettingsPanelProps = {
   settings: Settings
@@ -12,6 +12,10 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
 
   const updateViewportTheme = (viewportTheme: ViewportThemeId) => {
     onChange({ ...settings, viewportTheme })
+  }
+
+  const updateUiMode = (uiMode: UiModeId) => {
+    onChange({ ...settings, uiMode })
   }
 
   const updateAutoFetchIntervalSeconds = (value: string) => {
@@ -60,8 +64,45 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
 
       <div className="panel">
         <div className="panel-header">
+          <div className="panel-title">Interface</div>
+        </div>
+        <div className="ui-mode-options" role="radiogroup" aria-label="UI Mode">
+          <button
+            type="button"
+            className={`ui-mode-card ${settings.uiMode === 'default' ? 'active' : ''}`}
+            onClick={() => updateUiMode('default')}
+            aria-pressed={settings.uiMode === 'default'}
+          >
+            <span className="ui-mode-title">Default</span>
+            <span className="ui-mode-meta">Show the full chat and scene controls.</span>
+          </button>
+          <button
+            type="button"
+            className={`ui-mode-card ${settings.uiMode === 'minimal' ? 'active' : ''}`}
+            onClick={() => updateUiMode('minimal')}
+            aria-pressed={settings.uiMode === 'minimal'}
+          >
+            <span className="ui-mode-title">Minimal</span>
+            <span className="ui-mode-meta">Keep the chat pane and 3D viewport as clean as possible.</span>
+          </button>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-header">
           <div className="panel-title">Viewport</div>
         </div>
+        <label className="field checkbox-field">
+          Auto-fetch Scene
+          <label className="toggle-switch compact">
+            <input
+              type="checkbox"
+              checked={settings.autoRefreshScene}
+              onChange={(event) => onChange({ ...settings, autoRefreshScene: event.target.checked })}
+            />
+            <span className="toggle-slider" />
+          </label>
+        </label>
         <label className="field">
           Auto-fetch Interval (seconds)
           <input

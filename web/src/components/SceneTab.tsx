@@ -19,8 +19,6 @@ type SceneTabProps = {
   environment: EnvironmentPreset
   viewportTheme: ViewportTheme
   uiTheme: UiTheme
-  autoFetch: boolean
-  onAutoFetchChange: (enabled: boolean) => void
   onEnvironmentChange: (preset: EnvironmentPreset) => void
   onFetchRenders: (includeLocalWork?: boolean) => void
   onFetchGltf: () => void
@@ -39,6 +37,7 @@ type SceneTabProps = {
   }
   canRunActions: boolean
   idleActionHint?: string | null
+  minimalUi?: boolean
 }
 
 type DownloadDropdownProps = {
@@ -147,7 +146,7 @@ function DownloadDropdown({
   return (
     <div className="dropdown" ref={dropdownRef}>
       <button
-        className="primary-btn dropdown-trigger"
+        className="ghost-btn icon-btn dropdown-trigger"
         onClick={() =>
           setIsOpen((open) => {
             const next = !open
@@ -158,8 +157,13 @@ function DownloadDropdown({
           })
         }
         disabled={disabled || loading}
+        title="Download"
+        aria-label="Download"
       >
-        Download
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M8 1v10M4 8l4 4 4-4" />
+          <path d="M2 13h12" />
+        </svg>
       </button>
       {isOpen && (
         <div className="dropdown-menu">
@@ -227,9 +231,6 @@ export function SceneTab({
   environment,
   viewportTheme,
   uiTheme,
-  autoFetch,
-  onAutoFetchChange,
-  onEnvironmentChange,
   onFetchRenders,
   onFetchGltf,
   onDownloadGltf,
@@ -241,20 +242,23 @@ export function SceneTab({
   onHierarchyChange,
   loading,
   canRunActions,
-  idleActionHint = null
+  idleActionHint = null,
+  minimalUi = false
 }: SceneTabProps) {
   const [objectsCollapsed, setObjectsCollapsed] = useState(true)
   const [isFullscreen, setIsFullscreen] = useState(false)
-  const [alwaysAutoFrameCamera, setAlwaysAutoFrameCamera] = useState(false)
+  const [alwaysAutoFrameCamera] = useState(false)
   const [twoSidedRendering, setTwoSidedRendering] = useState(false)
   const [includeLocalWorkRenders, setIncludeLocalWorkRenders] = useState(false)
   const [renderPanelHeight, setRenderPanelHeight] = useState(DEFAULT_RENDER_PANEL_HEIGHT)
   const [layoutHeight, setLayoutHeight] = useState(0)
   const [isResizingLayout, setIsResizingLayout] = useState(false)
   const layoutRef = useRef<HTMLDivElement | null>(null)
-  const hasRenders = renders.length > 0
+  const showRenderGallery = !minimalUi
+  const hasRenders = showRenderGallery && renders.length > 0
   const isSceneActionBusy = loading.scene || loading.renders || loading.gltf
   const fetchActionHint = !canRunActions ? idleActionHint : null
+  const isHierarchyCollapsed = minimalUi || objectsCollapsed
   const handleHierarchyChange = useCallback(
     (hierarchy: SceneHierarchyNode[]) => onHierarchyChange(threadId, hierarchy),
     [onHierarchyChange, threadId]
@@ -362,8 +366,57 @@ export function SceneTab({
   const appliedRenderPanelHeight =
     hasRenders && maxRenderHeight > 0 ? clamp(renderPanelHeight, minRenderHeight, maxRenderHeight) : undefined
 
+  const renderViewportControls = () => (
+    <>
+      <div className="viewer-control-group">
+        <button
+          type="button"
+          className="ghost-btn icon-btn viewer-toolbar-btn"
+          onClick={onFetchGltf}
+          disabled={isSceneActionBusy || !canRunActions}
+          title={fetchActionHint ?? 'Fetch scene'}
+          aria-label="Fetch scene"
+        >
+          {loading.gltf ? (
+            <svg className="spin" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+              <path d="M14 8a6 6 0 1 1-1.5-4" />
+              <polyline points="14 2 14 5.5 10.5 5.5" />
+            </svg>
+          ) : (
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+              <path d="M14 8a6 6 0 1 1-1.5-4" />
+              <polyline points="14 2 14 5.5 10.5 5.5" />
+            </svg>
+          )}
+        </button>
+        <DownloadDropdown
+          onDownloadGltf={onDownloadGltf}
+          onDownloadBlend={onDownloadBlend}
+          onDownloadBlendFile={onDownloadBlendFile}
+          onListBlendFiles={onListBlendFiles}
+          disabled={!canRunActions}
+          loading={loading.download}
+        />
+      </div>
+      <span className="viewer-header-sep" aria-hidden="true" />
+      <button
+        type="button"
+        className={`ghost-btn icon-btn viewer-toolbar-btn ${twoSidedRendering ? 'is-active' : ''}`}
+        onClick={() => setTwoSidedRendering((v) => !v)}
+        title={twoSidedRendering ? 'Two-sided rendering ON' : 'Two-sided rendering OFF'}
+        aria-label="Toggle two-sided rendering"
+        aria-pressed={twoSidedRendering}
+      >
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="1" y="3" width="14" height="10" rx="1.5" />
+          <line x1="8" y1="3" x2="8" y2="13" strokeDasharray="2 1.5" />
+        </svg>
+      </button>
+    </>
+  )
+
   const coreLayout = (fullscreen: boolean) => (
-    <div className={`scene-core ${objectsCollapsed ? 'objects-collapsed' : ''}`}>
+    <div className={`scene-core ${isHierarchyCollapsed ? 'objects-collapsed' : ''}`}>
       <div className="scene-core-viewport">
         <GltfViewer
           gltfUrl={gltfUrl}
@@ -375,60 +428,28 @@ export function SceneTab({
           onHierarchyChange={handleHierarchyChange}
           isFullscreen={fullscreen}
           onToggleFullscreen={() => setIsFullscreen((value) => !value)}
+          showFullscreenButton={!minimalUi}
           headerTrailingControls={
-            objectsCollapsed ? (
-              <button className="ghost-btn viewer-show-hier-btn" onClick={() => setObjectsCollapsed(false)}>
-                Show Hier
+            !minimalUi && objectsCollapsed ? (
+              <button
+                className="ghost-btn icon-btn viewer-toolbar-btn"
+                onClick={() => setObjectsCollapsed(false)}
+                title="Show hierarchy"
+                aria-label="Show hierarchy"
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="1" y="1" width="5" height="4" rx="1" />
+                  <rect x="10" y="1" width="5" height="4" rx="1" />
+                  <rect x="10" y="11" width="5" height="4" rx="1" />
+                  <path d="M3.5 5v3h9M12.5 8v3" />
+                </svg>
               </button>
             ) : null
           }
-          headerControls={
-            <>
-              <label className="toggle-switch">
-                <input
-                  type="checkbox"
-                  checked={alwaysAutoFrameCamera}
-                  onChange={(event) => setAlwaysAutoFrameCamera(event.target.checked)}
-                />
-                {/* <span className="toggle-slider" /> */}
-                {/* <span className="toggle-label">AutoCamera</span> */}
-              </label>
-              <label className="select-label">
-                EnvLight
-                <select
-                  className="styled-select"
-                  value={environment}
-                  onChange={(event) => onEnvironmentChange(event.target.value as EnvironmentPreset)}
-                >
-                  <option value="studio">Studio</option>
-                  <option value="warm">Warm</option>
-                  <option value="cool">Cool</option>
-                </select>
-              </label>
-              <label className="toggle-switch compact">
-                <input
-                  type="checkbox"
-                  checked={twoSidedRendering}
-                  onChange={(event) => setTwoSidedRendering(event.target.checked)}
-                />
-                <span className="toggle-slider" />
-                <span className="toggle-label">Two-sided</span>
-              </label>
-              {fullscreen && (
-                <DownloadDropdown
-                  onDownloadGltf={onDownloadGltf}
-                  onDownloadBlend={onDownloadBlend}
-                  onDownloadBlendFile={onDownloadBlendFile}
-                  onListBlendFiles={onListBlendFiles}
-                  disabled={!canRunActions}
-                  loading={loading.download}
-                />
-              )}
-            </>
-          }
+          headerControls={renderViewportControls()}
         />
       </div>
-      {!objectsCollapsed && (
+      {!minimalUi && !objectsCollapsed && (
         <SceneInfoPanel
           hierarchy={sceneHierarchy}
           collapsed={false}
@@ -440,44 +461,7 @@ export function SceneTab({
   )
 
   return (
-    <div className="scene-tab scene-pane">
-      <div className="scene-action-bar">
-        <div className="scene-actions-left">
-          <span className="scene-action-with-hint" data-hint={fetchActionHint ?? undefined}>
-            <button
-              className="primary-btn"
-              onClick={() => onFetchRenders(includeLocalWorkRenders)}
-              disabled={isSceneActionBusy || !canRunActions}
-            >
-              Fetch Renders
-            </button>
-          </span>
-          <span className="scene-action-with-hint" data-hint={fetchActionHint ?? undefined}>
-            <button className="primary-btn" onClick={onFetchGltf} disabled={isSceneActionBusy || !canRunActions}>
-              Fetch Scene
-            </button>
-          </span>
-          <DownloadDropdown
-            onDownloadGltf={onDownloadGltf}
-            onDownloadBlend={onDownloadBlend}
-            onDownloadBlendFile={onDownloadBlendFile}
-            onListBlendFiles={onListBlendFiles}
-            disabled={!canRunActions}
-            loading={loading.download}
-          />
-        </div>
-        <div className="scene-actions-right">
-          <label className="toggle-switch">
-            <input
-              type="checkbox"
-              checked={autoFetch}
-              onChange={(event) => onAutoFetchChange(event.target.checked)}
-            />
-            <span className="toggle-slider" />
-            <span className="toggle-label">Auto-fetch</span>
-          </label>
-        </div>
-      </div>
+    <div className={`scene-tab scene-pane ${minimalUi ? 'minimal-ui' : ''}`}>
       {actionError && (
         <div className="scene-action-error" role="alert">
           <span>{actionError}</span>
@@ -493,14 +477,18 @@ export function SceneTab({
         ref={layoutRef}
         className={`scene-layout-split ${hasRenders ? 'has-renders' : 'is-empty'} ${isResizingLayout ? 'is-resizing' : ''}`}
       >
-        <RenderGallery
-          renders={renders}
-          isLoading={loading.renders}
-          backendUrl={backendUrl}
-          includeLocalWork={includeLocalWorkRenders}
-          onIncludeLocalWorkChange={setIncludeLocalWorkRenders}
-          style={appliedRenderPanelHeight ? { height: `${appliedRenderPanelHeight}px` } : undefined}
-        />
+        {showRenderGallery && (
+          <RenderGallery
+            renders={renders}
+            isLoading={loading.renders}
+            backendUrl={backendUrl}
+            includeLocalWork={includeLocalWorkRenders}
+            onIncludeLocalWorkChange={setIncludeLocalWorkRenders}
+            onFetchRenders={() => onFetchRenders(includeLocalWorkRenders)}
+            fetchDisabled={isSceneActionBusy || !canRunActions}
+            style={appliedRenderPanelHeight ? { height: `${appliedRenderPanelHeight}px` } : undefined}
+          />
+        )}
 
         {hasRenders && (
           <button

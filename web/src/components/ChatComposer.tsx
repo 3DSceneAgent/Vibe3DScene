@@ -26,6 +26,10 @@ type ChatComposerProps = {
   modelLoading?: boolean
   modelError?: string | null
   modelLocked?: boolean
+  showModelSelector?: boolean
+  showMcpTools?: boolean
+  showFastMode?: boolean
+  runtimeHint?: string | null
 }
 
 const MAX_REFERENCE_IMAGES = 3
@@ -51,7 +55,11 @@ export function ChatComposer({
   fastModeAvailable = false,
   modelLoading = false,
   modelError = null,
-  modelLocked = false
+  modelLocked = false,
+  showModelSelector = true,
+  showMcpTools = true,
+  showFastMode = true,
+  runtimeHint = null
 }: ChatComposerProps) {
   const [input, setInput] = useState('')
   const [dragActive, setDragActive] = useState(false)
@@ -175,6 +183,12 @@ export function ChatComposer({
   const enabledToolCount = mcpTools.filter((toolName) => mcpToolEnabled[toolName] !== false).length
   const fastModeDisabled = Boolean(disabled)
 
+  const modelMetaTitle = modelLoading
+    ? 'Loading model options...'
+    : modelLocked
+      ? 'Model switch is currently locked'
+      : modelError ?? undefined
+
   const shortenFilename = (filename: string) => {
     const stem = filename.replace(/\.[^/.]+$/, '')
     return stem.slice(0, 10)
@@ -190,103 +204,6 @@ export function ChatComposer({
 
   return (
     <div className="composer-shell">
-      <div className="composer-top-row">
-        <div className="composer-model-panel">
-          <select
-            id="composer-model-select"
-            className="composer-model-select"
-            value={selectedModelValue}
-            disabled={modelSelectDisabled}
-            onChange={(event) => onModelSelectionChange?.(event.target.value)}
-          >
-            {modelOptions.length === 0 && <option value="">No model available</option>}
-            {modelOptions.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div
-          className={`composer-tools-panel ${isToolsOpen ? 'open' : ''}`}
-          onBlur={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-              setIsToolsOpen(false)
-            }
-          }}
-        >
-          <button
-            type="button"
-            className="composer-tools-summary"
-            onClick={() => setIsToolsOpen((prev) => !prev)}
-            aria-expanded={isToolsOpen}
-            aria-haspopup="true"
-          >
-            <span className="composer-tools-summary-copy">
-              <span className="composer-tools-title">MCP tools</span>
-              <span className="composer-tools-badge">
-                {enabledToolCount}/{mcpTools.length}
-              </span>
-            </span>
-            <span className="composer-tools-summary-side">
-              {mcpToolsLoading && <span className="composer-tools-meta">Loading...</span>}
-              {!mcpToolsLoading && mcpToolsError && (
-                <span className="composer-tools-meta error">Unavailable</span>
-              )}
-              <span className="composer-tools-caret" aria-hidden="true" />
-            </span>
-          </button>
-          {isToolsOpen && (
-            <div className="composer-tools-body">
-              <div className="composer-tools-body-header">
-                <div className="composer-tools-body-title">Per-thread tool access</div>
-              </div>
-              {mcpTools.length > 0 ? (
-                <ul className="composer-tools-list">
-                  {mcpTools.map((toolName) => {
-                    const hint = resolveToolHint(toolName)
-                    return (
-                      <li key={toolName} className="composer-tools-item">
-                        <label className="composer-tools-toggle" title={hint ?? undefined}>
-                          <span className="composer-tools-name">{toolName}</span>
-                          <span className="toggle-switch compact composer-tools-switch">
-                            <input
-                              type="checkbox"
-                              checked={mcpToolEnabled[toolName] !== false}
-                              onChange={(event) =>
-                                onMcpToolToggle?.(toolName, event.target.checked)
-                              }
-                              disabled={disabled || mcpToolsLoading}
-                            />
-                            <span className="toggle-slider" />
-                          </span>
-                        </label>
-                      </li>
-                    )
-                  })}
-                </ul>
-              ) : (
-                <div className="composer-tools-empty muted">
-                  {mcpToolsLoading
-                    ? 'Connecting to MCP server and loading tools...'
-                    : mcpToolsError
-                      ? 'No MCP tools available for this thread.'
-                      : 'No MCP tools loaded yet.'}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-      {(modelLoading || modelLocked || modelError) && (
-        <div className="composer-model-meta muted">
-          {modelLoading
-            ? 'Loading model options...'
-            : modelLocked
-              ? 'Model switch is currently locked'
-              : modelError}
-        </div>
-      )}
       <div
         className={`composer-input-panel ${dragActive ? 'drag-active' : ''} ${hasPendingImages ? 'has-images' : ''}`}
         onDrop={handleDrop}
@@ -375,12 +292,96 @@ export function ChatComposer({
                 +
               </span>
             </button>
-            <div className="composer-attachment-count">
-              {referenceImagesCount + pendingImages.length} / {MAX_REFERENCE_IMAGES} images
-            </div>
+            {showModelSelector && (
+              <select
+                id="composer-model-select"
+                className="composer-model-select"
+                value={selectedModelValue}
+                disabled={modelSelectDisabled}
+                onChange={(event) => onModelSelectionChange?.(event.target.value)}
+                title={runtimeHint ?? modelMetaTitle}
+              >
+                {modelOptions.length === 0 && <option value="">No model available</option>}
+                {modelOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            )}
+            {showMcpTools && (
+              <div
+                className={`composer-tools-panel ${isToolsOpen ? 'open' : ''}`}
+                onBlur={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                    setIsToolsOpen(false)
+                  }
+                }}
+              >
+                <button
+                  type="button"
+                  className="composer-tools-summary"
+                  onClick={() => setIsToolsOpen((prev) => !prev)}
+                  aria-expanded={isToolsOpen}
+                  aria-haspopup="true"
+                >
+                  <span className="composer-tools-summary-copy">
+                    <span className="composer-tools-title">Tools</span>
+                    <span className="composer-tools-badge">
+                      {enabledToolCount}/{mcpTools.length}
+                    </span>
+                  </span>
+                  {mcpToolsLoading && <span className="composer-tools-meta">...</span>}
+                  {!mcpToolsLoading && mcpToolsError && (
+                    <span className="composer-tools-meta error">!</span>
+                  )}
+                  <span className="composer-tools-caret" aria-hidden="true" />
+                </button>
+                {isToolsOpen && (
+                  <div className="composer-tools-body">
+                    <div className="composer-tools-body-header">
+                      <div className="composer-tools-body-title">Per-thread tool access</div>
+                    </div>
+                    {mcpTools.length > 0 ? (
+                      <ul className="composer-tools-list">
+                        {mcpTools.map((toolName) => {
+                          const hint = resolveToolHint(toolName)
+                          return (
+                            <li key={toolName} className="composer-tools-item">
+                              <label className="composer-tools-toggle" title={hint ?? undefined}>
+                                <span className="composer-tools-name">{toolName}</span>
+                                <span className="toggle-switch compact composer-tools-switch">
+                                  <input
+                                    type="checkbox"
+                                    checked={mcpToolEnabled[toolName] !== false}
+                                    onChange={(event) =>
+                                      onMcpToolToggle?.(toolName, event.target.checked)
+                                    }
+                                    disabled={disabled || mcpToolsLoading}
+                                  />
+                                  <span className="toggle-slider" />
+                                </span>
+                              </label>
+                            </li>
+                          )
+                        })}
+                      </ul>
+                    ) : (
+                      <div className="composer-tools-empty muted">
+                        {mcpToolsLoading
+                          ? 'Connecting to MCP server and loading tools...'
+                          : mcpToolsError
+                            ? 'No MCP tools available for this thread.'
+                            : 'No MCP tools loaded yet.'}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           <div className="composer-input-footer-right">
-            {fastModeAvailable && (
+            {showFastMode && fastModeAvailable && (
               <div
                 className={`composer-fast-mode-chip ${fastModeDisabled ? 'is-disabled' : ''}`}
                 title="Fast mode: skip auto observe and verify"

@@ -33,6 +33,7 @@ type ChatTabProps = {
   graphEvents?: GraphNodeStream[]
   todos?: TodoItem[]
   runtimeClaimHint?: string | null
+  minimalUi?: boolean
 }
 
 type VlmSelectionOption = {
@@ -50,10 +51,6 @@ function normalizeWorkflowValue(value: unknown): string | null {
   if (typeof value !== 'string') return null
   const normalized = value.trim()
   return normalized || null
-}
-
-function normalizeBooleanValue(value: unknown): boolean | null {
-  return typeof value === 'boolean' ? value : null
 }
 
 export function ChatTab({
@@ -82,7 +79,8 @@ export function ChatTab({
   onFastModeToggle,
   graphEvents = [],
   todos = [],
-  runtimeClaimHint = null
+  runtimeClaimHint = null,
+  minimalUi = false
 }: ChatTabProps) {
   const selectionOptions: VlmSelectionOption[] = vlmProviders
     .filter((provider) => provider.configured)
@@ -102,43 +100,6 @@ export function ChatTab({
     ) ?? selectionOptions[0] ?? null
   const selectorDisabled = vlmLocked
   const availablePrompts = thread?.messages.length === 0 ? examplePrompts : []
-  const workflowBadgeLabel = (() => {
-    let taskMode: string | null = null
-    let topology: string | null = null
-    let resolvedFastMode: boolean | null = null
-
-    for (let index = graphEvents.length - 1; index >= 0; index -= 1) {
-      const patchRaw = graphEvents[index]?.state_patch
-      if (!patchRaw || typeof patchRaw !== 'object' || Array.isArray(patchRaw)) {
-        continue
-      }
-      const patch = patchRaw as Record<string, unknown>
-      if (!taskMode) {
-        taskMode = normalizeWorkflowValue(patch.task_mode)
-      }
-      if (!topology) {
-        topology = normalizeWorkflowValue(patch.workflow_topology)
-      }
-      if (resolvedFastMode === null) {
-        resolvedFastMode = normalizeBooleanValue(patch.fast_mode)
-      }
-      if (taskMode && topology && resolvedFastMode !== null) {
-        break
-      }
-    }
-
-    const effectiveFastMode = resolvedFastMode ?? Boolean(fastMode)
-    if (!taskMode && !topology) {
-      return {
-        workflow: 'Workflow: pending',
-        fastMode: `Fast mode: ${effectiveFastMode ? 'on' : 'off'}`
-      }
-    }
-    return {
-      workflow: `Workflow: ${taskMode ?? 'unknown'} / ${topology ?? 'unknown'}`,
-      fastMode: `Fast mode: ${effectiveFastMode ? 'on' : 'off'}`
-    }
-  })()
   const activeTodoId = (() => {
     for (let index = graphEvents.length - 1; index >= 0; index -= 1) {
       const patchRaw = graphEvents[index]?.state_patch
@@ -159,36 +120,29 @@ export function ChatTab({
   }
 
   return (
-    <div className="chat-tab chat-pane">
-      <div className="chat-status-row">
-        <div
-          className={`chat-stream-status ${streamStatus === 'streaming' ? 'streaming' : 'complete'}`}
-          role="status"
-          aria-live="polite"
-        >
-          <span className="chat-stream-status-dot" />
-          <span className="chat-stream-status-text">
-            {streamStatus === 'streaming' ? 'Agent is building the scene' : 'Agent ready'}
-          </span>
+    <div className={`chat-tab chat-pane ${minimalUi ? 'minimal-ui' : ''}`}>
+      {!minimalUi && (
+        <div className="chat-status-row">
+          <div
+            className={`chat-stream-status ${streamStatus === 'streaming' ? 'streaming' : 'complete'}`}
+            role="status"
+            aria-live="polite"
+          >
+            <span className="chat-stream-status-dot" />
+            <span className="chat-stream-status-text">
+              {streamStatus === 'streaming' ? 'Agent is building the scene' : 'Agent ready'}
+            </span>
+          </div>
+          <GraphTimeline events={graphEvents} isStreaming={streamStatus === 'streaming'} />
         </div>
-        <div className="chat-badge-group" aria-live="polite">
-          <div className="chat-workflow-badge">{workflowBadgeLabel.workflow}</div>
-          {(fastModeAvailable || Boolean(fastMode)) && (
-            <div className="chat-workflow-badge chat-fastmode-badge">
-              {workflowBadgeLabel.fastMode}
-            </div>
-          )}
-        </div>
-      </div>
-      <GraphTimeline events={graphEvents} isStreaming={streamStatus === 'streaming'} />
-      <TodoPanel todos={todos} activeTodoId={activeTodoId} fastMode={fastMode} />
+      )}
+      {!minimalUi && <TodoPanel todos={todos} activeTodoId={activeTodoId} fastMode={fastMode} isStreaming={streamStatus === 'streaming'} />}
       <div className="chat-scroll-area">
-        <MessageList messages={thread.messages} backendUrl={backendUrl} />
+        <MessageList messages={thread.messages} backendUrl={backendUrl} streamStatus={streamStatus} />
       </div>
       {thread.images && thread.images.length > 0 && (
         <ReferenceImageStrip images={thread.images as ImageAsset[]} />
       )}
-      {runtimeClaimHint && <div className="chat-runtime-hint">{runtimeClaimHint}</div>}
       <ChatComposer
         disabled={isStreaming}
         onSend={onSend}
@@ -217,6 +171,10 @@ export function ChatTab({
         modelLoading={vlmLoading}
         modelError={vlmError}
         modelLocked={selectorDisabled}
+        showModelSelector={!minimalUi}
+        showMcpTools={!minimalUi}
+        showFastMode={!minimalUi}
+        runtimeHint={!minimalUi ? runtimeClaimHint : null}
       />
     </div>
   )

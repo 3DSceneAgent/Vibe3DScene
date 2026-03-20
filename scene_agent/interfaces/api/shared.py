@@ -119,6 +119,13 @@ def _normalize_optional(value: str | None, *, lower: bool = False) -> str | None
     return normalized.lower() if lower else normalized
 
 
+def normalize_thread_title(title: str, *, max_length: int = 120) -> str:
+    normalized = str(title).strip()
+    if len(normalized) > max_length:
+        return normalized[:max_length]
+    return normalized
+
+
 def _normalize_frontend_client_id(raw: str | None) -> str:
     if raw is None:
         return _DEFAULT_FRONTEND_CLIENT_ID
@@ -1485,6 +1492,15 @@ class ReleaseRuntimeResponse(BaseModel):
     thread_id: str
     released: bool
     cleaned: list[str] = Field(default_factory=list)
+
+
+class RenameThreadTitleRequest(BaseModel):
+    title: str
+
+
+class RenameThreadTitleResponse(BaseModel):
+    thread_id: str
+    title: str
 
 
 class VLMProviderOption(BaseModel):

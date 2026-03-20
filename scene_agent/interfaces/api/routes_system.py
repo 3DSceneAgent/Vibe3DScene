@@ -56,6 +56,7 @@ async def root():
             "session_capacity": "GET /headless/session-capacity",
             "session_debug": "GET /headless/session-debug",
             "release_runtime": "POST /threads/{thread_id}/release-runtime",
+            "rename_thread_title": "PATCH /threads/{thread_id}/title",
             "todos": "GET /todos/{thread_id}",
             "threads": "GET /threads",
             "delete_thread": "DELETE /threads/{thread_id}"

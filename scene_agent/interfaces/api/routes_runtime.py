@@ -12,6 +12,8 @@ from .models import (
     HeadlessSessionDebugEntry,
     HeadlessSessionDebugResponse,
     ReleaseRuntimeResponse,
+    RenameThreadTitleRequest,
+    RenameThreadTitleResponse,
 )
 from .shared import (
     claim_or_proxy_request,
@@ -19,6 +21,7 @@ from .shared import (
     collect_headless_runtime_entries,
     ensure_frontend_client_can_manage_thread,
     log_event,
+    normalize_thread_title,
     release_thread_runtime as release_thread_runtime_impl,
     resolve_frontend_client_id,
     set_owner_headers,
@@ -102,6 +105,32 @@ async def delete_thread(thread_id: str, request: Request):
             "thread_delete_failed",
             {"thread_id": thread_id, "error": str(exc)},
         )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+@router.patch("/threads/{thread_id}/title", response_model=RenameThreadTitleResponse)
+async def rename_thread_title(
+    thread_id: str,
+    payload: RenameThreadTitleRequest,
+    request: Request,
+    response: Response,
+):
+    resolution, proxied = await claim_or_proxy_request(request=request, thread_id=thread_id)
+    if proxied is not None:
+        return proxied
+
+    title = normalize_thread_title(payload.title)
+    if not title:
+        raise HTTPException(status_code=422, detail="Thread title must not be empty.")
+
+    try:
+        request_client_id = resolve_frontend_client_id(request)
+        ensure_frontend_client_can_manage_thread(thread_id, request_client_id)
+        get_session_coordinator().update_session_runtime_fields(thread_id, {"title": title})
+        set_owner_headers(response, resolution)
+        return RenameThreadTitleResponse(thread_id=thread_id, title=title)
+    except HTTPException:
+        raise
+    except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 @router.post("/threads/{thread_id}/release-runtime", response_model=ReleaseRuntimeResponse)

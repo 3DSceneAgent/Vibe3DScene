@@ -5,6 +5,12 @@ export type TodoItem = {
   description: string
 }
 
+export type AssistantToolCall = {
+  id?: string
+  name?: string
+  key: string
+}
+
 export function parseTodos(raw: string): TodoItem[] {
   if (!raw) return []
   const todos: TodoItem[] = []
@@ -316,6 +322,131 @@ export function isToolMessage(message: unknown): boolean {
     if (maybe.type === 'tool' || maybe.role === 'tool') return true
   }
   return false
+}
+
+function extractToolCallName(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const maybe = value as {
+    name?: unknown
+    tool_name?: unknown
+    function?: { name?: unknown }
+    value?: unknown
+  }
+  const candidates = [
+    maybe.name,
+    maybe.tool_name,
+    maybe.function && typeof maybe.function === 'object' ? maybe.function.name : undefined
+  ]
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim()
+    }
+  }
+  if (maybe.value !== undefined) {
+    return extractToolCallName(maybe.value)
+  }
+  return undefined
+}
+
+function extractToolCallId(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const maybe = value as {
+    id?: unknown
+    tool_call_id?: unknown
+    call_id?: unknown
+    value?: unknown
+  }
+  const candidates = [maybe.id, maybe.tool_call_id, maybe.call_id]
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim()
+    }
+  }
+  if (maybe.value !== undefined) {
+    return extractToolCallId(maybe.value)
+  }
+  return undefined
+}
+
+function collectToolCallCandidates(value: unknown, results: unknown[] = []): unknown[] {
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectToolCallCandidates(item, results))
+    return results
+  }
+  if (!value || typeof value !== 'object') return results
+
+  const maybe = value as {
+    type?: unknown
+    value?: unknown
+    content?: unknown
+    content_blocks?: unknown
+  }
+  const type = typeof maybe.type === 'string' ? maybe.type.toLowerCase() : ''
+  if (TOOL_LIKE_CONTENT_TYPES.has(type)) {
+    results.push(value)
+    return results
+  }
+
+  if (maybe.value !== undefined) {
+    collectToolCallCandidates(maybe.value, results)
+  }
+  if (maybe.content !== undefined) {
+    collectToolCallCandidates(maybe.content, results)
+  }
+  if (maybe.content_blocks !== undefined) {
+    collectToolCallCandidates(maybe.content_blocks, results)
+  }
+  return results
+}
+
+export function extractAssistantToolCalls(message: unknown): AssistantToolCall[] {
+  if (!message || typeof message !== 'object') return []
+
+  const maybe = message as {
+    id?: unknown
+    tool_calls?: unknown
+    tool_call_chunks?: unknown
+    additional_kwargs?: { tool_calls?: unknown }
+    content?: unknown
+    content_blocks?: unknown
+  }
+
+  const messageId = typeof maybe.id === 'string' && maybe.id.trim() ? maybe.id.trim() : 'assistant'
+  const results: AssistantToolCall[] = []
+  const seenKeys = new Set<string>()
+  const fallbackCounters = new Map<string, number>()
+
+  const addCall = (value: unknown, source: string) => {
+    if (!value || typeof value !== 'object') return
+    const name = extractToolCallName(value)
+    const id = extractToolCallId(value)
+    let key: string
+    if (id) {
+      key = id
+    } else {
+      const base = `${messageId}:${source}:${name ?? 'tool'}`
+      const count = fallbackCounters.get(base) ?? 0
+      fallbackCounters.set(base, count + 1)
+      key = `${base}:${count}`
+    }
+    if (seenKeys.has(key)) return
+    seenKeys.add(key)
+    results.push({ id, name, key })
+  }
+
+  const addCalls = (value: unknown, source: string) => {
+    if (!Array.isArray(value)) return
+    value.forEach((item) => addCall(item, source))
+  }
+
+  addCalls(maybe.tool_calls, 'tool_calls')
+  addCalls(maybe.tool_call_chunks, 'tool_call_chunks')
+  if (maybe.additional_kwargs && typeof maybe.additional_kwargs === 'object') {
+    addCalls(maybe.additional_kwargs.tool_calls, 'additional_kwargs.tool_calls')
+  }
+  collectToolCallCandidates(maybe.content).forEach((item) => addCall(item, 'content'))
+  collectToolCallCandidates(maybe.content_blocks).forEach((item) => addCall(item, 'content_blocks'))
+  return results
 }
 
 function collectMediaReferences(value: unknown, results: ToolMedia[] = []): ToolMedia[] {

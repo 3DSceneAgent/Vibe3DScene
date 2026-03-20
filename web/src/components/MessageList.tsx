@@ -1,6 +1,5 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { Message } from '../state/types'
-import { LoadingSpinner } from './LoadingSpinner'
 import { ToolResultBlock } from './ToolResultBlock'
 import { MarkdownMessage } from './MarkdownMessage'
 import { parseTodos } from '../utils/message'
@@ -8,6 +7,7 @@ import { parseTodos } from '../utils/message'
 type MessageListProps = {
   messages: Message[]
   backendUrl: string
+  streamStatus: 'streaming' | 'complete'
 }
 
 const STICKY_BOTTOM_THRESHOLD_PX = 48
@@ -17,7 +17,50 @@ function isNearBottom(container: HTMLDivElement): boolean {
   return distanceToBottom <= STICKY_BOTTOM_THRESHOLD_PX
 }
 
-export function MessageList({ messages, backendUrl }: MessageListProps) {
+type ConversationTurn = {
+  key: string
+  userMessage: Message | null
+  agentMessages: Message[]
+}
+
+function groupMessagesIntoConversationTurns(messages: Message[]): ConversationTurn[] {
+  const turns: ConversationTurn[] = []
+  let currentTurn: ConversationTurn | null = null
+
+  const flushCurrentTurn = () => {
+    if (!currentTurn) return
+    turns.push(currentTurn)
+    currentTurn = null
+  }
+
+  for (const message of messages) {
+    if (message.role === 'user') {
+      flushCurrentTurn()
+      currentTurn = {
+        key: message.id,
+        userMessage: message,
+        agentMessages: []
+      }
+      continue
+    }
+
+    if (!currentTurn) {
+      currentTurn = {
+        key: message.id,
+        userMessage: null,
+        agentMessages: [message]
+      }
+      continue
+    }
+
+    currentTurn.agentMessages.push(message)
+  }
+
+  flushCurrentTurn()
+  return turns
+}
+
+export function MessageList({ messages, backendUrl, streamStatus }: MessageListProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const shouldStickToBottomRef = useRef(true)
   const scrollRafRef = useRef<number | null>(null)
@@ -43,6 +86,8 @@ export function MessageList({ messages, backendUrl }: MessageListProps) {
     })
   }, [messages])
 
+  const turns = useMemo(() => groupMessagesIntoConversationTurns(messages), [messages])
+
   return (
     <div
       className="message-list"
@@ -53,44 +98,112 @@ export function MessageList({ messages, backendUrl }: MessageListProps) {
         shouldStickToBottomRef.current = isNearBottom(container)
       }}
     >
-      {messages.length === 0 && <div className="muted">Let's build something!</div>}
-      {messages.map((message) => (
-        <MessageItem key={message.id} message={message} backendUrl={backendUrl} />
+      {messages.length === 0 && <div className="muted">Let&apos;s build something!</div>}
+      {turns.map((turn, index) => (
+        <ConversationTurnItem
+          key={turn.key}
+          turn={turn}
+          backendUrl={backendUrl}
+          isActiveTurn={streamStatus === 'streaming' && index === turns.length - 1}
+        />
       ))}
     </div>
   )
 }
 
-const MessageItem = memo(
-  function MessageItem({ message, backendUrl }: { message: Message; backendUrl: string }) {
-    const todos = useMemo(() => (message.raw ? parseTodos(message.raw) : []), [message.raw])
-    if (message.role === 'tool') {
-      return (
-        <div className="message-row tool">
-          <div className="message-bubble tool">
-            <ToolResultBlock message={message} backendUrl={backendUrl} />
-          </div>
-        </div>
-      )
-    }
-    const showSpinner = message.role === 'assistant' && message.status === 'streaming'
-    const showThinkingSpinner = message.role === 'assistant' && message.thinkingActive === true
-    const isAssistantError = message.role === 'assistant' && message.status === 'error'
+const ConversationTurnItem = memo(
+  function ConversationTurnItem({
+    turn,
+    backendUrl,
+    isActiveTurn
+  }: {
+    turn: ConversationTurn
+    backendUrl: string
+    isActiveTurn: boolean
+  }) {
     return (
-      <div className={`message-row ${message.role} ${isAssistantError ? 'error' : ''}`}>
-        <div className={`message-bubble ${message.role} ${isAssistantError ? 'error' : ''}`}>
-          {message.thinking && (
-            <ThinkingBlock
-              thinking={message.thinking}
-              isThinking={showThinkingSpinner}
-            />
-          )}
-          {todos.length > 0 && <TodosBlock todos={todos} />}
+      <div className="conversation-turn">
+        {turn.userMessage && <UserMessageItem message={turn.userMessage} backendUrl={backendUrl} />}
+        {(turn.agentMessages.length > 0 || isActiveTurn) && (
+          <AssistantTurn messages={turn.agentMessages} backendUrl={backendUrl} isActiveTurn={isActiveTurn} />
+        )}
+      </div>
+    )
+  },
+  (prev, next) =>
+    prev.turn === next.turn &&
+    prev.backendUrl === next.backendUrl &&
+    prev.isActiveTurn === next.isActiveTurn
+)
+
+const UserMessageItem = memo(
+  function UserMessageItem({ message, backendUrl }: { message: Message; backendUrl: string }) {
+    return (
+      <div className="message-row user">
+        <div className="message-bubble user">
           <div className="message-content">
             <MarkdownMessage content={message.content || ' '} backendUrl={backendUrl} />
-            {showSpinner && <LoadingSpinner />}
           </div>
         </div>
+      </div>
+    )
+  },
+  (prev, next) => prev.message === next.message && prev.backendUrl === next.backendUrl
+)
+
+const AssistantTurn = memo(
+  function AssistantTurn({
+    messages,
+    backendUrl,
+    isActiveTurn
+  }: {
+    messages: Message[]
+    backendUrl: string
+    isActiveTurn: boolean
+  }) {
+    const hasPendingTool = messages.some(
+      (message) => message.role === 'tool' && message.status === 'streaming'
+    )
+    const showThinkingFooter = isActiveTurn && !hasPendingTool
+
+    return (
+      <div className="assistant-turn">
+        {messages.map((message) => (
+          <AssistantTurnItem key={message.id} message={message} backendUrl={backendUrl} />
+        ))}
+        {showThinkingFooter && <TurnThinkingFooter />}
+      </div>
+    )
+  },
+  (prev, next) =>
+    prev.messages === next.messages &&
+    prev.backendUrl === next.backendUrl &&
+    prev.isActiveTurn === next.isActiveTurn
+)
+
+const AssistantTurnItem = memo(
+  function AssistantTurnItem({ message, backendUrl }: { message: Message; backendUrl: string }) {
+    const todos = useMemo(() => (message.raw ? parseTodos(message.raw) : []), [message.raw])
+
+    if (message.role === 'tool') {
+      return <ToolResultBlock message={message} backendUrl={backendUrl} />
+    }
+
+    const showThinkingDetails = message.thinkingActive === true
+    const isError = message.status === 'error'
+    const hasContent = message.content && message.content.trim().length > 0
+
+    return (
+      <div className={`assistant-turn-segment ${isError ? 'is-error' : ''}`}>
+        {message.thinking && (
+          <ThinkingBlock thinking={message.thinking} isThinking={showThinkingDetails} />
+        )}
+        {todos.length > 0 && <TodosBlock todos={todos} />}
+        {hasContent && (
+          <div className="message-content">
+            <MarkdownMessage content={message.content} backendUrl={backendUrl} />
+          </div>
+        )}
       </div>
     )
   },
@@ -110,6 +223,14 @@ function ThinkingBlock({ thinking, isThinking = false }: { thinking: string; isT
         {open ? 'Hide' : 'Show'} thinking
       </button>
       {open && <pre className="thinking-text">{thinking}</pre>}
+    </div>
+  )
+}
+
+function TurnThinkingFooter() {
+  return (
+    <div className="turn-thinking-footer" role="status" aria-live="polite">
+      <span className="turn-thinking-label sweep-active">Thinking</span>
     </div>
   )
 }
