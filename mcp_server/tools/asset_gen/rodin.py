@@ -113,9 +113,12 @@ def generate_hyper3d_model_via_images(
     ctx: Context,
     input_image_paths: Optional[list[str]] = None,
     input_image_urls: Optional[list[str]] = None,
+    input_image_name: Optional[str] = None,
+    input_image_id: Optional[str] = None,
     bbox_condition: Optional[list[float]] = None,
 ) -> str:
     """Create a Hyper3D Rodin generation task using image inputs."""
+    del input_image_name, input_image_id
     api_key, error_message = _get_rodin_api_key_or_error()
     if error_message:
         return error_message

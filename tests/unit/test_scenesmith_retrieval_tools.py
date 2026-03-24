@@ -93,6 +93,45 @@ def test_apply_ambientcg_material_downloads_and_executes(monkeypatch, tmp_path: 
     assert {name for name, _ in downloaded} == {"color.jpg", "normal.jpg", "roughness.jpg"}
 
 
+def test_search_ambientcg_materials_uses_scenesmith_endpoint_independent_of_backend(
+    monkeypatch,
+):
+    def fake_post(url, json, timeout):
+        assert url == "http://10.0.0.9:8125/ambientcg/v1/search"
+        assert json == {"query": "oak wood", "top_k": 2}
+        assert timeout == 60
+        return DummyResponse(
+            {
+                "query": "oak wood",
+                "candidates": [
+                    {
+                        "material_id": "WoodFloor001",
+                        "category": "wood",
+                        "tags": ["wood", "floor"],
+                        "similarity_score": 0.88,
+                        "package_download_url": "http://localhost/pkg.zip",
+                        "textures": {
+                            "color_url": "http://localhost/color.jpg",
+                            "normal_url": "http://localhost/normal.jpg",
+                            "roughness_url": "http://localhost/roughness.jpg",
+                        },
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setenv("ASSET_RETRIEVAL_BACKEND", "objaverse")
+    monkeypatch.setenv("SCENESMITH_COMPAT_HOST", "10.0.0.9")
+    monkeypatch.setenv("SCENESMITH_COMPAT_PORT", "8125")
+    monkeypatch.setattr(tools.requests, "post", fake_post)
+
+    result = tools.search_ambientcg_materials(None, query="oak wood", top_k=2)
+
+    assert "Found 1 AmbientCG materials" in result
+    assert "Material ID: WoodFloor001" in result
+    assert "apply_ambientcg_material(object_name=..., color_url=..., normal_url=..., roughness_url=..., material_name=...)" in result
+
+
 def test_ambientcg_cache_root_varies_by_texture_urls(tmp_path: Path):
     first = tools._ambientcg_cache_root(
         object_name="Cube",

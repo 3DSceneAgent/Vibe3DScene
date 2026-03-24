@@ -1,5 +1,9 @@
 import type { Settings, Thread } from './types'
 import {
+  DEFAULT_ENVIRONMENT_PRESET,
+  type EnvironmentPreset
+} from '../constants/environmentPresets'
+import {
   isIndexedDBSupported,
   loadThreadsFromIndexedDB,
   saveThreadsToIndexedDB,
@@ -9,8 +13,10 @@ import {
 
 const THREADS_KEY = 'sceneAgentThreads'
 const SETTINGS_KEY = 'sceneAgentSettings'
+const PROMPT_HISTORY_KEY = 'sceneAgentPromptHistory'
 const MAX_MESSAGES_PER_THREAD = 100
 const MAX_STORED_MESSAGE_CHARS = 24000
+const MAX_PROMPT_HISTORY = 30
 const FALLBACK_BACKEND_URL = 'http://localhost:8000'
 
 function normalizeBackendUrl(value: string | null | undefined): string {
@@ -33,11 +39,21 @@ export const defaultSettings: Settings = {
   autoRefreshScene: true,
   autoFetchIntervalSeconds: 10,
   viewportTheme: 'auto',
+  viewportEnvironment: DEFAULT_ENVIRONMENT_PRESET,
+  showHdriBackground: false,
   uiMode: 'default'
 }
 
 const legacyDarkThemes = new Set(['midnight', 'slate', 'warm'])
 const viewportThemes = new Set<Settings['viewportTheme']>(['auto', 'dark', 'light'])
+const viewportEnvironments = new Set<EnvironmentPreset>([
+  'none',
+  'studio',
+  'sunset',
+  'daylight',
+  'overcast',
+  'workshop'
+])
 const uiModes = new Set<Settings['uiMode']>(['default', 'minimal'])
 const useIndexedDB = isIndexedDBSupported()
 
@@ -66,6 +82,13 @@ function sanitizeThreads(threads: Thread[]): Thread[] {
       delete nextMessage.raw
       delete nextMessage.toolPayload
       delete nextMessage.toolMedia
+      if (nextMessage.attachedImages) {
+        nextMessage.attachedImages = nextMessage.attachedImages.map((image) => {
+          const sanitizedImage = { ...image }
+          delete sanitizedImage.previewUrl
+          return sanitizedImage
+        })
+      }
       return {
         ...nextMessage,
         content: sanitizeMessageContent(nextMessage.content)
@@ -129,6 +152,51 @@ function saveThreadsToLocalStorage(threads: Thread[]): boolean {
       }
     }
     console.error('Failed to save threads to localStorage:', error)
+    return false
+  }
+}
+
+function normalizePromptHistory(prompts: unknown): string[] {
+  if (!Array.isArray(prompts)) return []
+  const seen = new Set<string>()
+  const normalized: string[] = []
+  for (const prompt of prompts) {
+    if (typeof prompt !== 'string') continue
+    const trimmed = prompt.trim()
+    if (!trimmed || seen.has(trimmed)) continue
+    seen.add(trimmed)
+    normalized.push(trimmed)
+    if (normalized.length >= MAX_PROMPT_HISTORY) {
+      break
+    }
+  }
+  return normalized
+}
+
+export function recordPromptHistory(history: string[], prompt: string): string[] {
+  const trimmed = prompt.trim()
+  if (!trimmed) {
+    return normalizePromptHistory(history)
+  }
+  return normalizePromptHistory([trimmed, ...history])
+}
+
+export function loadPromptHistory(): string[] {
+  try {
+    const raw = localStorage.getItem(PROMPT_HISTORY_KEY)
+    if (!raw) return []
+    return normalizePromptHistory(JSON.parse(raw))
+  } catch {
+    return []
+  }
+}
+
+export function savePromptHistory(prompts: string[]): boolean {
+  try {
+    localStorage.setItem(PROMPT_HISTORY_KEY, JSON.stringify(normalizePromptHistory(prompts)))
+    return true
+  } catch (error) {
+    console.error('Failed to save prompt history to localStorage:', error)
     return false
   }
 }
@@ -207,6 +275,12 @@ function normalizeSettings(settings: Partial<Settings> | null | undefined): Sett
     typeof rawViewportTheme === 'string' && viewportThemes.has(rawViewportTheme as Settings['viewportTheme'])
       ? (rawViewportTheme as Settings['viewportTheme'])
       : defaultSettings.viewportTheme
+  const rawViewportEnvironment = settings?.viewportEnvironment
+  const nextViewportEnvironment =
+    typeof rawViewportEnvironment === 'string' &&
+    viewportEnvironments.has(rawViewportEnvironment as EnvironmentPreset)
+      ? (rawViewportEnvironment as EnvironmentPreset)
+      : defaultSettings.viewportEnvironment
   const rawUiMode = settings?.uiMode
   const nextUiMode =
     typeof rawUiMode === 'string' && uiModes.has(rawUiMode as Settings['uiMode'])
@@ -225,6 +299,8 @@ function normalizeSettings(settings: Partial<Settings> | null | undefined): Sett
     autoRefreshScene: settings?.autoRefreshScene ?? defaultSettings.autoRefreshScene,
     autoFetchIntervalSeconds: nextAutoFetchIntervalSeconds,
     viewportTheme: nextViewportTheme,
+    viewportEnvironment: nextViewportEnvironment,
+    showHdriBackground: settings?.showHdriBackground ?? defaultSettings.showHdriBackground,
     uiMode: nextUiMode
   }
 }

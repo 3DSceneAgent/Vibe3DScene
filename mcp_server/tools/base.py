@@ -201,7 +201,11 @@ def execute_blender_code(
 
 
 def import_glb_model(ctx: Context, model_url: str, object_name: str = None) -> str:
-    """Import a GLB model from URL into Blender."""
+    """Import a remote model URL into Blender.
+
+    Legacy tool name retained for compatibility. The Blender-side importer also
+    supports Hunyuan3D OBJ ZIP bundles in addition to direct GLB/GLTF/FBX/OBJ files.
+    """
     def _extract_object_names(raw: Any) -> list[str]:
         if not isinstance(raw, (list, tuple, set)):
             return []
@@ -283,6 +287,9 @@ def import_glb_model(ctx: Context, model_url: str, object_name: str = None) -> s
             imported_objects = result.get("imported_objects", [])
             message = f"Successfully imported model from '{model_url}'\n"
             message += f"Imported {len(imported_objects)} object(s): {', '.join(imported_objects)}\n"
+            packed_images = result.get("packed_images", [])
+            if isinstance(packed_images, list) and packed_images:
+                message += f"Packed {len(packed_images)} texture image(s) into the Blender scene.\n"
             if result.get("bounding_box"):
                 bbox_line = _format_bounding_box(result["bounding_box"])
                 if bbox_line:
@@ -290,8 +297,8 @@ def import_glb_model(ctx: Context, model_url: str, object_name: str = None) -> s
             return message
         return f"Failed to import model: {result.get('message', 'Unknown error')}"
     except Exception as exc:
-        logger.error("Error importing GLB model: %s", str(exc))
-        return f"Error importing GLB model: {str(exc)}"
+        logger.error("Error importing model via import_glb_model: %s", str(exc))
+        return f"Error importing model: {str(exc)}"
 
 
 def import_blend_contents(

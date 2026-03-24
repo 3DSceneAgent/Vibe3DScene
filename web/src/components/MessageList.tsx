@@ -138,9 +138,24 @@ const ConversationTurnItem = memo(
 
 const UserMessageItem = memo(
   function UserMessageItem({ message, backendUrl }: { message: Message; backendUrl: string }) {
+    const attachedImages = message.attachedImages ?? []
+
     return (
       <div className="message-row user">
         <div className="message-bubble user">
+          {attachedImages.length > 0 && (
+            <div className="message-attachments" aria-label="Attached images">
+              {attachedImages.map((image) => (
+                <div className="message-attachment" key={image.id}>
+                  {image.previewUrl ? (
+                    <img src={image.previewUrl} alt={image.filename} />
+                  ) : (
+                    <div className="message-attachment-placeholder">{image.filename}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
           <div className="message-content">
             <MarkdownMessage content={message.content || ' '} backendUrl={backendUrl} />
           </div>

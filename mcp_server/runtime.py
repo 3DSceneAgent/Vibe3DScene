@@ -130,10 +130,7 @@ def is_scenesmith_hssd_tool_enabled() -> bool:
 
 
 def is_scenesmith_ambientcg_tool_enabled() -> bool:
-    return (
-        is_scenesmith_retrieval_provider()
-        and parse_env_bool("ENABLE_AMBIENTCG", False)
-    )
+    return parse_env_bool("ENABLE_AMBIENTCG", False)
 
 
 def is_infinigen_tool_enabled() -> bool:

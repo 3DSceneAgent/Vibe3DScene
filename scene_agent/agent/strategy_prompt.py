@@ -260,6 +260,7 @@ def build_asset_creation_strategy_text(
                 " -> poll_rodin_job_status(subscription_key=...)"
                 " -> import_generated_asset(...)",
                 "     - Best for single-item custom generation, especially from reference images",
+                "     - For remembered thread images, use input_image_name=... or input_image_id=... instead of filesystem paths",
             ]
         )
 
@@ -269,6 +270,12 @@ def build_asset_creation_strategy_text(
                 "   - Hunyuan3D",
                 "     - Flow: generate_hunyuan3d_model(text_prompt=... or input_image_url=...)",
                 "     - Built-in polling, best for single custom object generation",
+                "     - When exactly one image is attached to the current request, the runtime can auto-resolve it for image-to-3D",
+                "     - For remembered thread images, use input_image_name=... or input_image_id=...",
+                "     - Hunyuan often returns the model as Type=OBJ with a .zip bundle plus preview GIFs",
+                "     - Import flow after generation: prefer preferred_model_asset.url when present, "
+                "otherwise select the Type=OBJ ResultFile3Ds URL, then call "
+                "import_glb_model(model_url=..., object_name=...)",
             ]
         )
 
@@ -319,6 +326,10 @@ def build_asset_creation_strategy_text(
                 " -> import_blend_contents(blend_file_path=\"...\")",
                 "     - Use only when the user provides a reference image and wants a fast whole-scene"
                 " layout bootstrap from that image",
+                "     - When exactly one image is attached to the current request, the runtime can auto-resolve"
+                " it for reconstruction",
+                "     - For remembered thread images, use input_image_name=... or input_image_id=..."
+                " instead of filesystem paths",
                 "     - Do NOT use this tool for text-only requests or single-object generation",
                 "     - The generated .blend is an external scene asset pack; import it first, then refine,"
                 " replace, delete, retarget materials, and verify with existing tools",
@@ -452,6 +463,10 @@ def build_asset_creation_strategy_text(
     else:
         lines.append(
             "   - Environment lighting and PBR textures: configure them explicitly via scripting or imported assets."
+        )
+    if objaverse_retrieval_ready and (rodin_ready or hunyuan_ready):
+        lines.append(
+            "   - If the user explicitly asks to compare retrieval vs image-conditioned generation from one reference image, do both branches, import both results, then place them side by side for inspection."
         )
     lines.append("   - Simple primitives (cube/sphere/plane): create directly via scripting.")
 

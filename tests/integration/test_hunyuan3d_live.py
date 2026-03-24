@@ -16,7 +16,7 @@ from mcp_server.tools.asset_gen.hunyuan3d import generate_hunyuan3d_model
 from scene_agent.env import load_project_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-IMAGE_TO_3D_DEMO_PATH = PROJECT_ROOT / "assets" / "image_to_3d_demo.jpg"
+IMAGE_TO_3D_DEMO_PATH = PROJECT_ROOT / "assets" / "example_images" /  "typical_humanoid_mech.png"
 OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "hunyuan3d_live"
 SUCCESS_STATUSES = {"DONE", "SUCCEEDED", "SUCCESS", "FINISHED", "COMPLETED"}
 

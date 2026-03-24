@@ -60,6 +60,56 @@ def test_sam_reconstruct_health_check_applies_host_override(monkeypatch):
     assert captured["timeout"] == 2.0
 
 
+def test_sam_reconstruct_health_check_accepts_cache_mode(monkeypatch):
+    checker = ServiceHealthChecker(timeout=1.0)
+    monkeypatch.setenv("SAM_HOST", "127.0.0.1")
+    monkeypatch.setenv("SAM_PORT", "8123")
+
+    def fake_get(url, timeout):
+        return DummyResponse(
+            200,
+            {
+                "status": "ok",
+                "runtime_mode": "cache",
+                "internal_services_expected": False,
+                "sam_service": False,
+                "sam3d_service": False,
+            },
+        )
+
+    monkeypatch.setattr(checker._session, "get", fake_get)
+
+    result = checker.check_service("sam_reconstruct")
+
+    assert result.ok is True
+    assert result.missing_fields == []
+
+
+def test_sam_reconstruct_health_check_rejects_unready_non_cache_mode(monkeypatch):
+    checker = ServiceHealthChecker(timeout=1.0)
+    monkeypatch.setenv("SAM_HOST", "127.0.0.1")
+    monkeypatch.setenv("SAM_PORT", "8123")
+
+    def fake_get(url, timeout):
+        return DummyResponse(
+            200,
+            {
+                "status": "ok",
+                "runtime_mode": "serve",
+                "internal_services_expected": True,
+                "sam_service": False,
+                "sam3d_service": False,
+            },
+        )
+
+    monkeypatch.setattr(checker._session, "get", fake_get)
+
+    result = checker.check_service("sam_reconstruct")
+
+    assert result.ok is False
+    assert result.missing_fields == ["sam_service=True", "sam3d_service=True"]
+
+
 def test_objaverse_health_check_uses_objaverse_host_and_port(monkeypatch):
     checker = ServiceHealthChecker(timeout=1.25)
     monkeypatch.setenv("ASSET_RETRIEVAL_BACKEND", "objaverse")
@@ -108,7 +158,7 @@ def test_scenesmith_hssd_health_check_uses_scenesmith_host_and_port(monkeypatch)
 
 def test_scenesmith_ambientcg_health_check_uses_host_override(monkeypatch):
     checker = ServiceHealthChecker(host_override="10.0.0.9", timeout=2.5)
-    monkeypatch.setenv("ASSET_RETRIEVAL_BACKEND", "scenesmith")
+    monkeypatch.setenv("ASSET_RETRIEVAL_BACKEND", "objaverse")
     monkeypatch.setenv("SCENESMITH_COMPAT_HOST", "127.0.0.1")
     monkeypatch.setenv("SCENESMITH_COMPAT_PORT", "8125")
 

@@ -7,9 +7,9 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls'
 // @ts-expect-error project does not include three example type declarations in this workspace.
 import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader'
+import { environmentPresets, type EnvironmentPreset } from '../constants/environmentPresets'
 import type { SceneHierarchyNode } from '../state/types'
 
-type EnvironmentPreset = 'studio' | 'warm' | 'cool'
 type ViewportTheme = 'auto' | 'dark' | 'light'
 type UiTheme = 'dark' | 'light'
 
@@ -18,6 +18,7 @@ type GltfViewerProps = {
   environment: EnvironmentPreset
   viewportTheme?: ViewportTheme
   uiTheme?: UiTheme
+  showHdriBackground?: boolean
   twoSidedRendering?: boolean
   onHierarchyChange?: (nodes: SceneHierarchyNode[]) => void
   isFullscreen?: boolean
@@ -26,41 +27,6 @@ type GltfViewerProps = {
   headerControls?: ReactNode
   headerTrailingControls?: ReactNode
   alwaysAutoFrameCamera?: boolean
-}
-
-type EnvironmentPresetConfig = {
-  ambient: number
-  directional: number
-  color: string
-  exposure: number
-  hdriUrl: string
-}
-
-const environmentPresets: Record<EnvironmentPreset, EnvironmentPresetConfig> = {
-  studio: {
-    ambient: 0.26,
-    directional: 0.95,
-    color: '#ffffff',
-    exposure: 1.0,
-    hdriUrl:
-      'https://cdn.jsdelivr.net/gh/mrdoob/three.js@dev/examples/textures/equirectangular/quarry_01_1k.hdr'
-  },
-  warm: {
-    ambient: 0.24,
-    directional: 0.9,
-    color: '#ffd9bc',
-    exposure: 0.95,
-    hdriUrl:
-      'https://cdn.jsdelivr.net/gh/mrdoob/three.js@dev/examples/textures/equirectangular/venice_sunset_1k.hdr'
-  },
-  cool: {
-    ambient: 0.25,
-    directional: 0.92,
-    color: '#cfe6ff',
-    exposure: 1.02,
-    hdriUrl:
-      'https://cdn.jsdelivr.net/gh/mrdoob/three.js@dev/examples/textures/equirectangular/blouberg_sunrise_2_1k.hdr'
-  }
 }
 
 const viewportPalettes: Record<
@@ -317,6 +283,7 @@ export function GltfViewer({
   environment,
   viewportTheme = 'auto',
   uiTheme = 'dark',
+  showHdriBackground = false,
   twoSidedRendering = false,
   onHierarchyChange,
   isFullscreen = false,
@@ -338,6 +305,7 @@ export function GltfViewer({
   )
   const pmremGeneratorRef = useRef<THREE.PMREMGenerator | null>(null)
   const environmentRenderTargetRef = useRef<THREE.WebGLRenderTarget | null>(null)
+  const environmentBackgroundTextureRef = useRef<THREE.DataTexture | null>(null)
   const environmentLoadTokenRef = useRef(0)
   const loadTokenRef = useRef(0)
   const hasLoadedModelRef = useRef(false)
@@ -478,6 +446,10 @@ export function GltfViewer({
         environmentRenderTargetRef.current.dispose()
         environmentRenderTargetRef.current = null
       }
+      if (environmentBackgroundTextureRef.current) {
+        environmentBackgroundTextureRef.current.dispose()
+        environmentBackgroundTextureRef.current = null
+      }
       pmremGenerator.dispose()
       pmremGeneratorRef.current = null
       disposeObject3D(modelRef.current)
@@ -540,9 +512,24 @@ export function GltfViewer({
     const pmremGenerator = pmremGeneratorRef.current
     if (!scene || !pmremGenerator) return
 
-    ;(scene as THREE.Scene & { environmentIntensity?: number }).environmentIntensity = useFallbackLighting
-      ? 1.0
-      : 0.35
+    if (!preset.hdriUrl) {
+      environmentLoadTokenRef.current += 1
+      if (environmentRenderTargetRef.current) {
+        environmentRenderTargetRef.current.dispose()
+        environmentRenderTargetRef.current = null
+      }
+      if (environmentBackgroundTextureRef.current) {
+        environmentBackgroundTextureRef.current.dispose()
+        environmentBackgroundTextureRef.current = null
+      }
+      scene.environment = null
+      ;(scene as THREE.Scene & { environmentIntensity?: number }).environmentIntensity = 0
+      scene.background = new THREE.Color(viewportPaletteRef.current.background)
+      return
+    }
+
+    ;(scene as THREE.Scene & { environmentIntensity?: number }).environmentIntensity =
+      useFallbackLighting ? 1.0 : 0.35
 
     const loadToken = environmentLoadTokenRef.current + 1
     environmentLoadTokenRef.current = loadToken
@@ -555,10 +542,11 @@ export function GltfViewer({
           texture.dispose()
           return
         }
+        texture.mapping = THREE.EquirectangularReflectionMapping
         const renderTarget = pmremGenerator.fromEquirectangular(texture)
-        texture.dispose()
 
         if (environmentLoadTokenRef.current !== loadToken) {
+          texture.dispose()
           renderTarget.dispose()
           return
         }
@@ -566,25 +554,46 @@ export function GltfViewer({
         if (environmentRenderTargetRef.current) {
           environmentRenderTargetRef.current.dispose()
         }
+        if (environmentBackgroundTextureRef.current) {
+          environmentBackgroundTextureRef.current.dispose()
+        }
         environmentRenderTargetRef.current = renderTarget
+        environmentBackgroundTextureRef.current = texture
         scene.environment = renderTarget.texture
         ;(scene as THREE.Scene & { environmentIntensity?: number }).environmentIntensity = useFallbackLighting
           ? 1.0
           : 0.35
+        scene.background = showHdriBackground
+          ? texture
+          : new THREE.Color(viewportPaletteRef.current.background)
       },
       undefined,
       (error: unknown) => {
         if (environmentLoadTokenRef.current !== loadToken) return
+        if (environmentRenderTargetRef.current) {
+          environmentRenderTargetRef.current.dispose()
+          environmentRenderTargetRef.current = null
+        }
+        if (environmentBackgroundTextureRef.current) {
+          environmentBackgroundTextureRef.current.dispose()
+          environmentBackgroundTextureRef.current = null
+        }
+        scene.environment = null
+        ;(scene as THREE.Scene & { environmentIntensity?: number }).environmentIntensity = 0
+        scene.background = new THREE.Color(viewportPaletteRef.current.background)
         console.warn('Failed to load HDR environment map', error)
       }
     )
-  }, [preset.hdriUrl, useFallbackLighting])
+  }, [preset.hdriUrl, showHdriBackground, useFallbackLighting])
 
   useEffect(() => {
     const scene = sceneRef.current
     if (!scene) return
 
-    scene.background = new THREE.Color(viewportPalette.background)
+    scene.background =
+      showHdriBackground && environmentBackgroundTextureRef.current
+        ? environmentBackgroundTextureRef.current
+        : new THREE.Color(viewportPalette.background)
 
     if (gridRef.current) {
       disposeObject3D(gridRef.current)
@@ -618,7 +627,7 @@ export function GltfViewer({
 
     scene.add(nextGrid)
     gridRef.current = nextGrid
-  }, [viewportPalette])
+  }, [showHdriBackground, viewportPalette])
 
   useEffect(() => {
     const scene = sceneRef.current

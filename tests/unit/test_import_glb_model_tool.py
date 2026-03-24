@@ -10,6 +10,7 @@ def test_import_glb_model_handles_structured_dict_response(monkeypatch):
             return {
                 "success": True,
                 "imported_objects": ["Table_A"],
+                "packed_images": ["table_basecolor.png"],
                 "bounding_box": {"min": [0, 0, 0], "max": [1, 1, 1]},
             }
 
@@ -32,6 +33,7 @@ def test_import_glb_model_handles_structured_dict_response(monkeypatch):
     ]
     assert "Successfully imported model" in result
     assert "Imported 1 object(s): Table_A" in result
+    assert "Packed 1 texture image(s) into the Blender scene." in result
     assert "Bounding box: min=[0, 0, 0], max=[1, 1, 1]" in result
 
 

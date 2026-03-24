@@ -95,6 +95,18 @@ async def get_blender_tools(session_id: str | None = None) -> List[Any]:
     Raises:
         Exception: If unable to connect to Blender MCP server
     """
+    stub_profile = os.getenv("SCENE_AGENT_TOOL_STUB_PROFILE", "").strip().lower()
+    if stub_profile:
+        if stub_profile == "image_routing_compare":
+            from scene_agent.tools.test_stub_tools import build_image_routing_compare_stub_tools
+
+            return build_image_routing_compare_stub_tools()
+        if stub_profile == "sam3d_reconstruct":
+            from scene_agent.tools.test_stub_tools import build_sam3d_reconstruct_stub_tools
+
+            return build_sam3d_reconstruct_stub_tools()
+        raise RuntimeError(f"Unsupported SCENE_AGENT_TOOL_STUB_PROFILE: {stub_profile}")
+
     settings = get_settings()
     mcp_url = settings.blender_mcp_url
     coordinator = get_session_coordinator()

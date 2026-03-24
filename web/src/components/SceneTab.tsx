@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
 import type { BlendFileEntry, RenderImage } from '../api/types'
+import {
+  environmentPresetOptions,
+  environmentPresets,
+  type EnvironmentPreset
+} from '../constants/environmentPresets'
 import type { SceneHierarchyNode } from '../state/types'
 import { GltfViewer } from './GltfViewer'
 import { RenderGallery } from './RenderGallery'
 import { SceneInfoPanel } from './SceneInfoPanel'
 
-type EnvironmentPreset = 'studio' | 'warm' | 'cool'
 type ViewportTheme = 'auto' | 'dark' | 'light'
 type UiTheme = 'dark' | 'light'
 
@@ -19,6 +23,7 @@ type SceneTabProps = {
   environment: EnvironmentPreset
   viewportTheme: ViewportTheme
   uiTheme: UiTheme
+  showHdriBackground: boolean
   onEnvironmentChange: (preset: EnvironmentPreset) => void
   onFetchRenders: (includeLocalWork?: boolean) => void
   onFetchGltf: () => void
@@ -231,6 +236,8 @@ export function SceneTab({
   environment,
   viewportTheme,
   uiTheme,
+  showHdriBackground,
+  onEnvironmentChange,
   onFetchRenders,
   onFetchGltf,
   onDownloadGltf,
@@ -368,6 +375,28 @@ export function SceneTab({
 
   const renderViewportControls = () => (
     <>
+      <div
+        className="viewer-environment-control"
+        title={environmentPresets[environment].description}
+      >
+        <label className="viewer-environment-label" htmlFor={`viewer-environment-${threadId}`}>
+          Light
+        </label>
+        <select
+          id={`viewer-environment-${threadId}`}
+          className="styled-select viewer-environment-select"
+          value={environment}
+          aria-label="Viewport environment"
+          onChange={(event) => onEnvironmentChange(event.target.value as EnvironmentPreset)}
+        >
+          {environmentPresetOptions.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <span className="viewer-header-sep" aria-hidden="true" />
       <div className="viewer-control-group">
         <button
           type="button"
@@ -423,6 +452,7 @@ export function SceneTab({
           environment={environment}
           viewportTheme={viewportTheme}
           uiTheme={uiTheme}
+          showHdriBackground={showHdriBackground}
           twoSidedRendering={twoSidedRendering}
           alwaysAutoFrameCamera={alwaysAutoFrameCamera}
           onHierarchyChange={handleHierarchyChange}

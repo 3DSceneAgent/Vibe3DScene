@@ -146,6 +146,17 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
             </button>
           </div>
         </div>
+        <label className="field checkbox-field">
+          Show HDRI Background
+          <label className="toggle-switch compact">
+            <input
+              type="checkbox"
+              checked={settings.showHdriBackground}
+              onChange={(event) => onChange({ ...settings, showHdriBackground: event.target.checked })}
+            />
+            <span className="toggle-slider" />
+          </label>
+        </label>
       </div>
     </div>
   )

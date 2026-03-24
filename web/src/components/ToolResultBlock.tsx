@@ -32,8 +32,9 @@ export function ToolResultBlock({ message, backendUrl }: ToolResultBlockProps) {
       <div className="tool-chip is-streaming">
         <div className="tool-chip-toggle tool-chip-toggle-static sweep-active">
           <span className="tool-chip-icon" aria-hidden="true">&#9881;</span>
-          <span className="tool-chip-name">{message.toolName || 'Running tool'}</span>
-          <span className="tool-chip-action">Running</span>
+          <span className="tool-chip-name">
+            {message.toolName ? `Executing ${message.toolName}` : 'Executing tool'}
+          </span>
         </div>
       </div>
     )

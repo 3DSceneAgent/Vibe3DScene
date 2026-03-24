@@ -73,14 +73,14 @@ def test_scenesmith_hssd_gate_enabled_for_scenesmith_backend(monkeypatch):
 
 
 def test_scenesmith_ambientcg_gate_disabled_by_default(monkeypatch):
-    monkeypatch.setenv("ASSET_RETRIEVAL_BACKEND", "scenesmith")
+    monkeypatch.delenv("ASSET_RETRIEVAL_BACKEND", raising=False)
     monkeypatch.delenv("ENABLE_AMBIENTCG", raising=False)
 
     assert runtime.is_scenesmith_ambientcg_tool_enabled() is False
 
 
-def test_scenesmith_ambientcg_gate_respects_explicit_toggle(monkeypatch):
-    monkeypatch.setenv("ASSET_RETRIEVAL_BACKEND", "scenesmith")
+def test_scenesmith_ambientcg_gate_is_independent_from_retrieval_backend(monkeypatch):
+    monkeypatch.setenv("ASSET_RETRIEVAL_BACKEND", "objaverse")
     monkeypatch.setenv("ENABLE_AMBIENTCG", "true")
 
     assert runtime.is_scenesmith_ambientcg_tool_enabled() is True

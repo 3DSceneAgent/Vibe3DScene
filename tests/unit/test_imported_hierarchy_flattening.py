@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import sys
 import types
+import zipfile
 from pathlib import Path
 
 
@@ -46,6 +48,7 @@ class FakeMeshData:
         self.edges = [None] * 12
         self.polygons = [None] * 6
         self.applied_scale: tuple[float, float, float] | None = None
+        self.materials: list[object] = []
 
     def copy(self) -> "FakeMeshData":
         duplicated = FakeMeshData(f"{self.name}_copy", users=1)
@@ -174,14 +177,47 @@ class FakeOpsObject:
             )
 
 
+class FakeStreamingResponse:
+    def __init__(self, body: bytes, headers: dict[str, str] | None = None) -> None:
+        self._body = body
+        self.headers = headers or {}
+        self.status_code = 200
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def iter_content(self, chunk_size: int = 8192):
+        for index in range(0, len(self._body), chunk_size):
+            yield self._body[index : index + chunk_size]
+
+
+class FakeImage:
+    def __init__(self, name: str, filepath: str, *, packed: bool = False) -> None:
+        self.name = name
+        self.filepath = filepath
+        self.filepath_raw = filepath
+        self.packed_file = object() if packed else None
+        self.pack_calls = 0
+        self.reload_calls = 0
+
+    def pack(self) -> None:
+        self.pack_calls += 1
+        self.packed_file = object()
+
+    def reload(self) -> None:
+        self.reload_calls += 1
+
+
 def _load_module(monkeypatch, module_name: str, relative_path: str):
     fake_bpy = types.ModuleType("bpy")
     fake_bpy.data = types.SimpleNamespace(
         objects=FakeObjectStore(),
+        images=[],
         materials=[],
     )
     fake_bpy.context = FakeContext(fake_bpy.data.objects)
     fake_bpy.ops = types.SimpleNamespace(object=FakeOpsObject(fake_bpy))
+    fake_bpy.path = types.SimpleNamespace(abspath=lambda value: value)
     monkeypatch.setitem(sys.modules, "bpy", fake_bpy)
     monkeypatch.setitem(sys.modules, "mathutils", types.ModuleType("mathutils"))
 
@@ -250,6 +286,78 @@ def test_flatten_imported_hierarchy_is_safe_for_flat_meshes(monkeypatch):
     assert summary["processed_meshes"] == ["FlatMesh"]
     assert summary["unparented_meshes"] == []
     assert summary["removed_empties"] == []
+
+
+def test_import_glb_model_uses_obj_importer_for_hunyuan_zip(monkeypatch):
+    module, fake_bpy = _load_module(
+        monkeypatch,
+        "asset_handlers_under_test_zip_import",
+        "addon/blender_mcpv_addon/asset_handlers.py",
+    )
+
+    import_calls: list[tuple[str, str]] = []
+
+    def _obj_import(*, filepath: str):
+        import_calls.append(("obj", filepath))
+        image_path = str(Path(filepath).with_name("material_0.png"))
+        fake_bpy.data.images.append(FakeImage("material_0.png", image_path))
+        fake_bpy.data.objects.add(
+            FakeObject(
+                "GeneratedMesh",
+                "MESH",
+                data=FakeMeshData("GeneratedMeshData"),
+            )
+        )
+        return {"FINISHED"}
+
+    def _unexpected_gltf_import(*, filepath: str):
+        raise AssertionError(f"GLTF importer should not be used for {filepath}")
+
+    def _unexpected_fbx_import(*, filepath: str):
+        raise AssertionError(f"FBX importer should not be used for {filepath}")
+
+    fake_bpy.ops.import_scene = types.SimpleNamespace(
+        gltf=_unexpected_gltf_import,
+        fbx=_unexpected_fbx_import,
+        obj=_obj_import,
+    )
+    fake_bpy.ops.wm = types.SimpleNamespace(
+        obj_import=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError(f"wm.obj_import fallback should not be used: {kwargs}")
+        )
+    )
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as archive:
+        archive.writestr("nested/model.obj", "mtllib model.mtl\nv 0 0 0\n")
+        archive.writestr("nested/model.mtl", "newmtl default\n")
+
+    monkeypatch.setattr(
+        module.requests,
+        "get",
+        lambda *args, **kwargs: FakeStreamingResponse(
+            zip_buffer.getvalue(),
+            headers={"Content-Disposition": 'attachment; filename="generated_reference_asset.zip"'},
+        ),
+    )
+
+    handler = module.AssetHandlerMixin()
+    handler._get_aabb = lambda _obj: [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]
+
+    result = handler.import_glb_model(
+        "https://example.test/hunyuan/generated_reference_asset.zip?sig=123",
+        object_name="GeneratedReferenceAsset",
+    )
+
+    assert result["success"] is True
+    assert result["archive_format"] == "zip"
+    assert result["source_format"] == "obj"
+    assert result["imported_objects"] == ["GeneratedReferenceAsset"]
+    assert result["packed_images"] == ["material_0.png"]
+    assert result["failed_packing_images"] == []
+    assert fake_bpy.data.images[0].pack_calls == 1
+    assert import_calls and import_calls[0][0] == "obj"
+    assert import_calls[0][1].endswith("model.obj")
 
 
 def test_scene_tools_report_parent_children_and_world_transforms(monkeypatch):

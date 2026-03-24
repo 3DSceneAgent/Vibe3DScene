@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import type { PendingImageAttachment } from '../state/types'
 
 type ModelOption = {
   value: string
@@ -7,10 +8,11 @@ type ModelOption = {
 
 type ChatComposerProps = {
   disabled?: boolean
-  onSend: (message: string, files: File[]) => Promise<boolean>
+  onSend: (message: string, images: PendingImageAttachment[]) => Promise<boolean>
   onStop?: () => void
   referenceImagesCount?: number
   examplePrompts?: string[]
+  promptHistory?: string[]
   mcpTools?: string[]
   mcpToolHints?: Record<string, string>
   mcpToolEnabled?: Record<string, boolean>
@@ -34,6 +36,7 @@ type ChatComposerProps = {
 
 const MAX_REFERENCE_IMAGES = 3
 const MAX_EXAMPLE_PROMPTS = 10
+const MAX_HISTORY_PROMPTS = 8
 
 export function ChatComposer({
   disabled,
@@ -41,6 +44,7 @@ export function ChatComposer({
   onStop,
   referenceImagesCount = 0,
   examplePrompts = [],
+  promptHistory = [],
   mcpTools = [],
   mcpToolHints = {},
   mcpToolEnabled = {},
@@ -65,31 +69,63 @@ export function ChatComposer({
   const [dragActive, setDragActive] = useState(false)
   const [isInputFocused, setIsInputFocused] = useState(false)
   const [isToolsOpen, setIsToolsOpen] = useState(false)
-  const [pendingImages, setPendingImages] = useState<Array<{ file: File; previewUrl: string }>>([])
+  const [pendingImages, setPendingImages] = useState<PendingImageAttachment[]>([])
   const blurTimeoutRef = useRef<number | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const toolsPanelRef = useRef<HTMLDivElement | null>(null)
+  const pendingImagesRef = useRef<PendingImageAttachment[]>([])
+
+  useEffect(() => {
+    pendingImagesRef.current = pendingImages
+  }, [pendingImages])
 
   useEffect(() => {
     return () => {
-      pendingImages.forEach((image) => URL.revokeObjectURL(image.previewUrl))
+      pendingImagesRef.current.forEach((image) => URL.revokeObjectURL(image.previewUrl))
       if (blurTimeoutRef.current !== null) {
         window.clearTimeout(blurTimeoutRef.current)
       }
     }
-  }, [pendingImages])
+  }, [])
+
+  useEffect(() => {
+    if (!isToolsOpen) return
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null
+      if (toolsPanelRef.current?.contains(target)) {
+        return
+      }
+      setIsToolsOpen(false)
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsToolsOpen(false)
+      }
+    }
+
+    window.addEventListener('pointerdown', handlePointerDown)
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown)
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [isToolsOpen])
 
   const handleSend = async () => {
     const text = input.trim()
     if (!text) return
-    const success = await onSend(text, pendingImages.map((image) => image.file))
+    const submittedImages = pendingImages
+    setInput('')
+    setPendingImages([])
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''
+    }
+    const success = await onSend(text, submittedImages)
     if (success) {
-      setInput('')
-      pendingImages.forEach((image) => URL.revokeObjectURL(image.previewUrl))
-      setPendingImages([])
-      if (fileInputRef.current) {
-        fileInputRef.current.value = ''
-      }
+      return
     }
   }
 
@@ -175,8 +211,15 @@ export function ChatComposer({
     }, 120)
   }
 
-  const promptOptions = examplePrompts.slice(0, MAX_EXAMPLE_PROMPTS)
-  const showPromptPopover = isInputFocused && input.trim().length === 0 && promptOptions.length > 0
+  const historyOptions = promptHistory.slice(0, MAX_HISTORY_PROMPTS)
+  const historyPromptSet = new Set(historyOptions)
+  const promptOptions = examplePrompts
+    .filter((prompt) => !historyPromptSet.has(prompt))
+    .slice(0, MAX_EXAMPLE_PROMPTS)
+  const showPromptPopover =
+    isInputFocused &&
+    input.trim().length === 0 &&
+    (historyOptions.length > 0 || promptOptions.length > 0)
   const modelSelectDisabled = modelLocked || modelLoading || modelOptions.length === 0
   const hasPendingImages = pendingImages.length > 0
   const canSend = input.trim().length > 0
@@ -211,20 +254,43 @@ export function ChatComposer({
         onDragLeave={handleDragLeave}
       >
         {showPromptPopover && (
-          <div className="composer-prompt-popover" role="listbox" aria-label="Example prompts">
-            {promptOptions.map((prompt, index) => (
-              <button
-                key={`${index}-${prompt}`}
-                type="button"
-                className="composer-prompt-option"
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => handleSelectPrompt(prompt)}
-                title={prompt}
-                disabled={disabled}
-              >
-                {prompt}
-              </button>
-            ))}
+          <div className="composer-prompt-popover" role="listbox" aria-label="Prompt suggestions">
+            {historyOptions.length > 0 && (
+              <div className="composer-prompt-section">
+                <div className="composer-prompt-section-label">Recent prompts</div>
+                {historyOptions.map((prompt, index) => (
+                  <button
+                    key={`history-${index}-${prompt}`}
+                    type="button"
+                    className="composer-prompt-option"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => handleSelectPrompt(prompt)}
+                    title={prompt}
+                    disabled={disabled}
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            )}
+            {promptOptions.length > 0 && (
+              <div className="composer-prompt-section">
+                <div className="composer-prompt-section-label">Examples</div>
+                {promptOptions.map((prompt, index) => (
+                  <button
+                    key={`example-${index}-${prompt}`}
+                    type="button"
+                    className="composer-prompt-option"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => handleSelectPrompt(prompt)}
+                    title={prompt}
+                    disabled={disabled}
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
         {hasPendingImages && (
@@ -311,6 +377,7 @@ export function ChatComposer({
             )}
             {showMcpTools && (
               <div
+                ref={toolsPanelRef}
                 className={`composer-tools-panel ${isToolsOpen ? 'open' : ''}`}
                 onBlur={(event) => {
                   if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {

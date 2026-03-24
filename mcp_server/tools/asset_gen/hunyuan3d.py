@@ -5,6 +5,7 @@ import logging
 import os
 import time
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from mcp.server.fastmcp import Context
 
@@ -12,15 +13,127 @@ from mcp_server import runtime
 
 logger = logging.getLogger("BlenderMCPServer")
 
+_MODEL_TYPE_PRIORITY: dict[str, int] = {
+    "OBJ": 0,
+    "GLB": 1,
+    "GLTF": 2,
+    "FBX": 3,
+    "BLEND": 4,
+    "STL": 5,
+}
+_PREVIEW_ASSET_TYPES: set[str] = {"GIF", "PNG", "JPG", "JPEG", "WEBP"}
+_TYPE_BY_URL_EXTENSION: dict[str, str] = {
+    "obj": "OBJ",
+    "glb": "GLB",
+    "gltf": "GLTF",
+    "fbx": "FBX",
+    "blend": "BLEND",
+    "stl": "STL",
+    "gif": "GIF",
+    "png": "PNG",
+    "jpg": "JPG",
+    "jpeg": "JPEG",
+    "webp": "WEBP",
+}
+
+
+def _infer_url_extension(url: str) -> str | None:
+    path = urlparse(url).path
+    if "." not in path:
+        return None
+    suffix = path.rsplit(".", 1)[-1].strip().lower()
+    return suffix or None
+
+
+def _normalize_hunyuan_asset_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
+    raw_url = entry.get("Url") or entry.get("url")
+    if not isinstance(raw_url, str) or not raw_url.strip():
+        return None
+
+    url = raw_url.strip()
+    raw_type = entry.get("Type") or entry.get("type")
+    asset_type = str(raw_type).strip().upper() if raw_type else ""
+    url_extension = _infer_url_extension(url)
+    if not asset_type and url_extension:
+        asset_type = _TYPE_BY_URL_EXTENSION.get(url_extension, "")
+
+    normalized: dict[str, Any] = {"url": url}
+    if asset_type:
+        normalized["type"] = asset_type
+    if url_extension:
+        normalized["url_extension"] = url_extension
+        normalized["is_archive"] = url_extension == "zip"
+    return normalized
+
+
+def _normalize_hunyuan_assets(result_files: list[Any]) -> list[dict[str, Any]]:
+    assets: list[dict[str, Any]] = []
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, list):
+            for item in node:
+                _walk(item)
+            return
+        if not isinstance(node, dict):
+            return
+
+        nested = node.get("File3D") or node.get("file3d")
+        if isinstance(nested, list):
+            for item in nested:
+                _walk(item)
+
+        normalized = _normalize_hunyuan_asset_entry(node)
+        if normalized is not None:
+            assets.append(normalized)
+
+    _walk(result_files)
+    return assets
+
+
+def _select_preferred_model_asset(assets: list[dict[str, Any]]) -> dict[str, Any] | None:
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
+
+    for index, asset in enumerate(assets):
+        asset_type = str(asset.get("type") or "").upper()
+        if asset_type in _PREVIEW_ASSET_TYPES:
+            continue
+        priority = _MODEL_TYPE_PRIORITY.get(asset_type, 100)
+        candidates.append((priority, index, asset))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return candidates[0][2]
+
+
+def _build_success_payload(job_id: str, status: str, result_files: list[Any], query_resp: dict[str, Any]) -> str:
+    normalized_assets = _normalize_hunyuan_assets(result_files)
+    preferred_model_asset = _select_preferred_model_asset(normalized_assets)
+    return json.dumps(
+        {
+            "job_id": f"job_{job_id}",
+            "status": status,
+            "result_file_3ds": result_files,
+            "normalized_assets": normalized_assets,
+            "preferred_model_asset": preferred_model_asset,
+            "response": query_resp,
+        },
+        indent=2,
+    )
+
 
 def generate_hunyuan3d_model(
     ctx: Context,
     text_prompt: Optional[str] = None,
     input_image_url: Optional[str] = None,
+    input_image_name: Optional[str] = None,
+    input_image_id: Optional[str] = None,
     timeout_seconds: int = 300,
     poll_interval_seconds: float = 5.0,
 ) -> str:
     """Generate Hunyuan3D asset via Tencent official API from MCP server side."""
+    del input_image_name, input_image_id
     if not runtime.is_hunyuan_tool_enabled():
         return (
             "Hunyuan tool is disabled. "
@@ -117,15 +230,7 @@ def generate_hunyuan3d_model(
             result_files = query_block.get("ResultFile3Ds") or []
 
             if normalized_status in {"DONE", "SUCCEEDED", "SUCCESS", "FINISHED", "COMPLETED"}:
-                return json.dumps(
-                    {
-                        "job_id": f"job_{job_id}",
-                        "status": normalized_status,
-                        "result_file_3ds": result_files,
-                        "response": query_resp,
-                    },
-                    indent=2,
-                )
+                return _build_success_payload(job_id, normalized_status, result_files, query_resp)
             if normalized_status in {"FAIL", "FAILED", "ERROR", "CANCELED", "CANCELLED", "ABORTED"}:
                 return json.dumps(
                     {
@@ -137,15 +242,7 @@ def generate_hunyuan3d_model(
                     indent=2,
                 )
             if not normalized_status and result_files:
-                return json.dumps(
-                    {
-                        "job_id": f"job_{job_id}",
-                        "status": "DONE",
-                        "result_file_3ds": result_files,
-                        "response": query_resp,
-                    },
-                    indent=2,
-                )
+                return _build_success_payload(job_id, "DONE", result_files, query_resp)
             time.sleep(poll_interval_seconds)
     except Exception as exc:
         logger.error("Error generating Hunyuan3D model: %s", exc)

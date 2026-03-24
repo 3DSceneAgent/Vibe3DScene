@@ -395,7 +395,6 @@ async def _run_stream_lease_heartbeat(
             )
         break
 
-
 async def _produce_stream_events(
     *,
     session: _ActiveStreamSession,

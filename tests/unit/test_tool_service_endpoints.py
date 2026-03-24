@@ -69,3 +69,12 @@ def test_scenesmith_compat_does_not_fall_back_to_objaverse_envs(monkeypatch):
     monkeypatch.setenv("TOOL_SERVICE_HOST", "10.0.0.9")
 
     assert endpoints.get_retrieval_base_url() == "http://10.0.0.9:8005"
+
+
+def test_scenesmith_compat_base_url_is_independent_from_retrieval_backend(monkeypatch):
+    monkeypatch.setenv("ASSET_RETRIEVAL_BACKEND", "objaverse")
+    monkeypatch.setenv("SCENESMITH_COMPAT_HOST", "scenesmith.internal")
+    monkeypatch.setenv("SCENESMITH_COMPAT_PORT", "8125")
+
+    assert endpoints.get_retrieval_base_url() == "http://localhost:8002"
+    assert endpoints.get_scenesmith_compat_base_url() == "http://scenesmith.internal:8125"

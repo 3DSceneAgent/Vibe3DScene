@@ -15,7 +15,10 @@ from mcp.server.fastmcp import Context
 
 from mcp_server import runtime
 from mcp_server.tools.base import import_glb_model
-from scene_agent.utils.tool_service_endpoints import get_retrieval_base_url
+from scene_agent.utils.tool_service_endpoints import (
+    get_retrieval_base_url,
+    get_scenesmith_compat_base_url,
+)
 
 logger = logging.getLogger("BlenderMCPServer")
 _ALLOWED_HSSD_OBJECT_TYPES = {
@@ -30,14 +33,25 @@ def _retrieval_base_url() -> str:
     return get_retrieval_base_url()
 
 
-def _format_request_error(exc: Exception) -> str:
+def _ambientcg_base_url() -> str:
+    return get_scenesmith_compat_base_url()
+
+
+def _format_request_error(
+    exc: Exception,
+    *,
+    service_name: str,
+    service_base_url: str | None = None,
+) -> str:
     if isinstance(exc, requests.exceptions.ConnectionError):
-        return f"Cannot connect to retrieval service at {_retrieval_base_url()}."
+        if service_base_url:
+            return f"Cannot connect to {service_name} at {service_base_url}."
+        return f"Cannot connect to {service_name}."
     if isinstance(exc, requests.exceptions.Timeout):
-        return "Request to retrieval service timed out."
+        return f"Request to {service_name} timed out."
     if isinstance(exc, requests.exceptions.HTTPError) and exc.response is not None:
         return (
-            "HTTP error from retrieval service: "
+            f"HTTP error from {service_name}: "
             f"{exc.response.status_code} - {exc.response.text}"
         )
     return str(exc)
@@ -123,7 +137,10 @@ def search_hssd_assets(
         return output
     except Exception as exc:
         logger.error("Error searching HSSD assets: %s", exc)
-        return f"Error searching HSSD assets: {_format_request_error(exc)}"
+        return (
+            "Error searching HSSD assets: "
+            f"{_format_request_error(exc, service_name='retrieval service', service_base_url=_retrieval_base_url())}"
+        )
 
 
 def import_hssd_asset(
@@ -147,7 +164,7 @@ def search_ambientcg_materials(
 
     try:
         response = requests.post(
-            f"{_retrieval_base_url()}/ambientcg/v1/search",
+            f"{_ambientcg_base_url()}/ambientcg/v1/search",
             json={"query": query, "top_k": top_k},
             timeout=60,
         )
@@ -177,7 +194,10 @@ def search_ambientcg_materials(
         return output
     except Exception as exc:
         logger.error("Error searching AmbientCG materials: %s", exc)
-        return f"Error searching AmbientCG materials: {_format_request_error(exc)}"
+        return (
+            "Error searching AmbientCG materials: "
+            f"{_format_request_error(exc, service_name='AmbientCG service', service_base_url=_ambientcg_base_url())}"
+        )
 
 
 def _download_remote_file(url: str, destination_dir: Path, stem: str) -> Path:
@@ -258,7 +278,10 @@ def apply_ambientcg_material(
         )
     except Exception as exc:
         logger.error("Error downloading AmbientCG textures: %s", exc)
-        return f"Error downloading AmbientCG textures: {_format_request_error(exc)}"
+        return (
+            "Error downloading AmbientCG textures: "
+            f"{_format_request_error(exc, service_name='texture URL')}"
+        )
 
     resolved_material_name = material_name or f"{object_name}_AmbientCG"
     blender = runtime.get_blender_connection(logger)

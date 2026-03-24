@@ -224,7 +224,8 @@ Conditional tool gates:
 - Enable corresponding keys for 
 - `ASSET_RETRIEVAL_BACKEND=objaverse|scenesmith` for asset retrieval tools.
   - `objaverse`: exposes `search_3d_assets_by_text` and `import_retrieved_asset`.
-  - `scenesmith`: exposes `search_hssd_assets`, `import_hssd_asset`, and optional AmbientCG tools.
+  - `scenesmith`: exposes `search_hssd_assets` and `import_hssd_asset`.
+- `ENABLE_AMBIENTCG=true` enables AmbientCG material tools independently of `ASSET_RETRIEVAL_BACKEND`.
 - `ENABLE_INFINIGEN=true` for PCG tools.
 - `ENABLE_SKETCHFAB=true` and `SKETCHFAB_API_KEY` for Sketchfab tools.
 - Invalid combos fail MCP startup:
@@ -237,7 +238,7 @@ Conditional tool gates:
 `../3DAgentTools/` includes Docker Compose deployment for:
 - [TRELLIS2](https://github.com/FishWoWater/TRELLIS.2/tree/api) (`:8001`)
 - [AssetRetrieval3D](https://github.com/3DSceneAgent/AssetRetrieval3D) (`:8002`)
-- SceneSmith compatibility API (`:8005` when `ASSET_RETRIEVAL_BACKEND=scenesmith`)
+- SceneSmith compatibility API (`:8005` for HSSD retrieval and AmbientCG material search/apply)
 - [PCGIntegrator3D](https://github.com/3DSceneAgent/PCGIntegrator3D) (`:8003`)
 - PostgreSQL for retrieval backend
 
@@ -390,8 +391,8 @@ npm run lint
 | `ENABLE_HUNYUAN`, `HUNYUAN3D_SECRET_ID`, `HUNYUAN3D_SECRET_KEY` | Enable Tencent Hunyuan3D generation tool. |
 | `ENABLE_TRELLIS2`, `TRELLIS2_HOST`, `TRELLIS2_PORT` | Enable TRELLIS2 generation tool and endpoint routing. |
 | `ASSET_RETRIEVAL_BACKEND`, `OBJAVERSE_HOST`, `OBJAVERSE_PORT` | Select the asset-retrieval backend (`disabled`, `objaverse`, or `scenesmith`). `OBJAVERSE_HOST` / `OBJAVERSE_PORT` apply when `objaverse` is selected. |
-| `SCENESMITH_COMPAT_HOST`, `SCENESMITH_COMPAT_PORT` | Override the SceneSmith compatibility API endpoint when `ASSET_RETRIEVAL_BACKEND=scenesmith`; default port is `8005`. |
-| `ENABLE_AMBIENTCG` | Enable SceneSmith AmbientCG material tools when `ASSET_RETRIEVAL_BACKEND=scenesmith`; HSSD is implicit in that backend. |
+| `SCENESMITH_COMPAT_HOST`, `SCENESMITH_COMPAT_PORT` | Override the SceneSmith compatibility API endpoint used by SceneSmith HSSD retrieval and AmbientCG material tools; default port is `8005`. |
+| `ENABLE_AMBIENTCG` | Enable SceneSmith AmbientCG material tools independently of `ASSET_RETRIEVAL_BACKEND`. |
 | `ENABLE_INFINIGEN`, `INFINIGEN_HOST`, `INFINIGEN_PORT` | Enable PCG/Infinigen tools. |
 | `ENABLE_SAM_RECONSTRUCT`, `SAM_HOST`, `SAM_PORT` | Enable SAM-based scene reconstruction; leave `SAM_HOST` blank to inherit `TOOL_SERVICE_HOST`, and use port `8004` unless your SAMServer is published elsewhere. |
 | `AGENT_TOOLS_ROOT` | Optional checkout path for the sibling `3DAgentTools` repo. Leave blank to use `../3DAgentTools`. |

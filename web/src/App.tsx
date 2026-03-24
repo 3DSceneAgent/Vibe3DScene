@@ -32,8 +32,18 @@ import { ChatTab } from './components/ChatTab'
 import { SceneTab } from './components/SceneTab'
 import { SettingsPanel } from './components/SettingsPanel'
 import { ThreadList } from './components/ThreadList'
-import { loadSettings, loadThreads, loadSettingsAsync, loadThreadsAsync, saveSettings, saveThreads } from './state/storage'
-import type { Message, SceneHierarchyNode, Thread } from './state/types'
+import {
+  loadPromptHistory,
+  loadSettings,
+  loadThreads,
+  loadSettingsAsync,
+  loadThreadsAsync,
+  recordPromptHistory,
+  savePromptHistory,
+  saveSettings,
+  saveThreads
+} from './state/storage'
+import type { Message, PendingImageAttachment, SceneHierarchyNode, Thread } from './state/types'
 import {
   applyStreamingDeltaWithId,
   extractAssistantToolCalls,
@@ -193,6 +203,42 @@ function buildThreadTitleUpdate(
   }
 }
 
+function buildPendingMessageImages(
+  threadId: string,
+  images: PendingImageAttachment[],
+  timestamp: number
+): ImageAsset[] {
+  const uploadedAt = new Date(timestamp).toISOString()
+  return images.map((image, index) => ({
+    id: `pending-image-${timestamp}-${index}`,
+    thread_id: threadId,
+    filename: image.file.name,
+    content_type: image.file.type || 'image/unknown',
+    size_bytes: image.file.size,
+    sha256: '',
+    uploaded_at: uploadedAt,
+    source: 'pending',
+    previewUrl: image.previewUrl
+  }))
+}
+
+function revokeThreadPreviewUrls(thread: Thread) {
+  const previewUrls = new Set<string>()
+  for (const image of thread.images ?? []) {
+    if (image.previewUrl?.startsWith('blob:')) {
+      previewUrls.add(image.previewUrl)
+    }
+  }
+  for (const message of thread.messages) {
+    for (const image of message.attachedImages ?? []) {
+      if (image.previewUrl?.startsWith('blob:')) {
+        previewUrls.add(image.previewUrl)
+      }
+    }
+  }
+  previewUrls.forEach((previewUrl) => URL.revokeObjectURL(previewUrl))
+}
+
 function finalizeStreamingAssistants(messages: Message[], keepAssistantId?: string | null): Message[] {
   let changed = false
   const nextMessages = messages.map((message): Message => {
@@ -320,11 +366,11 @@ function App() {
   // Claiming a headless runtime can cold-start Blender + MCP on the first request.
   const MCP_REQUEST_TIMEOUT_MS = 30000
   const VLM_REQUEST_TIMEOUT_MS = 10000
+  const MIN_TOOL_SHIMMER_MS = 400
   const MAX_EXAMPLE_PROMPTS = 10
   const [threads, setThreads] = useState<Thread[]>(() => loadThreads())
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null)
   const [settings, setSettings] = useState(() => loadSettings())
-  const [environment, setEnvironment] = useState<'studio' | 'warm' | 'cool'>('studio')
   const [isStreaming, setIsStreaming] = useState(false)
   const [isSending, setIsSending] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
@@ -335,6 +381,7 @@ function App() {
   const [fastModeAvailable, setFastModeAvailable] = useState(false)
   const [fastModeDefault, setFastModeDefault] = useState(false)
   const [examplePrompts, setExamplePrompts] = useState<string[]>([])
+  const [promptHistory, setPromptHistory] = useState<string[]>(() => loadPromptHistory())
   const [mcpToolsByThread, setMcpToolsByThread] = useState<Record<string, string[]>>({})
   const [mcpToolHintsByThread, setMcpToolHintsByThread] = useState<Record<string, Record<string, string>>>({})
   const [mcpToolsErrorByThread, setMcpToolsErrorByThread] = useState<Record<string, string | null>>({})
@@ -361,6 +408,8 @@ function App() {
   const knownStreamIdsRef = useRef<Set<string>>(new Set())
   const knownToolIdsRef = useRef<Set<string>>(new Set())
   const knownToolCallKeysRef = useRef<Set<string>>(new Set())
+  const pendingToolTimestampsRef = useRef<Map<string, number>>(new Map())
+  const pendingToolTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
   const receivedDeltaRef = useRef(false)
   const sceneChangeRef = useRef<Record<string, boolean>>({})
   const settingsRef = useRef(settings)
@@ -563,6 +612,10 @@ function App() {
     }
     saveSettings(settings)
   }, [settings, isStorageHydrated])
+
+  useEffect(() => {
+    savePromptHistory(promptHistory)
+  }, [promptHistory])
 
   useEffect(() => {
     loadingRef.current = loadingByThread
@@ -890,12 +943,8 @@ function App() {
       if (target?.gltfUrl) {
         URL.revokeObjectURL(target.gltfUrl)
       }
-      if (target?.images) {
-        target.images.forEach((image) => {
-          if (image.previewUrl) {
-            URL.revokeObjectURL(image.previewUrl)
-          }
-        })
+      if (target) {
+        revokeThreadPreviewUrls(target)
       }
       return prev.filter((thread) => thread.id !== threadId)
     })
@@ -962,6 +1011,9 @@ function App() {
     setIsSending(false)
     messageIdMapRef.current.clear()
     knownToolCallKeysRef.current.clear()
+    pendingToolTimestampsRef.current.clear()
+    for (const timer of pendingToolTimersRef.current.values()) clearTimeout(timer)
+    pendingToolTimersRef.current.clear()
 
     setThreads((prev) => {
       for (const thread of prev) {
@@ -969,11 +1021,7 @@ function App() {
           void deleteThreadApi(settings.backendUrl, thread.id)
         }
         if (thread.gltfUrl) URL.revokeObjectURL(thread.gltfUrl)
-        if (thread.images) {
-          thread.images.forEach((img) => {
-            if (img.previewUrl) URL.revokeObjectURL(img.previewUrl)
-          })
-        }
+        revokeThreadPreviewUrls(thread)
       }
       return []
     })
@@ -1015,7 +1063,10 @@ function App() {
     const map = new Map(existing.map((image) => [image.id, image]))
     incoming.forEach((image) => {
       const previous = map.get(image.id)
-      map.set(image.id, previous ? { ...image, previewUrl: previous.previewUrl } : image)
+      map.set(
+        image.id,
+        previous ? { ...image, previewUrl: previous.previewUrl ?? image.previewUrl } : image
+      )
     })
     return Array.from(map.values())
   }
@@ -1126,15 +1177,19 @@ function App() {
     
     messageIdMapRef.current.clear()
     knownToolCallKeysRef.current.clear()
+    pendingToolTimestampsRef.current.clear()
+    for (const timer of pendingToolTimersRef.current.values()) clearTimeout(timer)
+    pendingToolTimersRef.current.clear()
     setIsStreaming(false)
     setIsSending(false)
   }, [setThreadStreamStatus, updateThread])
 
-  const handleSend = async (text: string, files: File[] = []) => {
+  const handleSend = async (text: string, pendingImages: PendingImageAttachment[] = []) => {
     if (!activeThread) {
       return false
     }
     const threadId = activeThread.id
+    const files = pendingImages.map((image) => image.file)
     let hasMcpToolSnapshot =
       Object.prototype.hasOwnProperty.call(mcpToolsByThread, threadId) &&
       !mcpToolsErrorByThread[threadId]
@@ -1152,11 +1207,14 @@ function App() {
       undefined
     let attachedImageIds: string[] | undefined
     const now = Date.now()
+    const userAttachedImages =
+      pendingImages.length > 0 ? buildPendingMessageImages(threadId, pendingImages, now) : undefined
     const userMessage: Message = {
       id: `msg-${now}-user`,
       role: 'user',
       content: text,
-      createdAt: now
+      createdAt: now,
+      attachedImages: userAttachedImages
     }
     const assistantId = `msg-${now}-assistant`
     const assistantMessage: Message = {
@@ -1234,12 +1292,20 @@ function App() {
           .filter((imageId): imageId is string => typeof imageId === 'string' && imageId.length > 0)
         const nextImages = uploaded.map((image, index) => ({
           ...image,
-          previewUrl: files[index] ? URL.createObjectURL(files[index]) : undefined
+          previewUrl: pendingImages[index]?.previewUrl
         }))
-        updateThread(threadId, (thread) => ({
-          ...thread,
-          images: mergeThreadImages(thread.images ?? [], nextImages)
-        }))
+        updateThread(threadId, (thread) => {
+          const nextMessages = thread.messages.map((message) =>
+            message.id === userMessage.id
+              ? { ...message, attachedImages: nextImages }
+              : message
+          )
+          return {
+            ...thread,
+            images: mergeThreadImages(thread.images ?? [], nextImages),
+            messages: nextMessages
+          }
+        })
       } catch (error) {
         const detail =
           error instanceof Error && error.message.trim()
@@ -1402,6 +1468,9 @@ function App() {
         .filter((id): id is string => typeof id === 'string' && id.length > 0)
     )
     knownToolCallKeysRef.current.clear()
+    pendingToolTimestampsRef.current.clear()
+    for (const timer of pendingToolTimersRef.current.values()) clearTimeout(timer)
+    pendingToolTimersRef.current.clear()
     receivedDeltaRef.current = false
 
     setIsStreaming(true)
@@ -1453,6 +1522,25 @@ function App() {
             ...thread,
             graphEvents: nextEvents.slice(-200)
           }
+        })
+      }
+      if (event.event === 'tool_call_started' && event.tool_call?.name) {
+        const toolName = event.tool_call.name
+        pendingToolTimestampsRef.current.set(toolName, Date.now())
+        updateThread(threadId, (thread) => {
+          const hasPending = thread.messages.some(
+            (m) => m.role === 'tool' && m.status === 'streaming' && m.toolName === toolName
+          )
+          if (hasPending) return thread
+          const pendingMsg: Message = {
+            id: `tool-pending-${Date.now()}-${Math.random()}`,
+            role: 'tool',
+            content: '',
+            createdAt: Date.now(),
+            status: 'streaming',
+            toolName,
+          }
+          return { ...thread, messages: [...finalizeStreamingAssistants(thread.messages), pendingMsg] }
         })
       }
       const getOrCreateAssistantMessage = (messageId: string | null): string => {
@@ -1596,6 +1684,12 @@ function App() {
             return true
           })
         if (assistantToolCalls.length > 0) {
+          const now = Date.now()
+          for (const tc of assistantToolCalls) {
+            if (tc.name && !pendingToolTimestampsRef.current.has(tc.name)) {
+              pendingToolTimestampsRef.current.set(tc.name, now)
+            }
+          }
           updateThread(threadId, (thread) => {
             const nextMessages = appendPendingToolMessages(thread.messages, assistantToolCalls)
             return nextMessages === thread.messages ? thread : { ...thread, messages: nextMessages }
@@ -1632,10 +1726,27 @@ function App() {
           })
           .filter((entry): entry is Message => entry !== null)
         if (toolEntries.length > 0) {
-          updateThread(threadId, (thread) => ({
-            ...thread,
-            messages: toolEntries.reduce((currentMessages, toolEntry) => resolveToolMessage(currentMessages, toolEntry), thread.messages)
-          }))
+          const applyToolResolution = (entry: Message) => {
+            pendingToolTimestampsRef.current.delete(entry.toolName ?? '')
+            pendingToolTimersRef.current.delete(entry.toolName ?? entry.id)
+            updateThread(threadId, (thread) => ({
+              ...thread,
+              messages: resolveToolMessage(thread.messages, entry)
+            }))
+          }
+          for (const toolEntry of toolEntries) {
+            const createdAt = pendingToolTimestampsRef.current.get(toolEntry.toolName ?? '')
+            const elapsed = createdAt != null ? Date.now() - createdAt : MIN_TOOL_SHIMMER_MS
+            if (elapsed < MIN_TOOL_SHIMMER_MS) {
+              const timerKey = toolEntry.toolName ?? toolEntry.id
+              const existing = pendingToolTimersRef.current.get(timerKey)
+              if (existing != null) clearTimeout(existing)
+              const timer = setTimeout(() => applyToolResolution(toolEntry), MIN_TOOL_SHIMMER_MS - elapsed)
+              pendingToolTimersRef.current.set(timerKey, timer)
+            } else {
+              applyToolResolution(toolEntry)
+            }
+          }
         }
 
         const candidates = event.messages.filter(
@@ -1738,6 +1849,7 @@ function App() {
         }
         messageIdMapRef.current.clear()
       })
+    setPromptHistory((current) => recordPromptHistory(current, text))
     return true
   }
 
@@ -2101,6 +2213,7 @@ function App() {
                   onStop={isStreaming ? handleStop : undefined}
                   backendUrl={settings.backendUrl}
                   examplePrompts={examplePrompts}
+                  promptHistory={promptHistory}
                   mcpTools={mcpToolsByThread[activeThread.id] ?? []}
                   mcpToolHints={mcpToolHintsByThread[activeThread.id] ?? {}}
                   mcpToolEnabled={activeThread.mcpToolEnabled ?? {}}
@@ -2130,10 +2243,13 @@ function App() {
                   backendUrl={settings.backendUrl}
                   gltfUrl={activeThread.gltfUrl ?? null}
                   sceneHierarchy={activeThread.sceneHierarchy ?? []}
-                  environment={environment}
+                  environment={settings.viewportEnvironment}
                   viewportTheme={settings.viewportTheme}
                   uiTheme={settings.theme}
-                  onEnvironmentChange={setEnvironment}
+                  showHdriBackground={settings.showHdriBackground}
+                  onEnvironmentChange={(viewportEnvironment) =>
+                    setSettings((current) => ({ ...current, viewportEnvironment }))
+                  }
                   onFetchRenders={(includeLocalWork) => void fetchRenders(undefined, includeLocalWork ?? false)}
                   onFetchGltf={() => void fetchGltf()}
                   onDownloadGltf={() => void downloadGltf()}

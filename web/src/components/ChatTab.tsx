@@ -1,19 +1,19 @@
-import type { Thread } from '../state/types'
+import type { PendingImageAttachment, Thread } from '../state/types'
 import { MessageList } from './MessageList'
 import { ChatComposer } from './ChatComposer'
-import { ReferenceImageStrip } from './ReferenceImageStrip'
 import { GraphTimeline } from './GraphTimeline'
 import { TodoPanel } from './TodoPanel'
-import type { GraphNodeStream, ImageAsset, TodoItem, VlmProviderOption } from '../api/types'
+import type { GraphNodeStream, TodoItem, VlmProviderOption } from '../api/types'
 
 type ChatTabProps = {
   thread: Thread | null
   isStreaming: boolean
   streamStatus: 'streaming' | 'complete'
-  onSend: (message: string, files: File[]) => Promise<boolean>
+  onSend: (message: string, images: PendingImageAttachment[]) => Promise<boolean>
   onStop?: () => void
   backendUrl: string
   examplePrompts: string[]
+  promptHistory?: string[]
   mcpTools: string[]
   mcpToolHints?: Record<string, string>
   mcpToolEnabled?: Record<string, boolean>
@@ -61,6 +61,7 @@ export function ChatTab({
   onStop,
   backendUrl,
   examplePrompts,
+  promptHistory = [],
   mcpTools,
   mcpToolHints,
   mcpToolEnabled,
@@ -140,15 +141,13 @@ export function ChatTab({
       <div className="chat-scroll-area">
         <MessageList messages={thread.messages} backendUrl={backendUrl} streamStatus={streamStatus} />
       </div>
-      {thread.images && thread.images.length > 0 && (
-        <ReferenceImageStrip images={thread.images as ImageAsset[]} />
-      )}
       <ChatComposer
         disabled={isStreaming}
         onSend={onSend}
         onStop={onStop}
         referenceImagesCount={thread.images?.length ?? 0}
         examplePrompts={availablePrompts}
+        promptHistory={promptHistory}
         mcpTools={mcpTools}
         mcpToolHints={mcpToolHints}
         mcpToolEnabled={mcpToolEnabled}

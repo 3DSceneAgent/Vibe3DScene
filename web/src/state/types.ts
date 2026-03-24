@@ -1,4 +1,5 @@
 import type { GraphNodeStream, ImageAsset, RenderImage, SceneInfo, TodoItem } from '../api/types'
+import type { EnvironmentPreset } from '../constants/environmentPresets'
 
 export type MessageRole = 'user' | 'assistant' | 'tool'
 export type MessageStatus = 'streaming' | 'final' | 'error'
@@ -6,6 +7,11 @@ export type MessageStatus = 'streaming' | 'final' | 'error'
 export type ToolMedia = {
   kind: 'url' | 'data'
   value: string
+}
+
+export type PendingImageAttachment = {
+  file: File
+  previewUrl: string
 }
 
 export type SceneHierarchyNode = {
@@ -29,6 +35,7 @@ export type Message = {
   toolName?: string
   toolPayload?: unknown
   toolMedia?: ToolMedia[]
+  attachedImages?: ImageAsset[]
   collapsed?: boolean
 }
 
@@ -65,5 +72,7 @@ export type Settings = {
   autoRefreshScene: boolean
   autoFetchIntervalSeconds: number
   viewportTheme: ViewportThemeId
+  viewportEnvironment: EnvironmentPreset
+  showHdriBackground: boolean
   uiMode: UiModeId
 }

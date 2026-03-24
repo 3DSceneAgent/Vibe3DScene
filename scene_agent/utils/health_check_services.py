@@ -17,6 +17,7 @@ from scene_agent.utils.tool_service_endpoints import (
     get_assetretrieval_base_url,
     get_retrieval_base_url,
     get_sam_http_base_url,
+    get_scenesmith_compat_base_url,
     get_shared_tool_service_host,
 )
 
@@ -152,8 +153,14 @@ class ServiceHealthChecker:
                 base_url = self._apply_host_override_to_base_url(base_url)
             return f"{base_url.rstrip('/')}{spec.path}"
 
-        if spec.name in {"scenesmith_hssd", "scenesmith_ambientcg"}:
+        if spec.name == "scenesmith_hssd":
             base_url = get_retrieval_base_url()
+            if self.host_override:
+                base_url = self._apply_host_override_to_base_url(base_url)
+            return f"{base_url.rstrip('/')}{spec.path}"
+
+        if spec.name == "scenesmith_ambientcg":
+            base_url = get_scenesmith_compat_base_url()
             if self.host_override:
                 base_url = self._apply_host_override_to_base_url(base_url)
             return f"{base_url.rstrip('/')}{spec.path}"
@@ -210,6 +217,22 @@ class ServiceHealthChecker:
                 missing.append(f"{key}={expected_value!r}")
         return missing
 
+    def _check_sam_reconstruct_health(self, payload: Dict[str, Any]) -> list[str]:
+        status_missing = self._check_expected_fields(payload, {"status": "ok"})
+        if status_missing:
+            return status_missing
+
+        if (
+            payload.get("runtime_mode") == "cache"
+            and payload.get("internal_services_expected") is False
+        ):
+            return []
+
+        return self._check_expected_fields(
+            payload,
+            {"status": "ok", "sam_service": True, "sam3d_service": True},
+        )
+
     def check_service(self, service_name: str) -> ServiceCheckResult:
         if service_name not in self._specs:
             raise ValueError(
@@ -242,7 +265,10 @@ class ServiceHealthChecker:
                 error="response is not valid JSON",
             )
 
-        missing_fields = self._check_expected_fields(payload, spec.expected_fields)
+        if spec.name == "sam_reconstruct":
+            missing_fields = self._check_sam_reconstruct_health(payload)
+        else:
+            missing_fields = self._check_expected_fields(payload, spec.expected_fields)
         ok = response.status_code == 200 and not missing_fields
 
         return ServiceCheckResult(

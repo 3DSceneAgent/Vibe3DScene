@@ -211,8 +211,32 @@ def test_strategy_includes_sam_reconstruct_guidance_when_workflow_is_complete():
 
     assert "SAM3D full-scene reconstruction (image-only)" in prompt
     assert "reconstruct_full_scene(input_image_path=...)" in prompt
+    assert "auto-resolve it for reconstruction" in prompt
+    assert "input_image_name=... or input_image_id=..." in prompt
     assert "Do NOT use this tool for text-only requests or single-object generation" in prompt
     assert "fall back to retrieval/generation workflows" in prompt
+
+
+def test_strategy_includes_image_referenced_hunyuan_comparison_guidance():
+    prompt = get_full_system_prompt(
+        [
+            "get_scene_info",
+            "search_3d_assets_by_text",
+            "import_retrieved_asset",
+            "generate_hunyuan3d_model",
+            "import_glb_model",
+            "execute_blender_code",
+        ]
+    )
+
+    assert "input_image_name=... or input_image_id=..." in prompt
+    assert "auto-resolve it for image-to-3D" in prompt
+    assert "Hunyuan often returns the model as Type=OBJ with a .zip bundle" in prompt
+    assert "prefer preferred_model_asset.url when present" in prompt
+    assert "select the Type=OBJ ResultFile3Ds URL" in prompt
+    assert "import_glb_model(model_url=..., object_name=...)" in prompt
+    assert "compare retrieval vs image-conditioned generation from one reference image" in prompt
+    assert "place them side by side" in prompt
 
 
 def test_strategy_requires_blend_import_for_sam_reconstruct_workflow():

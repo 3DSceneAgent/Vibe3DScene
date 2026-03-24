@@ -50,7 +50,20 @@ def _configure_runtime(
         "ENABLE_INFINIGEN": infinigen,
         "ENABLE_SAM_RECONSTRUCT": sam_reconstruct,
         "ENABLE_SKETCHFAB": sketchfab,
+        "ENABLE_AMBIENTCG": scenesmith_ambientcg,
     }
+    monkeypatch.setenv("BLENDER_MODE", mode)
+    monkeypatch.setenv("ASSET_RETRIEVAL_BACKEND", asset_retrieval_backend)
+    for name, enabled in switch_values.items():
+        monkeypatch.setenv(name, "true" if enabled else "false")
+    if rodin_key:
+        monkeypatch.setenv("RODIN_API_KEY", rodin_key)
+    else:
+        monkeypatch.delenv("RODIN_API_KEY", raising=False)
+    if sketchfab_key:
+        monkeypatch.setenv("SKETCHFAB_API_KEY", sketchfab_key)
+    else:
+        monkeypatch.delenv("SKETCHFAB_API_KEY", raising=False)
     monkeypatch.setattr(tool_registry.runtime, "get_blender_mode", lambda: mode)
     monkeypatch.setattr(
         tool_registry.runtime,
@@ -89,7 +102,7 @@ def _configure_runtime(
     monkeypatch.setattr(
         tool_registry.runtime,
         "is_scenesmith_ambientcg_tool_enabled",
-        lambda: asset_retrieval_backend == "scenesmith" and scenesmith_ambientcg,
+        lambda: scenesmith_ambientcg,
     )
     monkeypatch.setattr(tool_registry.runtime, "is_infinigen_tool_enabled", lambda: infinigen)
     monkeypatch.setattr(
@@ -291,6 +304,47 @@ def test_register_mcp_tools_skips_unhealthy_scenesmith_subservice(monkeypatch):
     assert "import_hssd_asset" in enabled
     assert "search_ambientcg_materials" not in enabled
     assert "apply_ambientcg_material" not in enabled
+
+
+def test_register_mcp_tools_enables_ambientcg_when_objaverse_retrieval_is_selected(
+    monkeypatch,
+):
+    _reset_registry_state(monkeypatch)
+    _configure_runtime(
+        monkeypatch,
+        retrieval=True,
+        retrieval_provider="objaverse",
+        scenesmith_ambientcg=True,
+    )
+    mcp = FakeMCP()
+
+    enabled = tool_registry.register_mcp_tools(mcp, logging.getLogger(__name__))
+
+    assert "search_3d_assets_by_text" in enabled
+    assert "import_retrieved_asset" in enabled
+    assert "search_hssd_assets" not in enabled
+    assert "import_hssd_asset" not in enabled
+    assert "search_ambientcg_materials" in enabled
+    assert "apply_ambientcg_material" in enabled
+
+
+def test_register_mcp_tools_enables_ambientcg_without_asset_retrieval_backend(monkeypatch):
+    _reset_registry_state(monkeypatch)
+    _configure_runtime(
+        monkeypatch,
+        retrieval=False,
+        scenesmith_ambientcg=True,
+    )
+    mcp = FakeMCP()
+
+    enabled = tool_registry.register_mcp_tools(mcp, logging.getLogger(__name__))
+
+    assert "search_3d_assets_by_text" not in enabled
+    assert "import_retrieved_asset" not in enabled
+    assert "search_hssd_assets" not in enabled
+    assert "import_hssd_asset" not in enabled
+    assert "search_ambientcg_materials" in enabled
+    assert "apply_ambientcg_material" in enabled
 
 
 def test_register_mcp_tools_skips_scenesmith_retrieval_tools_for_legacy_provider(monkeypatch):

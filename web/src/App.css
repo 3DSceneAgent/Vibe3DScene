@@ -1360,6 +1360,59 @@ a.sidebar-icon-btn {
   box-shadow: 0 2px 8px rgba(5, 7, 12, 0.18);
 }
 
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+  max-width: min(100%, 320px);
+}
+
+.message-attachment {
+  flex: 0 0 148px;
+  width: 148px;
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 20%, var(--color-border));
+  background: color-mix(in srgb, var(--color-surface) 86%, black 14%);
+}
+
+.message-attachment img {
+  display: block;
+  width: 100%;
+  height: 148px;
+  object-fit: cover;
+}
+
+.message-attachment-placeholder {
+  min-height: 148px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-muted);
+}
+
+@media (max-width: 640px) {
+  .message-attachments {
+    max-width: min(100%, 248px);
+  }
+
+  .message-attachment {
+    flex-basis: 120px;
+    width: 120px;
+  }
+
+  .message-attachment img,
+  .message-attachment-placeholder {
+    height: 120px;
+    min-height: 120px;
+  }
+}
+
 /* --- Assistant turn group --- */
 .assistant-turn {
   display: flex;
@@ -1619,7 +1672,7 @@ a.sidebar-icon-btn {
     transparent 78%
   );
   transform: translateX(-140%);
-  animation: sweep-shimmer 1.45s ease-in-out infinite;
+  animation: sweep-shimmer 2.4s ease-in-out infinite;
   pointer-events: none;
 }
 
@@ -1759,6 +1812,7 @@ a.sidebar-icon-btn {
   position: relative;
   min-width: 0;
   display: inline-flex;
+  z-index: 40;
 }
 
 .composer-tools-panel.open .composer-tools-summary {
@@ -1851,7 +1905,7 @@ a.sidebar-icon-btn {
 
 .composer-tools-body {
   position: absolute;
-  right: 0;
+  left: 0;
   bottom: calc(100% + 10px);
   width: min(320px, calc(100vw - 48px));
   border: 1px solid rgba(148, 163, 184, 0.2);
@@ -1862,7 +1916,7 @@ a.sidebar-icon-btn {
   padding: 10px;
   max-height: 260px;
   overflow-y: auto;
-  z-index: 30;
+  z-index: 80;
   animation: dropdown-in 0.15s ease both;
 }
 
@@ -2058,6 +2112,19 @@ a.sidebar-icon-btn {
   overflow: hidden;
   z-index: 20;
   animation: dropdown-in 0.15s ease both;
+}
+
+.composer-prompt-section + .composer-prompt-section {
+  border-top: 1px solid var(--composer-prompt-divider);
+}
+
+.composer-prompt-section-label {
+  padding: 9px 12px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-muted);
 }
 
 .composer-prompt-option {
@@ -2640,18 +2707,48 @@ a.sidebar-icon-btn {
   justify-content: space-between;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .viewer-header-right {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  margin-left: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .viewer-control-group {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+}
+
+.viewer-environment-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.viewer-environment-label {
+  color: var(--color-muted);
+  font-size: 11px;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.viewer-environment-select {
+  min-height: 28px;
+  height: 28px;
+  min-width: 132px;
+  max-width: 42vw;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
 }
 
 .viewer-header-sep {

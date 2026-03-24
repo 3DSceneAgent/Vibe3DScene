@@ -43,6 +43,8 @@ class ReconstructToolError(Exception):
 def reconstruct_full_scene(
     ctx: Context,
     input_image_path: str,
+    input_image_name: str | None = None,
+    input_image_id: str | None = None,
     output_dir: str | None = None,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
@@ -54,6 +56,7 @@ def reconstruct_full_scene(
 ) -> dict[str, Any]:
     """Reconstruct a scene and return a local .blend path ready for import_blend_contents()."""
     del ctx
+    del input_image_name, input_image_id
 
     job_id: str | None = None
     status_payload: dict[str, Any] | None = None

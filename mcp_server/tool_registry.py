@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from mcp_server import runtime
@@ -58,6 +60,16 @@ from mcp_server.tools.pcg.infinigen import (
 _tools_registered = False
 _enabled_tool_names: list[str] = []
 
+ToolCondition = Callable[[], Optional[str]]
+
+
+@dataclass(frozen=True)
+class ToolSpec:
+    func: Any
+    conditions: tuple[ToolCondition, ...] = ()
+    service_dependency: str | None = None
+    service_reason: str | None = None
+
 
 def register_mcp_tools(mcp, logger) -> list[str]:
     global _tools_registered, _enabled_tool_names
@@ -84,30 +96,71 @@ def register_mcp_tools(mcp, logger) -> list[str]:
         "ENABLE_HUNYUAN": runtime.parse_env_bool("ENABLE_HUNYUAN", False),
     }
 
-    def _is_rodin_fully_enabled() -> bool:
-        return runtime.is_rodin_tool_enabled() and bool(runtime.get_rodin_api_key())
+    def _env_display(name: str) -> str:
+        raw = os.getenv(name)
+        if raw is None:
+            return "<unset>"
+        value = raw.strip()
+        return value or "<empty>"
+
+    def _format_mode_requirement(*allowed: str) -> str:
+        if len(allowed) == 1:
+            return allowed[0]
+        return "{" + ", ".join(allowed) + "}"
+
+    def _require_blender_mode(*allowed: str) -> ToolCondition:
+        def _check() -> Optional[str]:
+            actual = runtime.get_blender_mode() or "<unset>"
+            if actual in allowed:
+                return None
+            return (
+                f"BLENDER_MODE={_format_mode_requirement(*allowed)} required "
+                f"(actual={actual})"
+            )
+
+        return _check
+
+    def _require_env_true(name: str, default: bool = False) -> ToolCondition:
+        def _check() -> Optional[str]:
+            if runtime.parse_env_bool(name, default):
+                return None
+            return f"{name}=true required (actual={_env_display(name)})"
+
+        return _check
+
+    def _require_env_configured(name: str) -> ToolCondition:
+        def _check() -> Optional[str]:
+            if _env_display(name) not in {"<unset>", "<empty>"}:
+                return None
+            return f"{name} must be configured"
+
+        return _check
+
+    def _require_retrieval_provider(expected: str) -> ToolCondition:
+        def _check() -> Optional[str]:
+            actual = runtime.get_retrieval_provider()
+            if actual == expected:
+                return None
+            return (
+                f"ASSET_RETRIEVAL_BACKEND={expected} required "
+                f"(actual={actual or '<unset>'})"
+            )
+
+        return _check
+
+    def _require_sketchfab_api_reachable() -> ToolCondition:
+        def _check() -> Optional[str]:
+            if sketchfab_api_reachable:
+                return None
+            return "Sketchfab API must be reachable"
+
+        return _check
 
     def _is_sketchfab_fully_enabled() -> bool:
         return (
             runtime.is_sketchfab_tool_enabled()
             and bool(runtime.get_sketchfab_api_key())
             and bool(sketchfab_api_reachable)
-        )
-
-    def _is_local_client_mode() -> bool:
-        return runtime.get_blender_mode() == "local-client"
-
-    def _is_headless_mode() -> bool:
-        return runtime.get_blender_mode() == "headless"
-
-    def _is_scenesmith_hssd_fully_enabled() -> bool:
-        return runtime.is_scenesmith_hssd_tool_enabled() and service_status.get(
-            "scenesmith_hssd", False
-        )
-
-    def _is_scenesmith_ambientcg_fully_enabled() -> bool:
-        return runtime.is_scenesmith_ambientcg_tool_enabled() and service_status.get(
-            "scenesmith_ambientcg", False
         )
 
     enabled_generator_switches = [
@@ -149,214 +202,230 @@ def register_mcp_tools(mcp, logger) -> list[str]:
         sketchfab_api_reachable,
     )
 
-    tool_specs: list[
-        tuple[Any, Optional[str], Optional[Callable[[], bool]], Optional[str]]
-    ] = [
-        (get_scene_info, None, None, None),
-        (get_object_info, None, None, None),
-        (
+    tool_specs: list[ToolSpec] = [
+        ToolSpec(get_scene_info),
+        ToolSpec(get_object_info),
+        ToolSpec(
             get_viewport_screenshot,
-            None,
-            _is_local_client_mode,
-            "requires BLENDER_MODE=local-client",
+            conditions=(_require_blender_mode("local-client"),),
         ),
-        (clear_scene, None, None, None),
-        (delete_objects, None, None, None),
-        (execute_blender_code, None, None, None),
-        (
+        ToolSpec(clear_scene),
+        ToolSpec(delete_objects),
+        ToolSpec(execute_blender_code),
+        ToolSpec(
             search_polyhaven_assets,
-            None,
-            runtime.is_polyhaven_tool_enabled,
-            "requires ENABLE_POLYHAVEN=true",
+            conditions=(_require_env_true("ENABLE_POLYHAVEN", True),),
         ),
-        (
+        ToolSpec(
             download_polyhaven_asset,
-            None,
-            runtime.is_polyhaven_tool_enabled,
-            "requires ENABLE_POLYHAVEN=true",
+            conditions=(_require_env_true("ENABLE_POLYHAVEN", True),),
         ),
-        (
+        ToolSpec(
             set_texture,
-            None,
-            runtime.is_polyhaven_tool_enabled,
-            "requires ENABLE_POLYHAVEN=true",
+            conditions=(_require_env_true("ENABLE_POLYHAVEN", True),),
         ),
-        (import_glb_model, None, None, None),
-        (import_blend_contents, None, None, None),
-        (
+        ToolSpec(import_glb_model),
+        ToolSpec(import_blend_contents),
+        ToolSpec(
             get_infinigen_available_assets,
-            "pcg_integrator",
-            runtime.is_infinigen_tool_enabled,
-            "requires ENABLE_INFINIGEN=true",
+            conditions=(_require_env_true("ENABLE_INFINIGEN"),),
+            service_dependency="pcg_integrator",
+            service_reason="pcg_integrator service must be healthy",
         ),
-        (
+        ToolSpec(
             generate_infinigen_assets,
-            "pcg_integrator",
-            runtime.is_infinigen_tool_enabled,
-            "requires ENABLE_INFINIGEN=true",
+            conditions=(_require_env_true("ENABLE_INFINIGEN"),),
+            service_dependency="pcg_integrator",
+            service_reason="pcg_integrator service must be healthy",
         ),
-        (
+        ToolSpec(
             reconstruct_full_scene,
-            "sam_reconstruct",
-            runtime.is_sam_reconstruct_tool_enabled,
-            "requires ENABLE_SAM_RECONSTRUCT=true",
+            conditions=(_require_env_true("ENABLE_SAM_RECONSTRUCT"),),
+            service_dependency="sam_reconstruct",
+            service_reason="sam_reconstruct service must be healthy",
         ),
-        (
+        ToolSpec(
             generate_trellis2_model,
-            "trellis2",
-            runtime.is_trellis2_tool_enabled,
-            "requires BLENDER_MODE=headless and ENABLE_TRELLIS2=true",
+            conditions=(
+                _require_blender_mode("headless"),
+                _require_env_true("ENABLE_TRELLIS2"),
+            ),
+            service_dependency="trellis2",
+            service_reason="trellis2 service must be healthy",
         ),
-        (
+        ToolSpec(
             generate_hyper3d_model_via_text,
-            None,
-            _is_rodin_fully_enabled,
-            "requires BLENDER_MODE in {local-client, headless} and ENABLE_RODIN=true and RODIN_API_KEY configured",
+            conditions=(
+                _require_blender_mode("local-client", "headless"),
+                _require_env_true("ENABLE_RODIN"),
+                _require_env_configured("RODIN_API_KEY"),
+            ),
         ),
-        (
+        ToolSpec(
             generate_hyper3d_model_via_images,
-            None,
-            _is_rodin_fully_enabled,
-            "requires BLENDER_MODE in {local-client, headless} and ENABLE_RODIN=true and RODIN_API_KEY configured",
+            conditions=(
+                _require_blender_mode("local-client", "headless"),
+                _require_env_true("ENABLE_RODIN"),
+                _require_env_configured("RODIN_API_KEY"),
+            ),
         ),
-        (
+        ToolSpec(
             poll_rodin_job_status,
-            None,
-            _is_rodin_fully_enabled,
-            "requires BLENDER_MODE in {local-client, headless} and ENABLE_RODIN=true and RODIN_API_KEY configured",
+            conditions=(
+                _require_blender_mode("local-client", "headless"),
+                _require_env_true("ENABLE_RODIN"),
+                _require_env_configured("RODIN_API_KEY"),
+            ),
         ),
-        (
+        ToolSpec(
             import_generated_asset,
-            None,
-            _is_rodin_fully_enabled,
-            "requires BLENDER_MODE in {local-client, headless} and ENABLE_RODIN=true and RODIN_API_KEY configured",
+            conditions=(
+                _require_blender_mode("local-client", "headless"),
+                _require_env_true("ENABLE_RODIN"),
+                _require_env_configured("RODIN_API_KEY"),
+            ),
         ),
-        (
+        ToolSpec(
             search_sketchfab_models,
-            None,
-            _is_sketchfab_fully_enabled,
-            "requires ENABLE_SKETCHFAB=true, SKETCHFAB_API_KEY configured, and reachable Sketchfab API",
+            conditions=(
+                _require_env_true("ENABLE_SKETCHFAB"),
+                _require_env_configured("SKETCHFAB_API_KEY"),
+                _require_sketchfab_api_reachable(),
+            ),
         ),
-        (
+        ToolSpec(
             get_sketchfab_model_preview,
-            None,
-            _is_sketchfab_fully_enabled,
-            "requires ENABLE_SKETCHFAB=true, SKETCHFAB_API_KEY configured, and reachable Sketchfab API",
+            conditions=(
+                _require_env_true("ENABLE_SKETCHFAB"),
+                _require_env_configured("SKETCHFAB_API_KEY"),
+                _require_sketchfab_api_reachable(),
+            ),
         ),
-        (
+        ToolSpec(
             download_sketchfab_model,
-            None,
-            _is_sketchfab_fully_enabled,
-            "requires ENABLE_SKETCHFAB=true, SKETCHFAB_API_KEY configured, and reachable Sketchfab API",
+            conditions=(
+                _require_env_true("ENABLE_SKETCHFAB"),
+                _require_env_configured("SKETCHFAB_API_KEY"),
+                _require_sketchfab_api_reachable(),
+            ),
         ),
-        (
+        ToolSpec(
             generate_hunyuan3d_model,
-            None,
-            runtime.is_hunyuan_tool_enabled,
-            "requires BLENDER_MODE=headless and ENABLE_HUNYUAN=true",
+            conditions=(
+                _require_blender_mode("headless"),
+                _require_env_true("ENABLE_HUNYUAN"),
+            ),
         ),
-        (
+        ToolSpec(
             search_3d_assets_by_text,
-            "objaverse_retrieval",
-            runtime.is_objaverse_retrieval_tool_enabled,
-            "requires ASSET_RETRIEVAL_BACKEND=objaverse",
+            conditions=(_require_retrieval_provider("objaverse"),),
+            service_dependency="objaverse_retrieval",
+            service_reason="objaverse_retrieval service must be healthy",
         ),
-        (
+        ToolSpec(
             import_retrieved_asset,
-            "objaverse_retrieval",
-            runtime.is_objaverse_retrieval_tool_enabled,
-            "requires ASSET_RETRIEVAL_BACKEND=objaverse",
+            conditions=(_require_retrieval_provider("objaverse"),),
+            service_dependency="objaverse_retrieval",
+            service_reason="objaverse_retrieval service must be healthy",
         ),
-        (
+        ToolSpec(
             search_hssd_assets,
-            "scenesmith_hssd",
-            _is_scenesmith_hssd_fully_enabled,
-            "requires ASSET_RETRIEVAL_BACKEND=scenesmith and healthy /hssd/healthz",
+            conditions=(_require_retrieval_provider("scenesmith"),),
+            service_dependency="scenesmith_hssd",
+            service_reason="scenesmith_hssd service must be healthy (/hssd/healthz)",
         ),
-        (
+        ToolSpec(
             import_hssd_asset,
-            "scenesmith_hssd",
-            _is_scenesmith_hssd_fully_enabled,
-            "requires ASSET_RETRIEVAL_BACKEND=scenesmith and healthy /hssd/healthz",
+            conditions=(_require_retrieval_provider("scenesmith"),),
+            service_dependency="scenesmith_hssd",
+            service_reason="scenesmith_hssd service must be healthy (/hssd/healthz)",
         ),
-        (
+        ToolSpec(
             search_ambientcg_materials,
-            "scenesmith_ambientcg",
-            _is_scenesmith_ambientcg_fully_enabled,
-            "requires ASSET_RETRIEVAL_BACKEND=scenesmith, "
-            "ENABLE_AMBIENTCG=true, and healthy /ambientcg/healthz",
+            conditions=(_require_env_true("ENABLE_AMBIENTCG"),),
+            service_dependency="scenesmith_ambientcg",
+            service_reason="scenesmith_ambientcg service must be healthy (/ambientcg/healthz)",
         ),
-        (
+        ToolSpec(
             apply_ambientcg_material,
-            "scenesmith_ambientcg",
-            _is_scenesmith_ambientcg_fully_enabled,
-            "requires ASSET_RETRIEVAL_BACKEND=scenesmith, "
-            "ENABLE_AMBIENTCG=true, and healthy /ambientcg/healthz",
+            conditions=(_require_env_true("ENABLE_AMBIENTCG"),),
+            service_dependency="scenesmith_ambientcg",
+            service_reason="scenesmith_ambientcg service must be healthy (/ambientcg/healthz)",
         ),
-        (
+        ToolSpec(
             render_from_objects,
-            None,
-            _is_headless_mode,
-            "requires BLENDER_MODE=headless",
+            conditions=(_require_blender_mode("headless"),),
         ),
-        (
+        ToolSpec(
             render_from_camera,
-            None,
-            _is_headless_mode,
-            "requires BLENDER_MODE=headless",
+            conditions=(_require_blender_mode("headless"),),
         ),
-        (
+        ToolSpec(
             camera_set_pose,
-            None,
-            _is_headless_mode,
-            "requires BLENDER_MODE=headless",
+            conditions=(_require_blender_mode("headless"),),
         ),
-        (
+        ToolSpec(
             camera_observe,
-            None,
-            _is_headless_mode,
-            "requires BLENDER_MODE=headless",
+            conditions=(_require_blender_mode("headless"),),
         ),
-        (
+        ToolSpec(
             camera_act,
-            None,
-            _is_headless_mode,
-            "requires BLENDER_MODE=headless",
+            conditions=(_require_blender_mode("headless"),),
         ),
-        (
+        ToolSpec(
             observe_scene_global,
-            None,
-            _is_headless_mode,
-            "requires BLENDER_MODE=headless",
+            conditions=(_require_blender_mode("headless"),),
         ),
-        (
+        ToolSpec(
             undo_last_snapshot,
-            None,
-            _is_headless_mode,
-            "requires BLENDER_MODE=headless",
+            conditions=(_require_blender_mode("headless"),),
         ),
     ]
 
     enabled: list[str] = []
-    skipped: list[str] = []
-    for func, dependency, gate_fn, gate_reason in tool_specs:
-        if dependency and not service_status.get(dependency, False):
-            skipped.append(f"{func.__name__} (requires {dependency})")
+    disabled: list[tuple[str, list[str]]] = []
+    tool_status_lines: list[tuple[str, str, str]] = []
+    for spec in tool_specs:
+        unmet_conditions = [
+            reason
+            for condition in spec.conditions
+            if (reason := condition()) is not None
+        ]
+        if not unmet_conditions and spec.service_dependency and not service_status.get(
+            spec.service_dependency, False
+        ):
+            unmet_conditions.append(
+                spec.service_reason
+                or f"{spec.service_dependency} service must be healthy"
+            )
+        if unmet_conditions:
+            disabled.append((spec.func.__name__, unmet_conditions))
+            tool_status_lines.append(
+                (spec.func.__name__, "DISABLED", "; ".join(unmet_conditions))
+            )
             continue
-        if gate_fn and not gate_fn():
-            skipped.append(f"{func.__name__} ({gate_reason or 'disabled by runtime gate'})")
-            continue
-        mcp.add_tool(func)
-        enabled.append(func.__name__)
+        mcp.add_tool(spec.func)
+        enabled.append(spec.func.__name__)
+        tool_status_lines.append((spec.func.__name__, "ENABLED", "ready"))
 
     _enabled_tool_names = enabled
     _tools_registered = True
 
-    print(f"[mcp_server] enabled_tools={','.join(enabled)}", flush=True)
-    if skipped:
-        print(f"[mcp_server] skipped_tools={'; '.join(skipped)}", flush=True)
-    logger.info("Enabled MCP tools: %s", ", ".join(enabled))
-    if skipped:
-        logger.info("Skipped MCP tools: %s", "; ".join(skipped))
+    summary = (
+        f"enabled={len(enabled)} disabled={len(disabled)} total={len(tool_specs)}"
+    )
+    print(f"[mcp_server] tool_registry_summary {summary}", flush=True)
+    logger.info("MCP tool registry summary: %s", summary)
+    for tool_name, status, detail in tool_status_lines:
+        print(
+            f"[mcp_server] tool_status name={tool_name} status={status.lower()} detail={detail}",
+            flush=True,
+        )
+        logger.info(
+            "MCP tool status | %-32s | %-8s | %s",
+            tool_name,
+            status,
+            detail,
+        )
 
     return enabled
