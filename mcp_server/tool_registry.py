@@ -14,6 +14,7 @@ from mcp_server.tools.asset_gen.rodin import (
 )
 from mcp_server.tools.asset_gen.sam_reconstruct import reconstruct_full_scene
 from mcp_server.tools.asset_gen.trellis2 import generate_trellis2_model
+from mcp_server.tools.asset_gen.tripo import generate_tripo3d_model
 from mcp_server.tools.asset_retrieval.objaverse_retrieval import (
     import_retrieved_asset,
     search_3d_assets_by_text,
@@ -81,6 +82,7 @@ def register_mcp_tools(mcp, logger) -> list[str]:
     enable_hunyuan = runtime.is_hunyuan_tool_enabled()
     enable_polyhaven = runtime.is_polyhaven_tool_enabled()
     enable_rodin = runtime.is_rodin_tool_enabled()
+    enable_tripo = runtime.is_tripo_tool_enabled()
     enable_trellis2 = runtime.is_trellis2_tool_enabled()
     enable_retrieval = runtime.is_retrieval_tool_enabled()
     enable_scenesmith_hssd = runtime.is_scenesmith_hssd_tool_enabled()
@@ -89,9 +91,11 @@ def register_mcp_tools(mcp, logger) -> list[str]:
     enable_sketchfab = runtime.is_sketchfab_tool_enabled()
     sketchfab_api_reachable = runtime.probe_sketchfab_api(logger) if enable_sketchfab else None
     has_rodin_key = bool(runtime.get_rodin_api_key())
+    has_tripo_key = bool(runtime.get_tripo_api_key())
     has_sketchfab_key = bool(runtime.get_sketchfab_api_key())
     generator_switches = {
         "ENABLE_RODIN": runtime.parse_env_bool("ENABLE_RODIN", False),
+        "ENABLE_TRIPO": runtime.parse_env_bool("ENABLE_TRIPO", False),
         "ENABLE_TRELLIS2": runtime.parse_env_bool("ENABLE_TRELLIS2", False),
         "ENABLE_HUNYUAN": runtime.parse_env_bool("ENABLE_HUNYUAN", False),
     }
@@ -168,8 +172,8 @@ def register_mcp_tools(mcp, logger) -> list[str]:
     ]
     if len(enabled_generator_switches) > 1:
         raise RuntimeError(
-            "Invalid tool configuration: ENABLE_RODIN, ENABLE_TRELLIS2, and "
-            "ENABLE_HUNYUAN are mutually exclusive; enable only one. "
+            "Invalid tool configuration: ENABLE_RODIN, ENABLE_TRIPO, ENABLE_TRELLIS2, "
+            "and ENABLE_HUNYUAN are mutually exclusive; enable only one. "
             f"Currently enabled: {', '.join(enabled_generator_switches)}."
         )
     if enable_retrieval and _is_sketchfab_fully_enabled():
@@ -182,15 +186,17 @@ def register_mcp_tools(mcp, logger) -> list[str]:
         (
             "Tool-gating context: BLENDER_MODE=%s ENABLE_HUNYUAN=%s "
             "ENABLE_POLYHAVEN=%s "
-            "ENABLE_RODIN=%s ENABLE_TRELLIS2=%s ASSET_RETRIEVAL_BACKEND=%s "
+            "ENABLE_RODIN=%s ENABLE_TRIPO=%s ENABLE_TRELLIS2=%s ASSET_RETRIEVAL_BACKEND=%s "
             "SCENESMITH_HSSD=%s ENABLE_AMBIENTCG=%s "
             "ENABLE_INFINIGEN=%s ENABLE_SKETCHFAB=%s RODIN_API_KEY_SET=%s "
+            "TRIPO_API_KEY_SET=%s "
             "SKETCHFAB_API_KEY_SET=%s SKETCHFAB_API_REACHABLE=%s"
         ),
         mode_name,
         enable_hunyuan,
         enable_polyhaven,
         enable_rodin,
+        enable_tripo,
         enable_trellis2,
         retrieval_backend,
         enable_scenesmith_hssd,
@@ -198,6 +204,7 @@ def register_mcp_tools(mcp, logger) -> list[str]:
         enable_infinigen,
         enable_sketchfab,
         has_rodin_key,
+        has_tripo_key,
         has_sketchfab_key,
         sketchfab_api_reachable,
     )
@@ -252,6 +259,14 @@ def register_mcp_tools(mcp, logger) -> list[str]:
             ),
             service_dependency="trellis2",
             service_reason="trellis2 service must be healthy",
+        ),
+        ToolSpec(
+            generate_tripo3d_model,
+            conditions=(
+                _require_blender_mode("local-client", "headless"),
+                _require_env_true("ENABLE_TRIPO"),
+                _require_env_configured("TRIPO_API_KEY"),
+            ),
         ),
         ToolSpec(
             generate_hyper3d_model_via_text,

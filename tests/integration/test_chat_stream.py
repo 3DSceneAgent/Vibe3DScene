@@ -515,6 +515,22 @@ def test_chat_stream_emits_done(monkeypatch):
 
 
 def test_chat_stream_emits_error(monkeypatch):
+    logged_errors: list[dict[str, object]] = []
+
+    original_log_event = routes_chat.log_event
+
+    def capture_log_event(level, message, context=None):
+        if message == "stream_failed":
+            logged_errors.append(
+                {
+                    "level": level,
+                    "message": message,
+                    "context": context or {},
+                }
+            )
+        return original_log_event(level, message, context)
+
+    monkeypatch.setattr(routes_chat, "log_event", capture_log_event)
     monkeypatch.setattr(api_module, "get_agent", fake_get_failing_agent)
     client = TestClient(api_module.app)
 
@@ -526,6 +542,13 @@ def test_chat_stream_emits_error(monkeypatch):
     assert error_payload is not None
     assert "stream failed" in error_payload["error"]
     assert isinstance(error_payload.get("seq"), int)
+    assert logged_errors
+    context = logged_errors[0]["context"]
+    assert context["exception_type"] == "RuntimeError"
+    assert isinstance(context.get("stream_progress"), dict)
+    recent_stream_events = context.get("recent_stream_events")
+    assert isinstance(recent_stream_events, list)
+    assert recent_stream_events
 
 
 def test_chat_stream_can_resume_with_last_event_id(monkeypatch):

@@ -7,11 +7,19 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls'
 // @ts-expect-error project does not include three example type declarations in this workspace.
 import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader'
-import { environmentPresets, type EnvironmentPreset } from '../constants/environmentPresets'
+// @ts-expect-error project does not include three example type declarations in this workspace.
+import { Sky } from 'three/examples/jsm/objects/Sky'
+import {
+  environmentPresets,
+  type EnvironmentPreset,
+  type EnvironmentPresetConfig
+} from '../constants/environmentPresets'
 import type { SceneHierarchyNode } from '../state/types'
 
 type ViewportTheme = 'auto' | 'dark' | 'light'
 type UiTheme = 'dark' | 'light'
+type ProceduralSkyConfig = NonNullable<EnvironmentPresetConfig['proceduralSky']>
+const PROCEDURAL_SKY_RADIUS = 450
 
 type GltfViewerProps = {
   gltfUrl: string | null
@@ -254,6 +262,38 @@ function visitMaterials(
   visitor(material)
 }
 
+function getProceduralSunPosition(config: ProceduralSkyConfig): THREE.Vector3 {
+  const phi = THREE.MathUtils.degToRad(90 - config.elevation)
+  const theta = THREE.MathUtils.degToRad(config.azimuth)
+  return new THREE.Vector3().setFromSphericalCoords(1, phi, theta).normalize()
+}
+
+function applyProceduralSkyUniforms(sky: Sky, config: ProceduralSkyConfig): void {
+  const material = sky.material as THREE.ShaderMaterial & {
+    uniforms: {
+      turbidity: { value: number }
+      rayleigh: { value: number }
+      mieCoefficient: { value: number }
+      mieDirectionalG: { value: number }
+      sunPosition: { value: THREE.Vector3 }
+    }
+  }
+  const sunPosition = getProceduralSunPosition(config)
+
+  material.uniforms.turbidity.value = config.turbidity
+  material.uniforms.rayleigh.value = config.rayleigh
+  material.uniforms.mieCoefficient.value = config.mieCoefficient
+  material.uniforms.mieDirectionalG.value = config.mieDirectionalG
+  material.uniforms.sunPosition.value.copy(sunPosition)
+}
+
+function createProceduralSky(config: ProceduralSkyConfig): Sky {
+  const sky = new Sky()
+  sky.scale.setScalar(PROCEDURAL_SKY_RADIUS)
+  applyProceduralSkyUniforms(sky, config)
+  return sky
+}
+
 function applyTwoSidedRenderingState(
   object: THREE.Object3D | null,
   enabled: boolean,
@@ -300,12 +340,15 @@ export function GltfViewer({
   const controlsRef = useRef<OrbitControls | null>(null)
   const modelRef = useRef<THREE.Object3D | null>(null)
   const gridRef = useRef<THREE.GridHelper | null>(null)
-  const lightRef = useRef<{ ambient: THREE.AmbientLight; directional: THREE.DirectionalLight } | null>(
-    null
-  )
+  const lightRef = useRef<{
+    ambient: THREE.AmbientLight
+    hemisphere: THREE.HemisphereLight
+    directional: THREE.DirectionalLight
+  } | null>(null)
   const pmremGeneratorRef = useRef<THREE.PMREMGenerator | null>(null)
   const environmentRenderTargetRef = useRef<THREE.WebGLRenderTarget | null>(null)
   const environmentBackgroundTextureRef = useRef<THREE.DataTexture | null>(null)
+  const environmentBackdropRef = useRef<THREE.Object3D | null>(null)
   const environmentLoadTokenRef = useRef(0)
   const loadTokenRef = useRef(0)
   const hasLoadedModelRef = useRef(false)
@@ -370,9 +413,10 @@ export function GltfViewer({
     camera.position.set(9, 7, 9)
 
     const ambient = new THREE.AmbientLight('#ffffff', 0.55)
+    const hemisphere = new THREE.HemisphereLight('#dcefff', '#4d5563', 0)
     const directional = new THREE.DirectionalLight('#ffffff', 1.2)
     directional.position.set(8, 14, 6)
-    scene.add(ambient, directional)
+    scene.add(ambient, hemisphere, directional)
 
     const defaultGrid = new THREE.GridHelper(
       20,
@@ -424,11 +468,14 @@ export function GltfViewer({
     cameraRef.current = camera
     controlsRef.current = controls
     gridRef.current = defaultGrid
-    lightRef.current = { ambient, directional }
+    lightRef.current = { ambient, hemisphere, directional }
     pmremGeneratorRef.current = pmremGenerator
 
     let animationFrame = 0
     const animate = () => {
+      if (environmentBackdropRef.current) {
+        environmentBackdropRef.current.position.copy(camera.position)
+      }
       controls.update()
       renderer.render(scene, camera)
       animationFrame = window.requestAnimationFrame(animate)
@@ -449,6 +496,11 @@ export function GltfViewer({
       if (environmentBackgroundTextureRef.current) {
         environmentBackgroundTextureRef.current.dispose()
         environmentBackgroundTextureRef.current = null
+      }
+      if (environmentBackdropRef.current) {
+        scene.remove(environmentBackdropRef.current)
+        disposeObject3D(environmentBackdropRef.current)
+        environmentBackdropRef.current = null
       }
       pmremGenerator.dispose()
       pmremGeneratorRef.current = null
@@ -488,15 +540,36 @@ export function GltfViewer({
 
   useEffect(() => {
     if (!lightRef.current) return
-    const { ambient, directional } = lightRef.current
+    const { ambient, hemisphere, directional } = lightRef.current
+    const proceduralSky = preset.proceduralSky
 
-    if (useFallbackLighting) {
+    if (proceduralSky) {
+      const sunPosition = getProceduralSunPosition(proceduralSky)
+      ambient.color = new THREE.Color('#ffffff')
+      ambient.intensity = useFallbackLighting ? preset.ambient : 0.015
+      hemisphere.color = new THREE.Color(proceduralSky.skyColor)
+      hemisphere.groundColor = new THREE.Color(proceduralSky.groundColor)
+      hemisphere.intensity = useFallbackLighting
+        ? proceduralSky.hemisphereIntensity
+        : Math.max(0.06, proceduralSky.hemisphereIntensity * 0.2)
+      directional.color = new THREE.Color(proceduralSky.sunColor)
+      directional.intensity = useFallbackLighting
+        ? proceduralSky.sunIntensity
+        : Math.max(0.18, proceduralSky.sunIntensity * 0.22)
+      directional.position.copy(sunPosition).multiplyScalar(60)
+    } else if (useFallbackLighting) {
       ambient.color = new THREE.Color(preset.color)
+      hemisphere.color = new THREE.Color('#ffffff')
+      hemisphere.groundColor = new THREE.Color('#111111')
+      hemisphere.intensity = 0
       directional.color = new THREE.Color(preset.color)
       ambient.intensity = preset.ambient
       directional.intensity = preset.directional
     } else {
       ambient.color = new THREE.Color('#ffffff')
+      hemisphere.color = new THREE.Color('#ffffff')
+      hemisphere.groundColor = new THREE.Color('#111111')
+      hemisphere.intensity = 0
       directional.color = new THREE.Color('#ffffff')
       ambient.intensity = 0.08
       directional.intensity = 0.2
@@ -505,15 +578,15 @@ export function GltfViewer({
     if (rendererRef.current) {
       rendererRef.current.toneMappingExposure = useFallbackLighting ? preset.exposure : 0.82
     }
-  }, [preset.ambient, preset.color, preset.directional, preset.exposure, useFallbackLighting])
+  }, [preset, useFallbackLighting])
 
   useEffect(() => {
     const scene = sceneRef.current
     const pmremGenerator = pmremGeneratorRef.current
     if (!scene || !pmremGenerator) return
+    const proceduralSky = preset.proceduralSky
 
-    if (!preset.hdriUrl) {
-      environmentLoadTokenRef.current += 1
+    const disposeEnvironmentResources = () => {
       if (environmentRenderTargetRef.current) {
         environmentRenderTargetRef.current.dispose()
         environmentRenderTargetRef.current = null
@@ -524,15 +597,72 @@ export function GltfViewer({
       }
       scene.environment = null
       ;(scene as THREE.Scene & { environmentIntensity?: number }).environmentIntensity = 0
-      scene.background = new THREE.Color(viewportPaletteRef.current.background)
-      return
     }
 
-    ;(scene as THREE.Scene & { environmentIntensity?: number }).environmentIntensity =
-      useFallbackLighting ? 1.0 : 0.35
+    const removeEnvironmentBackdrop = () => {
+      if (!environmentBackdropRef.current) return
+      scene.remove(environmentBackdropRef.current)
+      disposeObject3D(environmentBackdropRef.current)
+      environmentBackdropRef.current = null
+    }
+
+    const applyViewportBackground = () => {
+      scene.background = new THREE.Color(viewportPaletteRef.current.background)
+    }
 
     const loadToken = environmentLoadTokenRef.current + 1
     environmentLoadTokenRef.current = loadToken
+    removeEnvironmentBackdrop()
+    applyViewportBackground()
+
+    if (proceduralSky) {
+      disposeEnvironmentResources()
+
+      const environmentScene = new THREE.Scene()
+      const environmentSky = createProceduralSky(proceduralSky)
+      environmentScene.add(environmentSky)
+      const renderTarget = pmremGenerator.fromScene(environmentScene, 0, 0.1, 1000)
+
+      if (environmentLoadTokenRef.current !== loadToken) {
+        renderTarget.dispose()
+        disposeObject3D(environmentSky)
+        return
+      }
+
+      environmentRenderTargetRef.current = renderTarget
+      scene.environment = renderTarget.texture
+      ;(scene as THREE.Scene & { environmentIntensity?: number }).environmentIntensity = useFallbackLighting
+        ? proceduralSky.environmentIntensity
+        : Math.max(0.2, proceduralSky.environmentIntensity * 0.35)
+
+      if (showHdriBackground) {
+        const backgroundSky = createProceduralSky(proceduralSky)
+        backgroundSky.frustumCulled = false
+        backgroundSky.renderOrder = -1
+        if (cameraRef.current) {
+          backgroundSky.position.copy(cameraRef.current.position)
+        }
+        const backgroundMaterial = backgroundSky.material as THREE.ShaderMaterial
+        backgroundMaterial.depthWrite = false
+        scene.add(backgroundSky)
+        environmentBackdropRef.current = backgroundSky
+      }
+
+      disposeObject3D(environmentSky)
+      return
+    }
+
+    if (!preset.hdriUrl) {
+      disposeEnvironmentResources()
+      applyViewportBackground()
+      return
+    }
+
+    disposeEnvironmentResources()
+    applyViewportBackground()
+    ;(scene as THREE.Scene & { environmentIntensity?: number }).environmentIntensity =
+      useFallbackLighting ? 1.0 : 0.35
+
     const loader = new RGBELoader()
     loader.setDataType(THREE.HalfFloatType)
     loader.load(
@@ -570,21 +700,12 @@ export function GltfViewer({
       undefined,
       (error: unknown) => {
         if (environmentLoadTokenRef.current !== loadToken) return
-        if (environmentRenderTargetRef.current) {
-          environmentRenderTargetRef.current.dispose()
-          environmentRenderTargetRef.current = null
-        }
-        if (environmentBackgroundTextureRef.current) {
-          environmentBackgroundTextureRef.current.dispose()
-          environmentBackgroundTextureRef.current = null
-        }
-        scene.environment = null
-        ;(scene as THREE.Scene & { environmentIntensity?: number }).environmentIntensity = 0
-        scene.background = new THREE.Color(viewportPaletteRef.current.background)
+        disposeEnvironmentResources()
+        applyViewportBackground()
         console.warn('Failed to load HDR environment map', error)
       }
     )
-  }, [preset.hdriUrl, showHdriBackground, useFallbackLighting])
+  }, [preset, showHdriBackground, useFallbackLighting])
 
   useEffect(() => {
     const scene = sceneRef.current

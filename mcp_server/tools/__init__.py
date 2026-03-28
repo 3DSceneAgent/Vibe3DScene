@@ -15,6 +15,7 @@ from mcp_server.tools.asset_gen import (
     generate_hyper3d_model_via_text,
     reconstruct_full_scene,
     generate_trellis2_model,
+    generate_tripo3d_model,
     import_generated_asset,
     poll_rodin_job_status,
 )
@@ -71,6 +72,7 @@ __all__ = [
     "generate_infinigen_assets",
     "reconstruct_full_scene",
     "generate_trellis2_model",
+    "generate_tripo3d_model",
     "get_infinigen_available_assets",
     "get_object_info",
     "get_scene_info",

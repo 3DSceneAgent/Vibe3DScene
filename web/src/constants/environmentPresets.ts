@@ -1,4 +1,26 @@
-export type EnvironmentPreset = 'none' | 'studio' | 'sunset' | 'daylight' | 'overcast' | 'workshop'
+export type EnvironmentPreset =
+  | 'none'
+  | 'skylight'
+  | 'studio'
+  | 'sunset'
+  | 'daylight'
+  | 'overcast'
+  | 'workshop'
+
+export type ProceduralSkyConfig = {
+  turbidity: number
+  rayleigh: number
+  mieCoefficient: number
+  mieDirectionalG: number
+  elevation: number
+  azimuth: number
+  skyColor: string
+  groundColor: string
+  hemisphereIntensity: number
+  sunColor: string
+  sunIntensity: number
+  environmentIntensity: number
+}
 
 export type EnvironmentPresetConfig = {
   label: string
@@ -9,11 +31,12 @@ export type EnvironmentPresetConfig = {
   exposure: number
   hdriUrl: string | null
   sourceUrl: string | null
+  proceduralSky?: ProceduralSkyConfig | null
 }
 
 export const DEFAULT_ENVIRONMENT_PRESET: EnvironmentPreset = 'studio'
 
-// HDRIs are bundled locally from Poly Haven so the viewport works offline.
+// Viewport presets may use bundled HDRIs or a procedural sky so lighting works offline.
 export const environmentPresets: Record<EnvironmentPreset, EnvironmentPresetConfig> = {
   none: {
     label: 'None',
@@ -23,7 +46,32 @@ export const environmentPresets: Record<EnvironmentPreset, EnvironmentPresetConf
     color: '#ffffff',
     exposure: 1.0,
     hdriUrl: null,
-    sourceUrl: null
+    sourceUrl: null,
+    proceduralSky: null
+  },
+  skylight: {
+    label: 'Skylight',
+    description: 'Procedural daylight sky with PMREM-based environment lighting and no HDRI asset.',
+    ambient: 0.04,
+    directional: 1.35,
+    color: '#dcefff',
+    exposure: 0.96,
+    hdriUrl: null,
+    sourceUrl: null,
+    proceduralSky: {
+      turbidity: 3.8,
+      rayleigh: 1.9,
+      mieCoefficient: 0.018,
+      mieDirectionalG: 0.84,
+      elevation: 42,
+      azimuth: 132,
+      skyColor: '#dcefff',
+      groundColor: '#4d5563',
+      hemisphereIntensity: 0.85,
+      sunColor: '#fff2d6',
+      sunIntensity: 1.35,
+      environmentIntensity: 1.0
+    }
   },
   studio: {
     label: 'Studio',
@@ -33,7 +81,8 @@ export const environmentPresets: Record<EnvironmentPreset, EnvironmentPresetConf
     color: '#ffffff',
     exposure: 1.0,
     hdriUrl: '/hdri/poly_haven_studio_1k.hdr',
-    sourceUrl: 'https://polyhaven.com/a/poly_haven_studio'
+    sourceUrl: 'https://polyhaven.com/a/poly_haven_studio',
+    proceduralSky: null
   },
   sunset: {
     label: 'Sunset',
@@ -43,7 +92,8 @@ export const environmentPresets: Record<EnvironmentPreset, EnvironmentPresetConf
     color: '#ffd9bc',
     exposure: 0.95,
     hdriUrl: '/hdri/venice_sunset_1k.hdr',
-    sourceUrl: 'https://polyhaven.com/a/venice_sunset'
+    sourceUrl: 'https://polyhaven.com/a/venice_sunset',
+    proceduralSky: null
   },
   daylight: {
     label: 'Daylight',
@@ -53,7 +103,8 @@ export const environmentPresets: Record<EnvironmentPreset, EnvironmentPresetConf
     color: '#d6e8ff',
     exposure: 1.0,
     hdriUrl: '/hdri/syferfontein_1d_clear_1k.hdr',
-    sourceUrl: 'https://polyhaven.com/a/syferfontein_1d_clear'
+    sourceUrl: 'https://polyhaven.com/a/syferfontein_1d_clear',
+    proceduralSky: null
   },
   overcast: {
     label: 'Overcast',
@@ -63,7 +114,8 @@ export const environmentPresets: Record<EnvironmentPreset, EnvironmentPresetConf
     color: '#edf3ff',
     exposure: 0.92,
     hdriUrl: '/hdri/plac_wolnosci_1k.hdr',
-    sourceUrl: 'https://polyhaven.com/a/plac_wolnosci'
+    sourceUrl: 'https://polyhaven.com/a/plac_wolnosci',
+    proceduralSky: null
   },
   workshop: {
     label: 'Workshop',
@@ -73,7 +125,8 @@ export const environmentPresets: Record<EnvironmentPreset, EnvironmentPresetConf
     color: '#ffe5d2',
     exposure: 0.9,
     hdriUrl: '/hdri/aerodynamics_workshop_1k.hdr',
-    sourceUrl: 'https://polyhaven.com/a/aerodynamics_workshop'
+    sourceUrl: 'https://polyhaven.com/a/aerodynamics_workshop',
+    proceduralSky: null
   }
 }
 
@@ -86,6 +139,11 @@ export const environmentPresetOptions: Array<{
     value: 'none',
     label: environmentPresets.none.label,
     description: environmentPresets.none.description
+  },
+  {
+    value: 'skylight',
+    label: environmentPresets.skylight.label,
+    description: environmentPresets.skylight.description
   },
   {
     value: 'studio',

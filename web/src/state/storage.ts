@@ -48,6 +48,7 @@ const legacyDarkThemes = new Set(['midnight', 'slate', 'warm'])
 const viewportThemes = new Set<Settings['viewportTheme']>(['auto', 'dark', 'light'])
 const viewportEnvironments = new Set<EnvironmentPreset>([
   'none',
+  'skylight',
   'studio',
   'sunset',
   'daylight',

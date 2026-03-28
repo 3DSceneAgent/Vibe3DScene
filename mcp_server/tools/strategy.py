@@ -42,6 +42,7 @@ def asset_creation_strategy_text(
     infinigen_ready = runtime.is_infinigen_tool_enabled() and service_status.get("pcg_integrator", False)
     trellis2_ready = runtime.is_trellis2_tool_enabled() and service_status.get("trellis2", False)
     rodin_ready = runtime.is_rodin_tool_enabled() and bool(runtime.get_rodin_api_key())
+    tripo_ready = runtime.is_tripo_tool_enabled() and bool(runtime.get_tripo_api_key())
     hunyuan_ready = runtime.is_hunyuan_tool_enabled()
     objaverse_retrieval_ready = runtime.is_objaverse_retrieval_tool_enabled() and service_status.get(
         "objaverse_retrieval", False
@@ -61,6 +62,7 @@ def asset_creation_strategy_text(
         infinigen_ready=infinigen_ready,
         trellis2_ready=trellis2_ready,
         rodin_ready=rodin_ready,
+        tripo_ready=tripo_ready,
         hunyuan_ready=hunyuan_ready,
         objaverse_retrieval_ready=objaverse_retrieval_ready,
         scenesmith_hssd_ready=scenesmith_hssd_ready,

@@ -183,6 +183,10 @@ class FakeStreamingResponse:
         self.headers = headers or {}
         self.status_code = 200
 
+    @property
+    def content(self) -> bytes:
+        return self._body
+
     def raise_for_status(self) -> None:
         return None
 
@@ -288,7 +292,7 @@ def test_flatten_imported_hierarchy_is_safe_for_flat_meshes(monkeypatch):
     assert summary["removed_empties"] == []
 
 
-def test_import_glb_model_uses_obj_importer_for_hunyuan_zip(monkeypatch):
+def test_import_glb_model_falls_back_to_legacy_obj_operator_when_wm_obj_import_is_missing(monkeypatch):
     module, fake_bpy = _load_module(
         monkeypatch,
         "asset_handlers_under_test_zip_import",
@@ -323,7 +327,7 @@ def test_import_glb_model_uses_obj_importer_for_hunyuan_zip(monkeypatch):
     )
     fake_bpy.ops.wm = types.SimpleNamespace(
         obj_import=lambda **kwargs: (_ for _ in ()).throw(
-            AssertionError(f"wm.obj_import fallback should not be used: {kwargs}")
+            RuntimeError('Calling operator "bpy.ops.wm.obj_import" error, could not be found')
         )
     )
 
@@ -357,6 +361,72 @@ def test_import_glb_model_uses_obj_importer_for_hunyuan_zip(monkeypatch):
     assert result["failed_packing_images"] == []
     assert fake_bpy.data.images[0].pack_calls == 1
     assert import_calls and import_calls[0][0] == "obj"
+    assert import_calls[0][1].endswith("model.obj")
+
+
+def test_download_polyhaven_model_uses_wm_obj_import_when_legacy_operator_is_missing(monkeypatch):
+    module, fake_bpy = _load_module(
+        monkeypatch,
+        "asset_handlers_under_test_polyhaven_obj_import",
+        "addon/blender_mcpv_addon/asset_handlers.py",
+    )
+
+    import_calls: list[tuple[str, str]] = []
+
+    def _wm_obj_import(*, filepath: str):
+        import_calls.append(("wm.obj_import", filepath))
+        fake_bpy.data.objects.add(
+            FakeObject(
+                "DownloadedMesh",
+                "MESH",
+                data=FakeMeshData("DownloadedMeshData"),
+            )
+        )
+        return {"FINISHED"}
+
+    def _unexpected_gltf_import(*, filepath: str):
+        raise AssertionError(f"GLTF importer should not be used for {filepath}")
+
+    def _unexpected_fbx_import(*, filepath: str):
+        raise AssertionError(f"FBX importer should not be used for {filepath}")
+
+    def _legacy_obj_import_missing(*, filepath: str):
+        raise RuntimeError('Calling operator "bpy.ops.import_scene.obj" error, could not be found')
+
+    fake_bpy.ops.import_scene = types.SimpleNamespace(
+        gltf=_unexpected_gltf_import,
+        fbx=_unexpected_fbx_import,
+        obj=_legacy_obj_import_missing,
+    )
+    fake_bpy.ops.wm = types.SimpleNamespace(obj_import=_wm_obj_import)
+
+    monkeypatch.setattr(
+        module.requests,
+        "get",
+        lambda *args, **kwargs: FakeStreamingResponse(b"o DownloadedMesh\nv 0 0 0\n"),
+    )
+
+    handler = module.AssetHandlerMixin()
+
+    result = handler._download_polyhaven_model(
+        "downloaded_asset",
+        {
+            "obj": {
+                "1k": {
+                    "obj": {
+                        "url": "https://example.test/assets/downloaded_asset/model.obj",
+                    }
+                }
+            }
+        },
+        "1k",
+        "obj",
+    )
+
+    assert result["success"] is True
+    assert result["imported_objects"] == ["DownloadedMesh"]
+    assert len(import_calls) == 1
+    assert import_calls[0][0] == "wm.obj_import"
     assert import_calls[0][1].endswith("model.obj")
 
 

@@ -147,7 +147,7 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
           </div>
         </div>
         <label className="field checkbox-field">
-          Show HDRI Background
+          Show Environment Background
           <label className="toggle-switch compact">
             <input
               type="checkbox"

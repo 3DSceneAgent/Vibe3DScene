@@ -1,8 +1,10 @@
 """API routes."""
 import asyncio
+from collections import deque
 from dataclasses import dataclass, field
 from importlib import import_module
 import json
+import logging
 import threading
 import time
 import uuid
@@ -46,7 +48,136 @@ async def get_agent(thread_id: str | None = None):
 def _resolve_fast_mode_for_request(request: ChatRequest) -> bool:
     if isinstance(request.fast_mode, bool):
         return request.fast_mode
-    return bool(get_settings().fast_mode_default)
+    return bool(getattr(get_settings(), "fast_mode_default", False))
+
+
+def _truncate_text(value: str, *, limit: int = 240) -> str:
+    if len(value) <= limit:
+        return value
+    return f"{value[:limit]}...[truncated]"
+
+
+def _safe_repr(value: Any, *, limit: int = 240) -> str:
+    try:
+        rendered = repr(value)
+    except Exception as exc:  # pragma: no cover - defensive
+        rendered = f"<repr failed: {type(exc).__name__}: {exc}>"
+    return _truncate_text(rendered, limit=limit)
+
+
+def _summarize_message_for_error(message: Any) -> dict[str, Any]:
+    serialized = sanitize_message_for_stream(serialize_message(message))
+    summary: dict[str, Any] = {
+        "python_type": type(message).__name__,
+        "message_type": serialized.get("type"),
+    }
+    message_id = serialized.get("id")
+    if isinstance(message_id, str) and message_id:
+        summary["id"] = message_id
+    message_name = serialized.get("name")
+    if isinstance(message_name, str) and message_name:
+        summary["name"] = message_name
+    display_text = assistant_message_display_text(serialized)
+    if display_text:
+        summary["text_preview"] = _truncate_text(display_text)
+    reasoning_text = extract_message_reasoning_text(serialized)
+    if reasoning_text:
+        summary["reasoning_preview"] = _truncate_text(reasoning_text)
+    additional_kwargs = serialized.get("additional_kwargs")
+    if isinstance(additional_kwargs, dict) and additional_kwargs:
+        summary["additional_kwargs_keys"] = sorted(additional_kwargs.keys())[:12]
+    tool_calls = serialized.get("tool_calls")
+    if isinstance(tool_calls, list) and tool_calls:
+        summary["tool_call_count"] = len(tool_calls)
+    content = serialized.get("content")
+    if isinstance(content, list):
+        summary["content_block_count"] = len(content)
+    elif isinstance(content, dict):
+        summary["content_keys"] = sorted(content.keys())[:12]
+    return summary
+
+
+def _summarize_stream_payload_for_error(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, dict):
+        summary: dict[str, Any] = {
+            "python_type": "dict",
+            "keys": sorted(str(key) for key in payload.keys())[:20],
+        }
+        if "langgraph_node" in payload and isinstance(payload["langgraph_node"], str):
+            summary["langgraph_node"] = payload["langgraph_node"]
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            summary["message_count"] = len(messages)
+            if messages:
+                summary["message_preview"] = [
+                    _summarize_message_for_error(message) for message in messages[:2]
+                ]
+        elif messages is not None:
+            summary["message_preview"] = [_summarize_message_for_error(messages)]
+        todos = payload.get("todos")
+        if isinstance(todos, list):
+            summary["todo_count"] = len(todos)
+        return summary
+
+    if isinstance(payload, tuple):
+        summary = {
+            "python_type": "tuple",
+            "length": len(payload),
+            "item_types": [type(item).__name__ for item in payload[:4]],
+        }
+        if payload:
+            item_preview: list[dict[str, Any]] = []
+            for item in payload[:2]:
+                if isinstance(item, dict) or hasattr(item, "type") or hasattr(item, "content"):
+                    item_preview.append(_summarize_stream_payload_for_error(item))
+                else:
+                    item_preview.append(
+                        {
+                            "python_type": type(item).__name__,
+                            "repr": _safe_repr(item),
+                        }
+                    )
+            summary["item_preview"] = item_preview
+        return summary
+
+    if isinstance(payload, list):
+        summary = {
+            "python_type": "list",
+            "length": len(payload),
+            "item_types": [type(item).__name__ for item in payload[:4]],
+        }
+        if payload:
+            first = payload[0]
+            if isinstance(first, dict) or hasattr(first, "type") or hasattr(first, "content"):
+                summary["first_item"] = _summarize_stream_payload_for_error(first)
+            else:
+                summary["first_item"] = {
+                    "python_type": type(first).__name__,
+                    "repr": _safe_repr(first),
+                }
+        return summary
+
+    if hasattr(payload, "type") or hasattr(payload, "content"):
+        return _summarize_message_for_error(payload)
+
+    return {
+        "python_type": type(payload).__name__,
+        "python_module": type(payload).__module__,
+        "repr": _safe_repr(payload),
+    }
+
+
+def _summarize_stream_event_for_error(event: Any) -> dict[str, Any]:
+    mode, payload = normalize_stream_event(event)
+    summary: dict[str, Any] = {
+        "event_python_type": type(event).__name__,
+        "payload": _summarize_stream_payload_for_error(payload),
+    }
+    if isinstance(mode, str):
+        summary["mode"] = mode
+    elif mode is not None:
+        summary["mode_payload"] = _summarize_stream_payload_for_error(mode)
+    return summary
 
 
 router = APIRouter()
@@ -66,6 +197,7 @@ _STREAM_REQUEST_ID_HEADER = "X-Stream-Request-Id"
 _STREAM_SESSION_RETAIN_SECONDS = 120.0
 _STREAM_SESSION_HISTORY_LIMIT = 2000
 _STREAM_POLL_INTERVAL_SECONDS = 0.25
+_STREAM_ERROR_EVENT_HISTORY_LIMIT = 5
 _ACTIVE_STREAM_SESSIONS: dict[str, "_ActiveStreamSession"] = {}
 _ACTIVE_STREAM_SESSIONS_LOCK = threading.Lock()
 
@@ -414,6 +546,7 @@ async def _produce_stream_events(
     done_payload: dict[str, Any] | None = None
     next_event_task: asyncio.Task | None = None
     stream: Any = None
+    recent_stream_events: deque[dict[str, Any]] = deque(maxlen=_STREAM_ERROR_EVENT_HISTORY_LIMIT)
 
     try:
         resolve_thread_vlm_for_chat(
@@ -519,6 +652,8 @@ async def _produce_stream_events(
                 break
             finally:
                 next_event_task = None
+
+            recent_stream_events.append(_summarize_stream_event_for_error(event))
 
             if timeout_seconds is not None:
                 idle_deadline = time.time() + timeout_seconds
@@ -735,13 +870,23 @@ async def _produce_stream_events(
         )
         done_payload = {"event": "done", "scene_has_change": scene_has_change}
     except Exception as e:
+        logging.getLogger("scene_agent").exception(
+            "stream_failed_traceback request_id=%s thread_id=%s stream_request_id=%s",
+            session.request_id,
+            request.thread_id,
+            session.stream_request_id,
+        )
         log_event(
             "error",
             "stream_failed",
             {
                 "request_id": session.request_id,
                 "thread_id": request.thread_id,
+                "stream_request_id": session.stream_request_id,
+                "exception_type": type(e).__name__,
                 "error": str(e),
+                "stream_progress": _build_heartbeat_payload(session)["progress"],
+                "recent_stream_events": list(recent_stream_events),
             },
         )
         session.publish({"error": str(e)})

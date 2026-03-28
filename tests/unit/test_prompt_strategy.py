@@ -239,6 +239,27 @@ def test_strategy_includes_image_referenced_hunyuan_comparison_guidance():
     assert "place them side by side" in prompt
 
 
+def test_strategy_includes_tripo_guidance_for_text_and_image_generation():
+    prompt = get_full_system_prompt(
+        [
+            "get_scene_info",
+            "search_3d_assets_by_text",
+            "import_retrieved_asset",
+            "generate_tripo3d_model",
+            "import_glb_model",
+            "execute_blender_code",
+        ]
+    )
+
+    assert "Tripo" in prompt
+    assert "P1-20260311" in prompt
+    assert "input_image_name=... or input_image_id=..." in prompt
+    assert "auto-resolve it for image-to-3D" in prompt
+    assert "preferred_model_asset.url" in prompt
+    assert "import_glb_model(model_url=..., object_name=...)" in prompt
+    assert "compare retrieval vs image-conditioned generation from one reference image" in prompt
+
+
 def test_strategy_requires_blend_import_for_sam_reconstruct_workflow():
     prompt = get_full_system_prompt(
         [
@@ -280,6 +301,8 @@ def test_mcp_strategy_includes_sam_reconstruct_when_runtime_ready(monkeypatch):
     monkeypatch.setattr(strategy_module.runtime, "is_trellis2_tool_enabled", lambda: False)
     monkeypatch.setattr(strategy_module.runtime, "is_rodin_tool_enabled", lambda: False)
     monkeypatch.setattr(strategy_module.runtime, "get_rodin_api_key", lambda: "")
+    monkeypatch.setattr(strategy_module.runtime, "is_tripo_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "get_tripo_api_key", lambda: "")
     monkeypatch.setattr(strategy_module.runtime, "is_hunyuan_tool_enabled", lambda: False)
     monkeypatch.setattr(strategy_module.runtime, "is_retrieval_tool_enabled", lambda: False)
     monkeypatch.setattr(
@@ -310,6 +333,8 @@ def test_mcp_strategy_omits_sketchfab_when_api_unreachable(monkeypatch):
     monkeypatch.setattr(strategy_module.runtime, "is_trellis2_tool_enabled", lambda: False)
     monkeypatch.setattr(strategy_module.runtime, "is_rodin_tool_enabled", lambda: False)
     monkeypatch.setattr(strategy_module.runtime, "get_rodin_api_key", lambda: "")
+    monkeypatch.setattr(strategy_module.runtime, "is_tripo_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "get_tripo_api_key", lambda: "")
     monkeypatch.setattr(strategy_module.runtime, "is_hunyuan_tool_enabled", lambda: False)
     monkeypatch.setattr(strategy_module.runtime, "is_retrieval_tool_enabled", lambda: False)
     monkeypatch.setattr(
@@ -340,6 +365,8 @@ def test_mcp_strategy_omits_polyhaven_when_runtime_disabled(monkeypatch):
     monkeypatch.setattr(strategy_module.runtime, "is_trellis2_tool_enabled", lambda: False)
     monkeypatch.setattr(strategy_module.runtime, "is_rodin_tool_enabled", lambda: False)
     monkeypatch.setattr(strategy_module.runtime, "get_rodin_api_key", lambda: "")
+    monkeypatch.setattr(strategy_module.runtime, "is_tripo_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "get_tripo_api_key", lambda: "")
     monkeypatch.setattr(strategy_module.runtime, "is_hunyuan_tool_enabled", lambda: False)
     monkeypatch.setattr(strategy_module.runtime, "is_retrieval_tool_enabled", lambda: False)
     monkeypatch.setattr(
@@ -372,6 +399,8 @@ def test_mcp_strategy_respects_independent_scenesmith_subservice_readiness(monke
     monkeypatch.setattr(strategy_module.runtime, "is_trellis2_tool_enabled", lambda: False)
     monkeypatch.setattr(strategy_module.runtime, "is_rodin_tool_enabled", lambda: False)
     monkeypatch.setattr(strategy_module.runtime, "get_rodin_api_key", lambda: "")
+    monkeypatch.setattr(strategy_module.runtime, "is_tripo_tool_enabled", lambda: False)
+    monkeypatch.setattr(strategy_module.runtime, "get_tripo_api_key", lambda: "")
     monkeypatch.setattr(strategy_module.runtime, "is_hunyuan_tool_enabled", lambda: False)
     monkeypatch.setattr(strategy_module.runtime, "is_retrieval_tool_enabled", lambda: True)
     monkeypatch.setattr(

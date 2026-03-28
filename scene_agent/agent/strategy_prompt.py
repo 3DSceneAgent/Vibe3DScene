@@ -17,6 +17,7 @@ class AssetWorkflowAvailability(TypedDict):
     infinigen_ready: bool
     trellis2_ready: bool
     rodin_ready: bool
+    tripo_ready: bool
     hunyuan_ready: bool
     objaverse_retrieval_ready: bool
     scenesmith_hssd_ready: bool
@@ -48,6 +49,7 @@ INFINIGEN_WORKFLOW_TOOLS: frozenset[str] = frozenset(
     }
 )
 TRELLIS2_WORKFLOW_TOOLS: frozenset[str] = frozenset({"generate_trellis2_model"})
+TRIPO_WORKFLOW_TOOLS: frozenset[str] = frozenset({"generate_tripo3d_model"})
 RODIN_WORKFLOW_TOOLS: frozenset[str] = frozenset(
     {
         "generate_hyper3d_model_via_text",
@@ -107,6 +109,7 @@ def infer_asset_workflow_availability(
         "infinigen_ready": INFINIGEN_WORKFLOW_TOOLS.issubset(tool_names),
         "trellis2_ready": TRELLIS2_WORKFLOW_TOOLS.issubset(tool_names),
         "rodin_ready": RODIN_WORKFLOW_TOOLS.issubset(tool_names),
+        "tripo_ready": TRIPO_WORKFLOW_TOOLS.issubset(tool_names),
         "hunyuan_ready": HUNYUAN_WORKFLOW_TOOLS.issubset(tool_names),
         "objaverse_retrieval_ready": OBJAVERSE_RETRIEVAL_WORKFLOW_TOOLS.issubset(tool_names),
         "scenesmith_hssd_ready": SCENESMITH_HSSD_WORKFLOW_TOOLS.issubset(tool_names),
@@ -124,6 +127,7 @@ def build_asset_creation_strategy_text(
     infinigen_ready: bool,
     trellis2_ready: bool,
     rodin_ready: bool,
+    tripo_ready: bool,
     hunyuan_ready: bool,
     objaverse_retrieval_ready: bool,
     scenesmith_hssd_ready: bool,
@@ -264,6 +268,20 @@ def build_asset_creation_strategy_text(
             ]
         )
 
+    if tripo_ready:
+        lines.extend(
+            [
+                "   - Tripo",
+                "     - Flow: generate_tripo3d_model(text_prompt=... or input_image_url=...)"
+                " -> import_glb_model(model_url=..., object_name=...)",
+                "     - Built-in polling against the official API; defaults to P1-20260311 with textured output",
+                "     - Speed-oriented defaults: texture_quality='standard' and export_uv=false",
+                "     - When exactly one image is attached to the current request, the runtime can auto-resolve it for image-to-3D",
+                "     - For remembered thread images, use input_image_name=... or input_image_id=...",
+                "     - After generation, prefer preferred_model_asset.url and import it promptly because Tripo URLs expire quickly",
+            ]
+        )
+
     if hunyuan_ready:
         lines.extend(
             [
@@ -345,6 +363,7 @@ def build_asset_creation_strategy_text(
             infinigen_ready,
             trellis2_ready,
             rodin_ready,
+            tripo_ready,
             hunyuan_ready,
             objaverse_retrieval_ready,
             scenesmith_hssd_ready,
@@ -361,6 +380,7 @@ def build_asset_creation_strategy_text(
             infinigen_ready,
             trellis2_ready,
             rodin_ready,
+            tripo_ready,
             hunyuan_ready,
             objaverse_retrieval_ready,
             scenesmith_hssd_ready,
@@ -422,6 +442,10 @@ def build_asset_creation_strategy_text(
         priority_rules.append("For unique custom objects: Retrieval first, then Rodin")
     elif rodin_ready:
         priority_rules.append("For unique custom objects: Rodin")
+    elif tripo_ready and objaverse_retrieval_ready:
+        priority_rules.append("For unique custom objects: Retrieval first, then Tripo")
+    elif tripo_ready:
+        priority_rules.append("For unique custom objects: Tripo")
     elif objaverse_retrieval_ready:
         priority_rules.append("For unique custom objects: Retrieval")
 
@@ -464,7 +488,7 @@ def build_asset_creation_strategy_text(
         lines.append(
             "   - Environment lighting and PBR textures: configure them explicitly via scripting or imported assets."
         )
-    if objaverse_retrieval_ready and (rodin_ready or hunyuan_ready):
+    if objaverse_retrieval_ready and (rodin_ready or tripo_ready or hunyuan_ready):
         lines.append(
             "   - If the user explicitly asks to compare retrieval vs image-conditioned generation from one reference image, do both branches, import both results, then place them side by side for inspection."
         )
@@ -531,6 +555,7 @@ def build_asset_creation_strategy_text(
         for enabled, name in [
             (trellis2_ready, "TRELLIS2"),
             (rodin_ready, "Rodin"),
+            (tripo_ready, "Tripo"),
             (hunyuan_ready, "Hunyuan3D"),
         ]
         if enabled

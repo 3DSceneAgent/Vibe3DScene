@@ -26,6 +26,20 @@ def test_rodin_gate_disabled_outside_supported_modes(monkeypatch):
     assert runtime.is_rodin_tool_enabled() is False
 
 
+def test_tripo_gate_enabled_in_headless_mode(monkeypatch):
+    monkeypatch.setenv("BLENDER_MODE", "headless")
+    monkeypatch.setenv("ENABLE_TRIPO", "true")
+
+    assert runtime.is_tripo_tool_enabled() is True
+
+
+def test_tripo_gate_disabled_outside_supported_modes(monkeypatch):
+    monkeypatch.setenv("BLENDER_MODE", "other")
+    monkeypatch.setenv("ENABLE_TRIPO", "true")
+
+    assert runtime.is_tripo_tool_enabled() is False
+
+
 def test_sam_reconstruct_gate_enabled(monkeypatch):
     monkeypatch.setenv("ENABLE_SAM_RECONSTRUCT", "true")
 

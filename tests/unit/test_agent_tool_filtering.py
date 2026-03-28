@@ -115,3 +115,23 @@ def test_agent_node_keeps_sam_reconstruct_when_exactly_one_image_is_attached():
     message = result["messages"][0]
 
     assert [call["name"] for call in message.tool_calls] == ["reconstruct_full_scene"]
+
+
+def test_agent_node_keeps_sam_reconstruct_when_request_reference_images_are_selected():
+    llm = FakeLLM(
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "reconstruct_full_scene", "args": {}, "id": "tc-8", "type": "tool_call"},
+            ],
+        )
+    )
+
+    result = agent_node(
+        {"messages": [], "request_reference_image_keys": ["chair_ref"]},
+        llm,
+        ["reconstruct_full_scene"],
+    )
+    message = result["messages"][0]
+
+    assert [call["name"] for call in message.tool_calls] == ["reconstruct_full_scene"]

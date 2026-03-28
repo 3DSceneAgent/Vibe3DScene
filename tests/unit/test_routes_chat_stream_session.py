@@ -88,6 +88,18 @@ def test_active_stream_session_caps_history_and_replays_by_sequence(monkeypatch)
     assert [payload["seq"] for payload in session.snapshot_after(3)] == [4, 5]
 
 
+def test_summarize_stream_event_for_error_handles_non_subscriptable_payload() -> None:
+    class DummyResponse:
+        status_code = 200
+
+    summary = routes_chat._summarize_stream_event_for_error(("messages", DummyResponse()))
+
+    assert summary["mode"] == "messages"
+    payload = summary["payload"]
+    assert payload["python_type"] == "DummyResponse"
+    assert payload["python_module"] == __name__
+
+
 def test_run_stream_runtime_heartbeat_touches_local_session_and_registry(monkeypatch) -> None:
     manager = routes_chat.get_session_manager().__class__()
     local_session = manager.ensure("thread-heartbeat", "headless")

@@ -103,6 +103,14 @@ def get_rodin_api_key() -> str:
     return os.getenv("RODIN_API_KEY", "").strip()
 
 
+def is_tripo_tool_enabled() -> bool:
+    return get_blender_mode() in {"local-client", "headless"} and parse_env_bool("ENABLE_TRIPO", False)
+
+
+def get_tripo_api_key() -> str:
+    return os.getenv("TRIPO_API_KEY", "").strip()
+
+
 def is_trellis2_tool_enabled() -> bool:
     return get_blender_mode() == "headless" and parse_env_bool("ENABLE_TRELLIS2", False)
 

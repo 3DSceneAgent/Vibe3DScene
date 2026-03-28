@@ -28,6 +28,8 @@ def _configure_runtime(
     polyhaven: bool = True,
     rodin: bool = False,
     rodin_key: str = "",
+    tripo: bool = False,
+    tripo_key: str = "",
     trellis2: bool = False,
     retrieval: bool = False,
     infinigen: bool = False,
@@ -46,6 +48,7 @@ def _configure_runtime(
         "ENABLE_HUNYUAN": hunyuan,
         "ENABLE_POLYHAVEN": polyhaven,
         "ENABLE_RODIN": rodin,
+        "ENABLE_TRIPO": tripo,
         "ENABLE_TRELLIS2": trellis2,
         "ENABLE_INFINIGEN": infinigen,
         "ENABLE_SAM_RECONSTRUCT": sam_reconstruct,
@@ -60,6 +63,10 @@ def _configure_runtime(
         monkeypatch.setenv("RODIN_API_KEY", rodin_key)
     else:
         monkeypatch.delenv("RODIN_API_KEY", raising=False)
+    if tripo_key:
+        monkeypatch.setenv("TRIPO_API_KEY", tripo_key)
+    else:
+        monkeypatch.delenv("TRIPO_API_KEY", raising=False)
     if sketchfab_key:
         monkeypatch.setenv("SKETCHFAB_API_KEY", sketchfab_key)
     else:
@@ -73,6 +80,7 @@ def _configure_runtime(
     monkeypatch.setattr(tool_registry.runtime, "is_hunyuan_tool_enabled", lambda: hunyuan)
     monkeypatch.setattr(tool_registry.runtime, "is_polyhaven_tool_enabled", lambda: polyhaven)
     monkeypatch.setattr(tool_registry.runtime, "is_rodin_tool_enabled", lambda: rodin)
+    monkeypatch.setattr(tool_registry.runtime, "is_tripo_tool_enabled", lambda: tripo)
     monkeypatch.setattr(tool_registry.runtime, "is_trellis2_tool_enabled", lambda: trellis2)
     monkeypatch.setattr(
         tool_registry.runtime,
@@ -110,6 +118,7 @@ def _configure_runtime(
     )
     monkeypatch.setattr(tool_registry.runtime, "is_sketchfab_tool_enabled", lambda: sketchfab)
     monkeypatch.setattr(tool_registry.runtime, "get_rodin_api_key", lambda: rodin_key)
+    monkeypatch.setattr(tool_registry.runtime, "get_tripo_api_key", lambda: tripo_key)
     monkeypatch.setattr(tool_registry.runtime, "get_sketchfab_api_key", lambda: sketchfab_key)
     monkeypatch.setattr(
         tool_registry.runtime, "probe_sketchfab_api", lambda _logger: sketchfab_reachable
@@ -129,23 +138,31 @@ def _configure_runtime(
 
 
 @pytest.mark.parametrize(
-    ("hunyuan", "rodin", "trellis2"),
+    ("hunyuan", "rodin", "tripo", "trellis2"),
     [
-        (True, False, True),
-        (True, True, False),
-        (False, True, True),
-        (True, True, True),
+        (True, False, False, True),
+        (True, True, False, False),
+        (False, True, True, False),
+        (False, False, True, True),
+        (True, False, True, False),
+        (True, True, True, True),
     ],
 )
 def test_register_mcp_tools_fails_on_generator_conflict(
-    monkeypatch, hunyuan, rodin, trellis2
+    monkeypatch, hunyuan, rodin, tripo, trellis2
 ):
     _reset_registry_state(monkeypatch)
-    _configure_runtime(monkeypatch, hunyuan=hunyuan, rodin=rodin, trellis2=trellis2)
+    _configure_runtime(
+        monkeypatch,
+        hunyuan=hunyuan,
+        rodin=rodin,
+        tripo=tripo,
+        trellis2=trellis2,
+    )
 
     with pytest.raises(
         RuntimeError,
-        match="ENABLE_RODIN, ENABLE_TRELLIS2, and ENABLE_HUNYUAN are mutually exclusive",
+        match="ENABLE_RODIN, ENABLE_TRIPO, ENABLE_TRELLIS2, and ENABLE_HUNYUAN are mutually exclusive",
     ):
         tool_registry.register_mcp_tools(FakeMCP(), logging.getLogger(__name__))
 
@@ -240,6 +257,16 @@ def test_register_mcp_tools_skips_polyhaven_when_disabled(monkeypatch):
     assert "search_polyhaven_assets" not in enabled
     assert "download_polyhaven_asset" not in enabled
     assert "set_texture" not in enabled
+
+
+def test_register_mcp_tools_enables_tripo_when_switch_and_key_are_present(monkeypatch):
+    _reset_registry_state(monkeypatch)
+    _configure_runtime(monkeypatch, mode="local-client", tripo=True, tripo_key="tripo-key")
+    mcp = FakeMCP()
+
+    enabled = tool_registry.register_mcp_tools(mcp, logging.getLogger(__name__))
+
+    assert "generate_tripo3d_model" in enabled
 
 
 def test_register_mcp_tools_enables_scenesmith_retrieval_tools_when_provider_matches(monkeypatch):

@@ -297,42 +297,280 @@ def _coerce_attached_image_ids_from_state(state: AgentState | Any) -> list[str]:
     return attached_ids
 
 
-def _resolve_current_request_image_path(state: AgentState | Any) -> tuple[str | None, str | None]:
-    attached_image_ids = _coerce_attached_image_ids_from_state(state)
-    if len(attached_image_ids) != 1:
-        return None, (
-            "reconstruct_full_scene requires exactly one image attached to the current request. "
-            "It cannot use remembered or historical images."
-        )
+def _normalize_image_reference_token(raw_value: Any) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", str(raw_value or "").strip().lower())
+    return re.sub(r"_+", "_", normalized).strip("_")
 
-    thread_id = "default"
+
+def _coerce_request_reference_image_keys_from_state(state: AgentState | Any) -> list[str]:
+    if not isinstance(state, dict):
+        return []
+    raw_value = state.get("request_reference_image_keys")
+    if not isinstance(raw_value, list):
+        return []
+    keys: list[str] = []
+    seen: set[str] = set()
+    for item in raw_value:
+        key = _normalize_image_reference_token(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+    return keys
+
+
+def _coerce_reference_image_catalog_from_state(state: AgentState | Any) -> dict[str, dict[str, str]]:
+    if not isinstance(state, dict):
+        return {}
+    raw_value = state.get("reference_image_catalog")
+    if not isinstance(raw_value, dict):
+        return {}
+    catalog: dict[str, dict[str, str]] = {}
+    for raw_key, raw_entry in raw_value.items():
+        if not isinstance(raw_entry, dict):
+            continue
+        key = _normalize_image_reference_token(raw_key)
+        asset_id = str(raw_entry.get("asset_id", "")).strip()
+        stored_path = str(raw_entry.get("stored_path", "")).strip()
+        if not key or not asset_id or not stored_path:
+            continue
+        catalog[key] = {
+            "asset_id": asset_id,
+            "stored_path": stored_path,
+        }
+    return catalog
+
+
+def _thread_id_from_state(state: AgentState | Any) -> str:
     if isinstance(state, dict):
         raw_thread_id = state.get("thread_id")
         if isinstance(raw_thread_id, str) and raw_thread_id.strip():
-            thread_id = raw_thread_id
+            return raw_thread_id.strip()
+    return "default"
+
+
+def _normalize_optional_string_arg(raw_value: Any) -> str | None:
+    if not isinstance(raw_value, str):
+        return None
+    normalized = raw_value.strip()
+    return normalized or None
+
+
+def _resolved_image_asset_from_memory_asset(
+    asset: Any,
+    *,
+    reference_name: str | None = None,
+) -> dict[str, str] | None:
+    asset_id = str(getattr(asset, "id", "")).strip()
+    stored_path = str(getattr(asset, "stored_path", "")).strip()
+    filename = str(getattr(asset, "filename", "")).strip()
+    if not asset_id and not stored_path:
+        return None
+    return {
+        "asset_id": asset_id,
+        "stored_path": stored_path,
+        "filename": filename,
+        "reference_name": reference_name or "",
+    }
+
+
+def _resolved_image_asset_from_catalog_entry(
+    *,
+    reference_name: str,
+    entry: dict[str, str],
+) -> dict[str, str]:
+    return {
+        "asset_id": entry["asset_id"],
+        "stored_path": entry["stored_path"],
+        "filename": "",
+        "reference_name": reference_name,
+    }
+
+
+def _resolve_single_attached_image_asset(state: AgentState | Any) -> tuple[dict[str, str] | None, str | None]:
+    attached_image_ids = _coerce_attached_image_ids_from_state(state)
+    if len(attached_image_ids) != 1:
+        return None, None
+
+    thread_id = _thread_id_from_state(state)
 
     try:
         assets = get_image_asset_memory().get_assets_by_ids(thread_id, attached_image_ids)
     except Exception as exc:
         return None, (
-            "reconstruct_full_scene could not resolve the attached request image: "
+            "Could not resolve the attached request image: "
             f"{str(exc)}"
         )
 
     if len(assets) != 1:
+        return None, "Could not resolve exactly one attached request image."
+
+    resolved = _resolved_image_asset_from_memory_asset(assets[0])
+    if resolved is None:
+        return None, "Resolved the attached request image, but it had no usable metadata."
+    return resolved, None
+
+
+def _resolve_request_selected_image_assets(state: AgentState | Any) -> list[dict[str, str]]:
+    catalog = _coerce_reference_image_catalog_from_state(state)
+    selected_keys = _coerce_request_reference_image_keys_from_state(state)
+    resolved: list[dict[str, str]] = []
+    seen_asset_ids: set[str] = set()
+    for key in selected_keys:
+        entry = catalog.get(key)
+        if entry is None:
+            continue
+        asset_id = entry["asset_id"]
+        if asset_id in seen_asset_ids:
+            continue
+        seen_asset_ids.add(asset_id)
+        resolved.append(_resolved_image_asset_from_catalog_entry(reference_name=key, entry=entry))
+    return resolved
+
+
+def _resolve_explicit_thread_image_asset(
+    state: AgentState | Any,
+    *,
+    input_image_name: str | None,
+    input_image_id: str | None,
+) -> tuple[dict[str, str] | None, str | None]:
+    thread_id = _thread_id_from_state(state)
+    catalog = _coerce_reference_image_catalog_from_state(state)
+    selected_assets = _resolve_request_selected_image_assets(state)
+
+    if input_image_id:
+        target_asset_id = input_image_id.strip()
+        if not target_asset_id:
+            return None, None
+        for asset in selected_assets:
+            if asset.get("asset_id") == target_asset_id:
+                return asset, None
+        for key, entry in catalog.items():
+            if entry["asset_id"] == target_asset_id:
+                return _resolved_image_asset_from_catalog_entry(reference_name=key, entry=entry), None
+        try:
+            assets = get_image_asset_memory().get_assets_by_ids(thread_id, [target_asset_id])
+        except Exception as exc:
+            return None, f"Could not resolve input_image_id '{target_asset_id}': {exc}"
+        if len(assets) == 1:
+            resolved = _resolved_image_asset_from_memory_asset(assets[0])
+            if resolved is not None:
+                return resolved, None
+        return None, f"Could not resolve input_image_id '{target_asset_id}' to a stored thread image."
+
+    if input_image_name:
+        target_name = _normalize_image_reference_token(input_image_name)
+        if not target_name:
+            return None, None
+        for asset in selected_assets:
+            if _normalize_image_reference_token(asset.get("reference_name")) == target_name:
+                return asset, None
+        entry = catalog.get(target_name)
+        if entry is not None:
+            return _resolved_image_asset_from_catalog_entry(reference_name=target_name, entry=entry), None
+        try:
+            assets = get_image_asset_memory().list_assets(thread_id)
+        except Exception as exc:
+            return None, f"Could not resolve input_image_name '{input_image_name}': {exc}"
+        matches: list[dict[str, str]] = []
+        for asset in assets:
+            resolved = _resolved_image_asset_from_memory_asset(asset)
+            if resolved is None:
+                continue
+            filename = resolved.get("filename", "")
+            stem = os.path.splitext(filename)[0] if filename else ""
+            candidate_tokens = {
+                _normalize_image_reference_token(filename),
+                _normalize_image_reference_token(stem),
+            }
+            if target_name in candidate_tokens:
+                matches.append(resolved)
+        if len(matches) == 1:
+            return matches[0], None
+        if len(matches) > 1:
+            return None, (
+                f"input_image_name '{input_image_name}' matched multiple stored thread images. "
+                "Use input_image_id instead."
+            )
+        return None, f"Could not resolve input_image_name '{input_image_name}' to a stored thread image."
+
+    return None, None
+
+
+def _resolve_default_request_image_asset(
+    state: AgentState | Any,
+) -> tuple[dict[str, str] | None, str | None]:
+    attached_asset, attached_error = _resolve_single_attached_image_asset(state)
+    if attached_asset is not None or attached_error:
+        return attached_asset, attached_error
+
+    selected_assets = _resolve_request_selected_image_assets(state)
+    if len(selected_assets) == 1:
+        return selected_assets[0], None
+    if len(selected_assets) > 1:
         return None, (
-            "reconstruct_full_scene could not resolve exactly one attached request image."
+            "Multiple remembered reference images are active for this request. "
+            "Set input_image_name or input_image_id to choose one."
+        )
+    return None, None
+
+
+def _resolved_image_asset_to_local_path(
+    *,
+    tool_name: str,
+    asset: dict[str, str],
+    arg_name: str,
+) -> tuple[str | None, str | None]:
+    stored_path = str(asset.get("stored_path", "")).strip()
+    if not stored_path:
+        return None, f"{tool_name} resolved an image reference, but found no stored path for {arg_name}."
+    if not os.path.isfile(stored_path):
+        return None, f"{tool_name} resolved an image reference, but the file is missing: {stored_path}"
+    return stored_path, None
+
+
+def _resolve_tool_image_asset(
+    state: AgentState | Any,
+    *,
+    input_image_name: str | None,
+    input_image_id: str | None,
+) -> tuple[dict[str, str] | None, str | None]:
+    explicit_asset, explicit_error = _resolve_explicit_thread_image_asset(
+        state,
+        input_image_name=input_image_name,
+        input_image_id=input_image_id,
+    )
+    if explicit_asset is not None:
+        return explicit_asset, None
+
+    default_asset, default_error = _resolve_default_request_image_asset(state)
+    if default_asset is not None:
+        return default_asset, None
+    if explicit_error:
+        return None, explicit_error
+    return None, default_error
+
+
+def _resolve_reconstruct_input_image_path(state: AgentState | Any, raw_args: dict[str, Any]) -> tuple[str | None, str | None]:
+    resolved_asset, resolution_error = _resolve_tool_image_asset(
+        state,
+        input_image_name=_normalize_optional_string_arg(raw_args.get("input_image_name")),
+        input_image_id=_normalize_optional_string_arg(raw_args.get("input_image_id")),
+    )
+    if resolved_asset is None:
+        if resolution_error:
+            return None, resolution_error
+        return None, (
+            "reconstruct_full_scene requires exactly one attached image or one request-selected "
+            "reference image. When multiple remembered images are active, set input_image_name "
+            "or input_image_id."
         )
 
-    stored_path = str(getattr(assets[0], "stored_path", "")).strip()
-    if not stored_path:
-        return None, "reconstruct_full_scene found no stored path for the attached request image."
-    if not os.path.isfile(stored_path):
-        return None, (
-            "reconstruct_full_scene resolved an attached request image, but the file is missing: "
-            f"{stored_path}"
-        )
-    return stored_path, None
+    return _resolved_image_asset_to_local_path(
+        tool_name="reconstruct_full_scene",
+        asset=resolved_asset,
+        arg_name="input_image_path",
+    )
 
 
 def _normalize_reconstruct_full_scene_request(
@@ -344,15 +582,162 @@ def _normalize_reconstruct_full_scene_request(
     if tool_call.get("name") != "reconstruct_full_scene":
         return request
 
-    input_image_path, error_message = _resolve_current_request_image_path(request.state)
+    raw_args = tool_call.get("args")
+    updated_args = dict(raw_args) if isinstance(raw_args, dict) else {}
+    input_image_path, error_message = _resolve_reconstruct_input_image_path(
+        request.state,
+        updated_args,
+    )
     if error_message:
         return _tool_validation_message(tool_call, error_message)
 
-    raw_args = tool_call.get("args")
-    updated_args = dict(raw_args) if isinstance(raw_args, dict) else {}
     updated_args["input_image_path"] = input_image_path
+    updated_args.pop("input_image_name", None)
+    updated_args.pop("input_image_id", None)
     normalized_call = {**tool_call, "args": updated_args}
     return request.override(tool_call=normalized_call)
+
+
+def _normalize_generate_hunyuan3d_request(
+    request: ToolCallRequest,
+) -> ToolCallRequest | ToolMessage:
+    tool_call = request.tool_call
+    if not isinstance(tool_call, dict):
+        return request
+    if tool_call.get("name") != "generate_hunyuan3d_model":
+        return request
+
+    raw_args = tool_call.get("args")
+    updated_args = dict(raw_args) if isinstance(raw_args, dict) else {}
+    text_prompt = _normalize_optional_string_arg(updated_args.get("text_prompt"))
+    if text_prompt:
+        return request
+    explicit_input_image_url = _normalize_optional_string_arg(updated_args.get("input_image_url"))
+    if explicit_input_image_url:
+        return request
+
+    resolved_asset, resolution_error = _resolve_tool_image_asset(
+        request.state,
+        input_image_name=_normalize_optional_string_arg(updated_args.get("input_image_name")),
+        input_image_id=_normalize_optional_string_arg(updated_args.get("input_image_id")),
+    )
+    if resolved_asset is not None:
+        input_image_url, path_error = _resolved_image_asset_to_local_path(
+            tool_name="generate_hunyuan3d_model",
+            asset=resolved_asset,
+            arg_name="input_image_url",
+        )
+        if path_error:
+            return _tool_validation_message(tool_call, path_error)
+        updated_args["input_image_url"] = input_image_url
+        updated_args.pop("input_image_name", None)
+        updated_args.pop("input_image_id", None)
+        normalized_call = {**tool_call, "args": updated_args}
+        return request.override(tool_call=normalized_call)
+
+    if resolution_error:
+        return _tool_validation_message(tool_call, resolution_error)
+    return _tool_validation_message(
+        tool_call,
+        "generate_hunyuan3d_model requires text_prompt or a resolvable request image. "
+        "Attach one image, use a selected remembered reference image, or provide a valid "
+        "input_image_name/input_image_id/input_image_url.",
+    )
+
+
+def _normalize_generate_tripo3d_request(
+    request: ToolCallRequest,
+) -> ToolCallRequest | ToolMessage:
+    tool_call = request.tool_call
+    if not isinstance(tool_call, dict):
+        return request
+    if tool_call.get("name") != "generate_tripo3d_model":
+        return request
+
+    raw_args = tool_call.get("args")
+    updated_args = dict(raw_args) if isinstance(raw_args, dict) else {}
+    text_prompt = _normalize_optional_string_arg(updated_args.get("text_prompt"))
+    if text_prompt:
+        return request
+    explicit_input_image_url = _normalize_optional_string_arg(updated_args.get("input_image_url"))
+    if explicit_input_image_url:
+        return request
+
+    resolved_asset, resolution_error = _resolve_tool_image_asset(
+        request.state,
+        input_image_name=_normalize_optional_string_arg(updated_args.get("input_image_name")),
+        input_image_id=_normalize_optional_string_arg(updated_args.get("input_image_id")),
+    )
+    if resolved_asset is not None:
+        input_image_url, path_error = _resolved_image_asset_to_local_path(
+            tool_name="generate_tripo3d_model",
+            asset=resolved_asset,
+            arg_name="input_image_url",
+        )
+        if path_error:
+            return _tool_validation_message(tool_call, path_error)
+        updated_args["input_image_url"] = input_image_url
+        updated_args.pop("input_image_name", None)
+        updated_args.pop("input_image_id", None)
+        normalized_call = {**tool_call, "args": updated_args}
+        return request.override(tool_call=normalized_call)
+
+    if resolution_error:
+        return _tool_validation_message(tool_call, resolution_error)
+    return _tool_validation_message(
+        tool_call,
+        "generate_tripo3d_model requires text_prompt or a resolvable request image. "
+        "Attach one image, use a selected remembered reference image, or provide a valid "
+        "input_image_name/input_image_id/input_image_url.",
+    )
+
+
+def _normalize_generate_hyper3d_via_images_request(
+    request: ToolCallRequest,
+) -> ToolCallRequest | ToolMessage:
+    tool_call = request.tool_call
+    if not isinstance(tool_call, dict):
+        return request
+    if tool_call.get("name") != "generate_hyper3d_model_via_images":
+        return request
+
+    raw_args = tool_call.get("args")
+    updated_args = dict(raw_args) if isinstance(raw_args, dict) else {}
+    raw_paths = updated_args.get("input_image_paths")
+    if isinstance(raw_paths, list) and len(raw_paths) > 0:
+        return request
+    raw_urls = updated_args.get("input_image_urls")
+    if isinstance(raw_urls, list) and len(raw_urls) > 0:
+        return request
+
+    resolved_asset, resolution_error = _resolve_tool_image_asset(
+        request.state,
+        input_image_name=_normalize_optional_string_arg(updated_args.get("input_image_name")),
+        input_image_id=_normalize_optional_string_arg(updated_args.get("input_image_id")),
+    )
+    if resolved_asset is not None:
+        input_image_path, path_error = _resolved_image_asset_to_local_path(
+            tool_name="generate_hyper3d_model_via_images",
+            asset=resolved_asset,
+            arg_name="input_image_paths",
+        )
+        if path_error:
+            return _tool_validation_message(tool_call, path_error)
+        updated_args["input_image_paths"] = [input_image_path]
+        updated_args.pop("input_image_urls", None)
+        updated_args.pop("input_image_name", None)
+        updated_args.pop("input_image_id", None)
+        normalized_call = {**tool_call, "args": updated_args}
+        return request.override(tool_call=normalized_call)
+
+    if resolution_error:
+        return _tool_validation_message(tool_call, resolution_error)
+    return _tool_validation_message(
+        tool_call,
+        "generate_hyper3d_model_via_images requires a resolvable request image. "
+        "Attach one image, use a selected remembered reference image, or provide a valid "
+        "input_image_name/input_image_id/input_image_paths.",
+    )
 
 
 def _normalize_tool_request(request: ToolCallRequest) -> ToolCallRequest | ToolMessage:
@@ -364,6 +749,24 @@ def _normalize_tool_request(request: ToolCallRequest) -> ToolCallRequest | ToolM
     if isinstance(reconstruct_request, ToolMessage):
         return reconstruct_request
     request = reconstruct_request
+    tool_call = request.tool_call if isinstance(request.tool_call, dict) else tool_call
+
+    hunyuan_request = _normalize_generate_hunyuan3d_request(request)
+    if isinstance(hunyuan_request, ToolMessage):
+        return hunyuan_request
+    request = hunyuan_request
+    tool_call = request.tool_call if isinstance(request.tool_call, dict) else tool_call
+
+    tripo_request = _normalize_generate_tripo3d_request(request)
+    if isinstance(tripo_request, ToolMessage):
+        return tripo_request
+    request = tripo_request
+    tool_call = request.tool_call if isinstance(request.tool_call, dict) else tool_call
+
+    hyper3d_request = _normalize_generate_hyper3d_via_images_request(request)
+    if isinstance(hyper3d_request, ToolMessage):
+        return hyper3d_request
+    request = hyper3d_request
     tool_call = request.tool_call if isinstance(request.tool_call, dict) else tool_call
 
     normalized_call = _normalize_tool_call_args(tool_call)

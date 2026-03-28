@@ -749,6 +749,12 @@ def _apply_request_scoped_tool_constraints(
     if len(attached_image_ids) == 1:
         return tool_names
 
+    request_reference_image_keys = _coerce_request_reference_image_keys(
+        state.get("request_reference_image_keys")
+    )
+    if len(request_reference_image_keys) > 0:
+        return tool_names
+
     return [name for name in tool_names if name != "reconstruct_full_scene"]
 
 
@@ -826,6 +832,40 @@ def _build_role_private_memory_prompt(
             *lines,
         ]
     )
+
+
+def _iter_exception_chain(error: BaseException) -> list[BaseException]:
+    pending: list[BaseException] = [error]
+    seen: set[int] = set()
+    chain: list[BaseException] = []
+    while pending:
+        current = pending.pop()
+        current_id = id(current)
+        if current_id in seen:
+            continue
+        seen.add(current_id)
+        chain.append(current)
+        cause = getattr(current, "__cause__", None)
+        context = getattr(current, "__context__", None)
+        if isinstance(cause, BaseException):
+            pending.append(cause)
+        if isinstance(context, BaseException) and context is not cause:
+            pending.append(context)
+    return chain
+
+
+def _extract_masked_google_genai_error(error: BaseException) -> BaseException | None:
+    if not isinstance(error, TypeError):
+        return None
+    if "object is not subscriptable" not in str(error):
+        return None
+    for candidate in _iter_exception_chain(error):
+        if candidate is error:
+            continue
+        module_name = type(candidate).__module__
+        if module_name == "google.genai.errors" or module_name.startswith("google.genai.errors."):
+            return candidate
+    return None
 
 
 
@@ -909,7 +949,13 @@ def invoke_role_agent(
     )
     
     # Invoke the LLM
-    response = llm_with_tools.invoke(messages)
+    try:
+        response = llm_with_tools.invoke(messages)
+    except Exception as exc:
+        original_provider_error = _extract_masked_google_genai_error(exc)
+        if original_provider_error is not None:
+            raise original_provider_error from None
+        raise
     response_id = getattr(response, "id", None)
     if not isinstance(response_id, str) or not response_id:
         response.id = f"assistant_turn_{uuid4().hex}"
