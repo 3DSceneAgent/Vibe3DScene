@@ -52,10 +52,10 @@ export const environmentPresets: Record<EnvironmentPreset, EnvironmentPresetConf
   skylight: {
     label: 'Skylight',
     description: 'Procedural daylight sky with PMREM-based environment lighting and no HDRI asset.',
-    ambient: 0.04,
-    directional: 1.35,
+    ambient: 0.02,
+    directional: 0.92,
     color: '#dcefff',
-    exposure: 0.96,
+    exposure: 0.88,
     hdriUrl: null,
     sourceUrl: null,
     proceduralSky: {
@@ -67,10 +67,10 @@ export const environmentPresets: Record<EnvironmentPreset, EnvironmentPresetConf
       azimuth: 132,
       skyColor: '#dcefff',
       groundColor: '#4d5563',
-      hemisphereIntensity: 0.85,
+      hemisphereIntensity: 0.54,
       sunColor: '#fff2d6',
-      sunIntensity: 1.35,
-      environmentIntensity: 1.0
+      sunIntensity: 0.88,
+      environmentIntensity: 0.48
     }
   },
   studio: {

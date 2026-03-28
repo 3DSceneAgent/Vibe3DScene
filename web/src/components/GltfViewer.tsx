@@ -20,14 +20,24 @@ type ViewportTheme = 'auto' | 'dark' | 'light'
 type UiTheme = 'dark' | 'light'
 type ProceduralSkyConfig = NonNullable<EnvironmentPresetConfig['proceduralSky']>
 const PROCEDURAL_SKY_RADIUS = 450
+type ViewportPalette = {
+  background: number
+  defaultGridMajor: number
+  defaultGridMinor: number
+  modelGridMajor: number
+  modelGridMinor: number
+  wireframe: number
+}
 
 type GltfViewerProps = {
   gltfUrl: string | null
   environment: EnvironmentPreset
   viewportTheme?: ViewportTheme
   uiTheme?: UiTheme
+  showGrid?: boolean
   showHdriBackground?: boolean
   twoSidedRendering?: boolean
+  showWireframeOverlay?: boolean
   onHierarchyChange?: (nodes: SceneHierarchyNode[]) => void
   isFullscreen?: boolean
   onToggleFullscreen?: () => void
@@ -37,29 +47,22 @@ type GltfViewerProps = {
   alwaysAutoFrameCamera?: boolean
 }
 
-const viewportPalettes: Record<
-  UiTheme,
-  {
-    background: number
-    defaultGridMajor: number
-    defaultGridMinor: number
-    modelGridMajor: number
-    modelGridMinor: number
-  }
-> = {
+const viewportPalettes: Record<UiTheme, ViewportPalette> = {
   dark: {
     background: 0x0f1117,
     defaultGridMajor: 0x36425a,
     defaultGridMinor: 0x1e2534,
     modelGridMajor: 0x3a4865,
-    modelGridMinor: 0x1e2534
+    modelGridMinor: 0x1e2534,
+    wireframe: 0xffffff
   },
   light: {
     background: 0xf3f6fb,
     defaultGridMajor: 0xb4c3d8,
     defaultGridMinor: 0xd6dfeb,
     modelGridMajor: 0xa8bad2,
-    modelGridMinor: 0xd6dfeb
+    modelGridMinor: 0xd6dfeb,
+    wireframe: 0x101820
   }
 }
 
@@ -318,13 +321,124 @@ function applyTwoSidedRenderingState(
   })
 }
 
+function buildViewportGrid(
+  model: THREE.Object3D | null,
+  palette: ViewportPalette
+): THREE.GridHelper {
+  if (model) {
+    const box = new THREE.Box3().setFromObject(model)
+    const size = new THREE.Vector3()
+    box.getSize(size)
+    const maxDim = Math.max(size.x, size.y, size.z, 0.1)
+    const gridSize = Math.max(20, Math.ceil(maxDim * 2))
+    const divisions = Math.max(20, Math.min(160, gridSize * 2))
+    const grid = new THREE.GridHelper(
+      gridSize,
+      divisions,
+      palette.modelGridMajor,
+      palette.modelGridMinor
+    )
+    grid.position.y = box.min.y - 0.001
+    return grid
+  }
+
+  const grid = new THREE.GridHelper(
+    20,
+    40,
+    palette.defaultGridMajor,
+    palette.defaultGridMinor
+  )
+  grid.position.y = -0.01
+  return grid
+}
+
+function replaceViewportGrid(
+  scene: THREE.Scene,
+  gridRef: { current: THREE.GridHelper | null },
+  nextGrid: THREE.GridHelper | null
+): void {
+  if (gridRef.current) {
+    disposeObject3D(gridRef.current)
+    scene.remove(gridRef.current)
+  }
+  if (nextGrid) {
+    scene.add(nextGrid)
+  }
+  gridRef.current = nextGrid
+}
+
+function disposeWireframeOverlay(object: THREE.Object3D | null): void {
+  if (!object) return
+  object.traverse((entry: THREE.Object3D) => {
+    const geometry = (entry as { geometry?: THREE.BufferGeometry }).geometry
+    if (geometry) {
+      geometry.dispose()
+    }
+    const material = (entry as { material?: THREE.Material | THREE.Material[] }).material
+    if (material) {
+      disposeMaterial(material)
+    }
+  })
+}
+
+function buildWireframeOverlay(
+  model: THREE.Object3D,
+  color: number
+): THREE.Group {
+  const overlay = new THREE.Group()
+  model.updateWorldMatrix(true, true)
+
+  model.traverse((entry: THREE.Object3D) => {
+    const mesh = entry as THREE.Mesh & {
+      isMesh?: boolean
+      geometry?: THREE.BufferGeometry
+    }
+    if (!mesh.isMesh || !mesh.geometry) return
+
+    const wireframeGeometry = new THREE.WireframeGeometry(mesh.geometry)
+    const wireframeMaterial = new THREE.LineBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.95,
+      depthTest: false,
+      depthWrite: false
+    })
+    wireframeMaterial.toneMapped = false
+    const wireframe = new THREE.LineSegments(wireframeGeometry, wireframeMaterial)
+    wireframe.matrixAutoUpdate = false
+    wireframe.matrix.copy(mesh.matrixWorld)
+    wireframe.frustumCulled = false
+    wireframe.renderOrder = 10
+    overlay.add(wireframe)
+  })
+
+  return overlay
+}
+
+function replaceWireframeOverlay(
+  scene: THREE.Scene,
+  overlayRef: { current: THREE.Group | null },
+  nextOverlay: THREE.Group | null
+): void {
+  if (overlayRef.current) {
+    scene.remove(overlayRef.current)
+    disposeWireframeOverlay(overlayRef.current)
+  }
+  if (nextOverlay) {
+    scene.add(nextOverlay)
+  }
+  overlayRef.current = nextOverlay
+}
+
 export function GltfViewer({
   gltfUrl,
   environment,
   viewportTheme = 'auto',
   uiTheme = 'dark',
+  showGrid = true,
   showHdriBackground = false,
   twoSidedRendering = false,
+  showWireframeOverlay = false,
   onHierarchyChange,
   isFullscreen = false,
   onToggleFullscreen,
@@ -340,6 +454,7 @@ export function GltfViewer({
   const controlsRef = useRef<OrbitControls | null>(null)
   const modelRef = useRef<THREE.Object3D | null>(null)
   const gridRef = useRef<THREE.GridHelper | null>(null)
+  const wireframeOverlayRef = useRef<THREE.Group | null>(null)
   const lightRef = useRef<{
     ambient: THREE.AmbientLight
     hemisphere: THREE.HemisphereLight
@@ -369,6 +484,8 @@ export function GltfViewer({
   const viewportPaletteRef = useRef(viewportPalette)
   const onHierarchyChangeRef = useRef(onHierarchyChange)
   const alwaysAutoFrameCameraRef = useRef(alwaysAutoFrameCamera)
+  const showGridRef = useRef(showGrid)
+  const showWireframeOverlayRef = useRef(showWireframeOverlay)
 
   useEffect(() => {
     viewportPaletteRef.current = viewportPalette
@@ -381,6 +498,14 @@ export function GltfViewer({
   useEffect(() => {
     alwaysAutoFrameCameraRef.current = alwaysAutoFrameCamera
   }, [alwaysAutoFrameCamera])
+
+  useEffect(() => {
+    showGridRef.current = showGrid
+  }, [showGrid])
+
+  useEffect(() => {
+    showWireframeOverlayRef.current = showWireframeOverlay
+  }, [showWireframeOverlay])
 
   useEffect(() => {
     twoSidedRenderingRef.current = twoSidedRendering
@@ -418,14 +543,10 @@ export function GltfViewer({
     directional.position.set(8, 14, 6)
     scene.add(ambient, hemisphere, directional)
 
-    const defaultGrid = new THREE.GridHelper(
-      20,
-      40,
-      palette.defaultGridMajor,
-      palette.defaultGridMinor
-    )
-    defaultGrid.position.y = -0.01
-    scene.add(defaultGrid)
+    const defaultGrid = showGridRef.current ? buildViewportGrid(null, palette) : null
+    if (defaultGrid) {
+      scene.add(defaultGrid)
+    }
 
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
@@ -504,6 +625,7 @@ export function GltfViewer({
       }
       pmremGenerator.dispose()
       pmremGeneratorRef.current = null
+      replaceWireframeOverlay(scene, wireframeOverlayRef, null)
       disposeObject3D(modelRef.current)
       modelRef.current = null
       disposeObject3D(gridRef.current)
@@ -716,39 +838,25 @@ export function GltfViewer({
         ? environmentBackgroundTextureRef.current
         : new THREE.Color(viewportPalette.background)
 
-    if (gridRef.current) {
-      disposeObject3D(gridRef.current)
-      scene.remove(gridRef.current)
-    }
+    replaceViewportGrid(
+      scene,
+      gridRef,
+      showGrid ? buildViewportGrid(modelRef.current, viewportPalette) : null
+    )
+  }, [showGrid, showHdriBackground, viewportPalette])
 
-    let nextGrid: THREE.GridHelper
-    if (modelRef.current) {
-      const box = new THREE.Box3().setFromObject(modelRef.current)
-      const size = new THREE.Vector3()
-      box.getSize(size)
-      const maxDim = Math.max(size.x, size.y, size.z, 0.1)
-      const gridSize = Math.max(20, Math.ceil(maxDim * 2))
-      const divisions = Math.max(20, Math.min(160, gridSize * 2))
-      nextGrid = new THREE.GridHelper(
-        gridSize,
-        divisions,
-        viewportPalette.modelGridMajor,
-        viewportPalette.modelGridMinor
-      )
-      nextGrid.position.y = box.min.y - 0.001
-    } else {
-      nextGrid = new THREE.GridHelper(
-        20,
-        40,
-        viewportPalette.defaultGridMajor,
-        viewportPalette.defaultGridMinor
-      )
-      nextGrid.position.y = -0.01
-    }
+  useEffect(() => {
+    const scene = sceneRef.current
+    if (!scene) return
 
-    scene.add(nextGrid)
-    gridRef.current = nextGrid
-  }, [showHdriBackground, viewportPalette])
+    replaceWireframeOverlay(
+      scene,
+      wireframeOverlayRef,
+      showWireframeOverlay && modelRef.current
+        ? buildWireframeOverlay(modelRef.current, viewportPalette.wireframe)
+        : null
+    )
+  }, [showWireframeOverlay, viewportPalette])
 
   useEffect(() => {
     const scene = sceneRef.current
@@ -762,20 +870,13 @@ export function GltfViewer({
         scene.remove(modelRef.current)
         modelRef.current = null
       }
-      if (gridRef.current) {
-        disposeObject3D(gridRef.current)
-        scene.remove(gridRef.current)
-      }
+      replaceWireframeOverlay(scene, wireframeOverlayRef, null)
       const palette = viewportPaletteRef.current
-      const nextGrid = new THREE.GridHelper(
-        20,
-        40,
-        palette.defaultGridMajor,
-        palette.defaultGridMinor
+      replaceViewportGrid(
+        scene,
+        gridRef,
+        showGridRef.current ? buildViewportGrid(null, palette) : null
       )
-      nextGrid.position.y = -0.01
-      scene.add(nextGrid)
-      gridRef.current = nextGrid
       camera.position.set(9, 7, 9)
       camera.near = 0.1
       camera.far = 4000
@@ -835,24 +936,19 @@ export function GltfViewer({
         const center = new THREE.Vector3()
         box.getSize(size)
         box.getCenter(center)
-        const maxDim = Math.max(size.x, size.y, size.z, 0.1)
-
-        if (gridRef.current) {
-          disposeObject3D(gridRef.current)
-          scene.remove(gridRef.current)
-        }
-        const gridSize = Math.max(20, Math.ceil(maxDim * 2))
-        const divisions = Math.max(20, Math.min(160, gridSize * 2))
         const palette = viewportPaletteRef.current
-        const nextGrid = new THREE.GridHelper(
-          gridSize,
-          divisions,
-          palette.modelGridMajor,
-          palette.modelGridMinor
+        replaceViewportGrid(
+          scene,
+          gridRef,
+          showGridRef.current ? buildViewportGrid(gltf.scene, palette) : null
         )
-        nextGrid.position.y = box.min.y - 0.001
-        scene.add(nextGrid)
-        gridRef.current = nextGrid
+        replaceWireframeOverlay(
+          scene,
+          wireframeOverlayRef,
+          showWireframeOverlayRef.current
+            ? buildWireframeOverlay(gltf.scene, palette.wireframe)
+            : null
+        )
 
         if (preservedView) {
           camera.position.copy(preservedView.position)

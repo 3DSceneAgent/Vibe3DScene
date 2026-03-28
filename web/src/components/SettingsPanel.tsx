@@ -147,6 +147,17 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
           </div>
         </div>
         <label className="field checkbox-field">
+          Show Viewport Grid
+          <label className="toggle-switch compact">
+            <input
+              type="checkbox"
+              checked={settings.showViewportGrid}
+              onChange={(event) => onChange({ ...settings, showViewportGrid: event.target.checked })}
+            />
+            <span className="toggle-slider" />
+          </label>
+        </label>
+        <label className="field checkbox-field">
           Show Environment Background
           <label className="toggle-switch compact">
             <input

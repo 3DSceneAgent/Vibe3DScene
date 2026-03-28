@@ -23,6 +23,7 @@ type SceneTabProps = {
   environment: EnvironmentPreset
   viewportTheme: ViewportTheme
   uiTheme: UiTheme
+  showViewportGrid: boolean
   showHdriBackground: boolean
   onEnvironmentChange: (preset: EnvironmentPreset) => void
   onFetchRenders: (includeLocalWork?: boolean) => void
@@ -236,6 +237,7 @@ export function SceneTab({
   environment,
   viewportTheme,
   uiTheme,
+  showViewportGrid,
   showHdriBackground,
   onEnvironmentChange,
   onFetchRenders,
@@ -256,6 +258,7 @@ export function SceneTab({
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [alwaysAutoFrameCamera] = useState(false)
   const [twoSidedRendering, setTwoSidedRendering] = useState(false)
+  const [wireframeOverlay, setWireframeOverlay] = useState(false)
   const [includeLocalWorkRenders, setIncludeLocalWorkRenders] = useState(false)
   const [renderPanelHeight, setRenderPanelHeight] = useState(DEFAULT_RENDER_PANEL_HEIGHT)
   const [layoutHeight, setLayoutHeight] = useState(0)
@@ -441,6 +444,20 @@ export function SceneTab({
           <line x1="8" y1="3" x2="8" y2="13" strokeDasharray="2 1.5" />
         </svg>
       </button>
+      <button
+        type="button"
+        className={`ghost-btn icon-btn viewer-toolbar-btn ${wireframeOverlay ? 'is-active' : ''}`}
+        onClick={() => setWireframeOverlay((value) => !value)}
+        title={wireframeOverlay ? 'Wireframe overlay ON' : 'Wireframe overlay OFF'}
+        aria-label="Toggle wireframe overlay"
+        aria-pressed={wireframeOverlay}
+      >
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M3 4.5 8 2l5 2.5v7L8 14l-5-2.5z" />
+          <path d="M3 4.5 8 7l5-2.5M8 7v7" />
+          <path d="M5.2 8.2 10.8 11M10.8 8.2 5.2 11" opacity="0.9" />
+        </svg>
+      </button>
     </>
   )
 
@@ -452,8 +469,10 @@ export function SceneTab({
           environment={environment}
           viewportTheme={viewportTheme}
           uiTheme={uiTheme}
+          showGrid={showViewportGrid}
           showHdriBackground={showHdriBackground}
           twoSidedRendering={twoSidedRendering}
+          showWireframeOverlay={wireframeOverlay}
           alwaysAutoFrameCamera={alwaysAutoFrameCamera}
           onHierarchyChange={handleHierarchyChange}
           isFullscreen={fullscreen}

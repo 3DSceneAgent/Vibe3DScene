@@ -73,6 +73,7 @@ export type Settings = {
   autoFetchIntervalSeconds: number
   viewportTheme: ViewportThemeId
   viewportEnvironment: EnvironmentPreset
+  showViewportGrid: boolean
   showHdriBackground: boolean
   uiMode: UiModeId
 }

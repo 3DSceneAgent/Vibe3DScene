@@ -2246,6 +2246,7 @@ function App() {
                   environment={settings.viewportEnvironment}
                   viewportTheme={settings.viewportTheme}
                   uiTheme={settings.theme}
+                  showViewportGrid={settings.showViewportGrid}
                   showHdriBackground={settings.showHdriBackground}
                   onEnvironmentChange={(viewportEnvironment) =>
                     setSettings((current) => ({ ...current, viewportEnvironment }))

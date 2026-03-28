@@ -40,6 +40,7 @@ export const defaultSettings: Settings = {
   autoFetchIntervalSeconds: 10,
   viewportTheme: 'auto',
   viewportEnvironment: DEFAULT_ENVIRONMENT_PRESET,
+  showViewportGrid: true,
   showHdriBackground: false,
   uiMode: 'default'
 }
@@ -301,6 +302,10 @@ function normalizeSettings(settings: Partial<Settings> | null | undefined): Sett
     autoFetchIntervalSeconds: nextAutoFetchIntervalSeconds,
     viewportTheme: nextViewportTheme,
     viewportEnvironment: nextViewportEnvironment,
+    showViewportGrid:
+      typeof settings?.showViewportGrid === 'boolean'
+        ? settings.showViewportGrid
+        : defaultSettings.showViewportGrid,
     showHdriBackground: settings?.showHdriBackground ?? defaultSettings.showHdriBackground,
     uiMode: nextUiMode
   }
