@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ApiRequestError,
+  retryChatStream,
   streamChat,
   getTodos,
   getSceneRenders,
@@ -279,9 +280,27 @@ function getCurrentTurnStartIndex(messages: Message[]): number {
   return 0
 }
 
-function createPendingToolMessage(toolCall: AssistantToolCall, createdAt: number): Message {
+function createAssistantPlaceholder(assistantId: string, createdAt: number, turnId: string): Message {
+  return {
+    id: assistantId,
+    turnId,
+    role: 'assistant',
+    content: '',
+    thinkingActive: false,
+    createdAt,
+    streamId: null,
+    status: 'streaming'
+  }
+}
+
+function createPendingToolMessage(
+  toolCall: AssistantToolCall,
+  createdAt: number,
+  turnId?: string
+): Message {
   return {
     id: `tool-pending-${toolCall.key}`,
+    turnId,
     role: 'tool',
     content: '',
     createdAt,
@@ -291,7 +310,23 @@ function createPendingToolMessage(toolCall: AssistantToolCall, createdAt: number
   }
 }
 
-function appendPendingToolMessages(messages: Message[], toolCalls: AssistantToolCall[]): Message[] {
+function stripAgentMessagesForTurn(messages: Message[], turnId: string): Message[] {
+  return messages.filter((message) => message.role === 'user' || message.turnId !== turnId)
+}
+
+function getLastAssistantContent(messages: Message[]): string | null {
+  return messages
+    .slice()
+    .reverse()
+    .find((message) => message.role === 'assistant')
+    ?.content ?? null
+}
+
+function appendPendingToolMessages(
+  messages: Message[],
+  toolCalls: AssistantToolCall[],
+  turnId?: string
+): Message[] {
   const finalizedMessages = finalizeStreamingAssistants(messages)
   if (toolCalls.length === 0) {
     return finalizedMessages
@@ -311,7 +346,7 @@ function appendPendingToolMessages(messages: Message[], toolCalls: AssistantTool
   toolCalls.forEach((toolCall) => {
     if (existingKeys.has(toolCall.key)) return
     existingKeys.add(toolCall.key)
-    nextMessages.push(createPendingToolMessage(toolCall, timestamp))
+    nextMessages.push(createPendingToolMessage(toolCall, timestamp, turnId))
     timestamp += 1
     changed = true
   })
@@ -1184,263 +1219,205 @@ function App() {
     setIsSending(false)
   }, [setThreadStreamStatus, updateThread])
 
-  const handleSend = async (text: string, pendingImages: PendingImageAttachment[] = []) => {
-    if (!activeThread) {
-      return false
-    }
-    const threadId = activeThread.id
-    const files = pendingImages.map((image) => image.file)
-    let hasMcpToolSnapshot =
-      Object.prototype.hasOwnProperty.call(mcpToolsByThread, threadId) &&
-      !mcpToolsErrorByThread[threadId]
-    let availableMcpTools = mcpToolsByThread[threadId] ?? []
+  function resolveThreadSelection(thread: Thread) {
     const selectedProvider =
-      activeThread.vlmProvider || vlmDefaultProvider || vlmProviders[0]?.provider || undefined
+      thread.vlmProvider || vlmDefaultProvider || vlmProviders[0]?.provider || undefined
     const selectedProviderOption = selectedProvider
       ? vlmProviders.find((item) => item.provider === selectedProvider)
       : undefined
     const selectedModel =
-      activeThread.vlmModel ||
+      thread.vlmModel ||
       selectedProviderOption?.default_model ||
       vlmDefaultModel ||
       vlmProviders[0]?.default_model ||
       undefined
-    let attachedImageIds: string[] | undefined
-    const now = Date.now()
-    const userAttachedImages =
-      pendingImages.length > 0 ? buildPendingMessageImages(threadId, pendingImages, now) : undefined
-    const userMessage: Message = {
-      id: `msg-${now}-user`,
-      role: 'user',
-      content: text,
-      createdAt: now,
-      attachedImages: userAttachedImages
+    return {
+      selectedProvider,
+      selectedModel
     }
-    const assistantId = `msg-${now}-assistant`
-    const assistantMessage: Message = {
-      id: assistantId,
-      role: 'assistant',
-      content: '',
-      thinkingActive: false,
-      createdAt: now,
-      streamId: null,
-      status: 'streaming'
-    }
-    const markSendFailed = (message: string) => {
-      updateThread(threadId, (thread) => {
-        const hasPlaceholder = thread.messages.some((item) => item.id === assistantId)
-        if (!hasPlaceholder) {
-          return {
-            ...thread,
-            messages: [
-              ...thread.messages,
-              {
-                id: `msg-${Date.now()}-runtime-preflight-error`,
-                role: 'assistant',
-                content: `Unable to send message: ${message}`,
-                createdAt: Date.now(),
-                status: 'error'
-              }
-            ]
-          }
-        }
+  }
+
+  function markAssistantRunFailed(threadId: string, assistantId: string, turnId: string, message: string) {
+    updateThread(threadId, (thread) => {
+      const hasPlaceholder = thread.messages.some((item) => item.id === assistantId)
+      if (!hasPlaceholder) {
         return {
           ...thread,
-          messages: thread.messages.map((item) =>
-            item.id === assistantId
-              ? {
-                  ...item,
-                  content: `Unable to send message: ${message}`,
-                  thinkingActive: false,
-                  status: 'error'
-                }
-              : item
-          )
+          messages: [
+            ...thread.messages,
+            {
+              id: `msg-${Date.now()}-runtime-preflight-error`,
+              turnId,
+              role: 'assistant',
+              content: `Unable to send message: ${message}`,
+              createdAt: Date.now(),
+              status: 'error'
+            }
+          ]
         }
-      })
-      setThreadStreamStatus(threadId, 'complete')
-      setIsSending(false)
-      setIsStreaming(false)
-    }
-
-    setIsSending(true)
-    setThreadStreamStatus(threadId, 'streaming')
-    updateThread(threadId, (thread) => {
-      const shouldAutoTitle =
-        !thread.titleEditedManually && (thread.title === 'New chat' || thread.messages.length === 0)
-      const titleUpdate = shouldAutoTitle ? buildThreadTitleUpdate(thread, text.slice(0, 32)) : null
+      }
       return {
         ...thread,
-        ...(titleUpdate ?? {}),
-        vlmProvider: selectedProvider || thread.vlmProvider,
-        vlmModel: selectedModel || thread.vlmModel,
-        vlmLocked: thread.vlmLocked ?? false,
-        graphEvents: [],
-        messages: [...thread.messages, userMessage, assistantMessage]
+        messages: thread.messages.map((item) =>
+          item.id === assistantId
+            ? {
+                ...item,
+                content: `Unable to send message: ${message}`,
+                thinkingActive: false,
+                status: 'error'
+              }
+            : item
+        )
       }
     })
+    setThreadStreamStatus(threadId, 'complete')
+    setIsSending(false)
+    setIsStreaming(false)
+  }
 
-    if (files.length > 0) {
-      if (!settings.backendUrl) {
-        markSendFailed('Backend is offline.')
-        return false
-      }
-      try {
-        const uploaded = await uploadThreadImages(settings.backendUrl, threadId, files)
-        attachedImageIds = uploaded
-          .map((image) => image.id)
-          .filter((imageId): imageId is string => typeof imageId === 'string' && imageId.length > 0)
-        const nextImages = uploaded.map((image, index) => ({
-          ...image,
-          previewUrl: pendingImages[index]?.previewUrl
-        }))
-        updateThread(threadId, (thread) => {
-          const nextMessages = thread.messages.map((message) =>
-            message.id === userMessage.id
-              ? { ...message, attachedImages: nextImages }
-              : message
-          )
-          return {
-            ...thread,
-            images: mergeThreadImages(thread.images ?? [], nextImages),
-            messages: nextMessages
-          }
-        })
-      } catch (error) {
-        const detail =
-          error instanceof Error && error.message.trim()
-            ? `Failed to upload images: ${error.message.trim()}`
-            : 'Failed to upload images.'
-        markSendFailed(detail)
-        return false
-      }
-    }
-
+  async function prepareThreadExecution(threadId: string, threadSnapshot: Thread) {
+    let hasMcpToolSnapshot =
+      Object.prototype.hasOwnProperty.call(mcpToolsByThread, threadId) &&
+      !mcpToolsErrorByThread[threadId]
+    let availableMcpTools = mcpToolsByThread[threadId] ?? []
+    const { selectedProvider, selectedModel } = resolveThreadSelection(threadSnapshot)
     let resolvedFastModeAvailable = fastModeAvailable
     let resolvedFastModeDefault = fastModeDefault
-    try {
-      let resolvedBackendStatus = backendStatus
-      let resolvedBackendMode = backendMode
-      if ((resolvedBackendStatus === 'checking' || !resolvedFastModeAvailable) && settings.backendUrl) {
-        try {
-          const health = await getHealth(settings.backendUrl)
-          const fastModeState = resolveFastModeHealthState(health)
-          setBackendStatus('online')
-          setBackendMode(health.blender_mode ?? null)
-          setFastModeAvailable(fastModeState.available)
-          setFastModeDefault(fastModeState.defaultEnabled)
-          resolvedBackendStatus = 'online'
-          resolvedBackendMode = health.blender_mode ?? null
-          resolvedFastModeAvailable = fastModeState.available
-          resolvedFastModeDefault = fastModeState.defaultEnabled
-        } catch {
-          setBackendStatus('offline')
-          setBackendMode(null)
-          setFastModeAvailable(false)
-          setFastModeDefault(false)
-          resolvedBackendStatus = 'offline'
-          resolvedBackendMode = null
-          resolvedFastModeAvailable = false
-          resolvedFastModeDefault = false
-        }
+    let resolvedBackendStatus = backendStatus
+    let resolvedBackendMode = backendMode
+
+    if ((resolvedBackendStatus === 'checking' || !resolvedFastModeAvailable) && settings.backendUrl) {
+      try {
+        const health = await getHealth(settings.backendUrl)
+        const fastModeState = resolveFastModeHealthState(health)
+        setBackendStatus('online')
+        setBackendMode(health.blender_mode ?? null)
+        setFastModeAvailable(fastModeState.available)
+        setFastModeDefault(fastModeState.defaultEnabled)
+        resolvedBackendStatus = 'online'
+        resolvedBackendMode = health.blender_mode ?? null
+        resolvedFastModeAvailable = fastModeState.available
+        resolvedFastModeDefault = fastModeState.defaultEnabled
+      } catch {
+        setBackendStatus('offline')
+        setBackendMode(null)
+        setFastModeAvailable(false)
+        setFastModeDefault(false)
+        resolvedBackendStatus = 'offline'
+        resolvedBackendMode = null
+        resolvedFastModeAvailable = false
+        resolvedFastModeDefault = false
       }
-
-      if (!settings.backendUrl || resolvedBackendStatus !== 'online') {
-        throw new Error('Backend is offline.')
-      }
-
-      if (resolvedBackendMode === 'headless') {
-        const loadCapacitySnapshot = async () => {
-          const snapshot = await getHeadlessSessionCapacity(settings.backendUrl)
-          applyHeadlessCapacity(snapshot)
-          return snapshot
-        }
-        const isCurrentThreadOccupying = (capacity: HeadlessSessionCapacityInfo): boolean =>
-          capacity.occupying_threads.some(
-            (entry) => entry.thread_id === threadId && entry.occupying_resources
-          )
-
-        const capacity = await loadCapacitySnapshot()
-        if (!isCurrentThreadOccupying(capacity) && capacity.in_use >= capacity.quota) {
-          const oldestOccupiedThread = [...capacity.occupying_threads]
-            .filter((entry) => entry.thread_id !== threadId)
-            .sort((a, b) => a.last_active_ms - b.last_active_ms)[0]
-          if (!oldestOccupiedThread) {
-            throw new Error(
-              `Runtime quota is full (${capacity.in_use}/${capacity.quota}) and no occupied thread can be released.`
-            )
-          }
-          const released = await releaseThreadRuntimeForThread(oldestOccupiedThread.thread_id, {
-            silent: true
-          })
-          if (!released) {
-            throw new Error('Failed to release an old occupied runtime slot automatically.')
-          }
-          const refreshed = await loadCapacitySnapshot()
-          if (!isCurrentThreadOccupying(refreshed) && refreshed.in_use >= refreshed.quota) {
-            throw new Error(
-              `Runtime quota is still full after auto-release (${refreshed.in_use}/${refreshed.quota}).`
-            )
-          }
-        }
-
-        const mcpTimeoutController = new AbortController()
-        const mcpTimeoutId = window.setTimeout(() => mcpTimeoutController.abort(), MCP_REQUEST_TIMEOUT_MS)
-        setMcpToolsLoadingThreadId(threadId)
-        try {
-          const toolInfo = await getMcpTools(settings.backendUrl, threadId, mcpTimeoutController.signal)
-          runtimeOccupancyRef.current[threadId] = true
-          availableMcpTools = toolInfo.tools
-          hasMcpToolSnapshot = true
-          setMcpToolsByThread((prev) => ({ ...prev, [threadId]: toolInfo.tools }))
-          setMcpToolHintsByThread((prev) => ({ ...prev, [threadId]: toolInfo.tool_hints }))
-          setMcpToolsErrorByThread((prev) => ({ ...prev, [threadId]: null }))
-        } catch (error) {
-          setMcpToolsByThread((prev) => ({ ...prev, [threadId]: [] }))
-          setMcpToolHintsByThread((prev) => ({ ...prev, [threadId]: {} }))
-          setMcpToolsErrorByThread((prev) => ({
-            ...prev,
-            [threadId]:
-              error instanceof DOMException && error.name === 'AbortError'
-                ? 'Timed out while claiming runtime for this conversation.'
-                : error instanceof Error
-                  ? error.message
-                  : 'Failed to claim runtime for this conversation.'
-          }))
-          throw error
-        } finally {
-          window.clearTimeout(mcpTimeoutId)
-          setMcpToolsLoadingThreadId((current) => (current === threadId ? null : current))
-        }
-        const latestCapacity = await loadCapacitySnapshot()
-        const latestThreadEntry = latestCapacity.occupying_threads.find((entry) => entry.thread_id === threadId)
-        const occupyingAfterClaim = latestThreadEntry
-          ? Boolean(latestThreadEntry.occupying_resources)
-          : true
-        runtimeOccupancyRef.current[threadId] = occupyingAfterClaim
-        updateThread(threadId, (thread) => ({
-          ...thread,
-          occupyingResources: occupyingAfterClaim,
-          lastRuntimeActiveMs:
-            typeof latestThreadEntry?.last_active_ms === 'number'
-              ? latestThreadEntry.last_active_ms
-              : thread.lastRuntimeActiveMs
-        }))
-      }
-    } catch (error) {
-      const message = formatThreadCreateError(error)
-      setMcpToolsErrorByThread((prev) => ({ ...prev, [threadId]: message }))
-      markSendFailed(message)
-      return false
     }
 
-    const enabledMcpTools = hasMcpToolSnapshot
-      ? availableMcpTools.filter((toolName) => activeThread.mcpToolEnabled?.[toolName] !== false)
-      : undefined
-    const requestedFastMode = resolvedFastModeAvailable
-      ? Boolean(activeThread.fastMode ?? resolvedFastModeDefault)
-      : false
+    if (!settings.backendUrl || resolvedBackendStatus !== 'online') {
+      throw new Error('Backend is offline.')
+    }
 
+    if (resolvedBackendMode === 'headless') {
+      const loadCapacitySnapshot = async () => {
+        const snapshot = await getHeadlessSessionCapacity(settings.backendUrl)
+        applyHeadlessCapacity(snapshot)
+        return snapshot
+      }
+      const isCurrentThreadOccupying = (capacity: HeadlessSessionCapacityInfo): boolean =>
+        capacity.occupying_threads.some(
+          (entry) => entry.thread_id === threadId && entry.occupying_resources
+        )
+
+      const capacity = await loadCapacitySnapshot()
+      if (!isCurrentThreadOccupying(capacity) && capacity.in_use >= capacity.quota) {
+        const oldestOccupiedThread = [...capacity.occupying_threads]
+          .filter((entry) => entry.thread_id !== threadId)
+          .sort((a, b) => a.last_active_ms - b.last_active_ms)[0]
+        if (!oldestOccupiedThread) {
+          throw new Error(
+            `Runtime quota is full (${capacity.in_use}/${capacity.quota}) and no occupied thread can be released.`
+          )
+        }
+        const released = await releaseThreadRuntimeForThread(oldestOccupiedThread.thread_id, {
+          silent: true
+        })
+        if (!released) {
+          throw new Error('Failed to release an old occupied runtime slot automatically.')
+        }
+        const refreshed = await loadCapacitySnapshot()
+        if (!isCurrentThreadOccupying(refreshed) && refreshed.in_use >= refreshed.quota) {
+          throw new Error(
+            `Runtime quota is still full after auto-release (${refreshed.in_use}/${refreshed.quota}).`
+          )
+        }
+      }
+
+      const mcpTimeoutController = new AbortController()
+      const mcpTimeoutId = window.setTimeout(() => mcpTimeoutController.abort(), MCP_REQUEST_TIMEOUT_MS)
+      setMcpToolsLoadingThreadId(threadId)
+      try {
+        const toolInfo = await getMcpTools(settings.backendUrl, threadId, mcpTimeoutController.signal)
+        runtimeOccupancyRef.current[threadId] = true
+        availableMcpTools = toolInfo.tools
+        hasMcpToolSnapshot = true
+        setMcpToolsByThread((prev) => ({ ...prev, [threadId]: toolInfo.tools }))
+        setMcpToolHintsByThread((prev) => ({ ...prev, [threadId]: toolInfo.tool_hints }))
+        setMcpToolsErrorByThread((prev) => ({ ...prev, [threadId]: null }))
+      } catch (error) {
+        setMcpToolsByThread((prev) => ({ ...prev, [threadId]: [] }))
+        setMcpToolHintsByThread((prev) => ({ ...prev, [threadId]: {} }))
+        setMcpToolsErrorByThread((prev) => ({
+          ...prev,
+          [threadId]:
+            error instanceof DOMException && error.name === 'AbortError'
+              ? 'Timed out while claiming runtime for this conversation.'
+              : error instanceof Error
+                ? error.message
+                : 'Failed to claim runtime for this conversation.'
+        }))
+        throw error
+      } finally {
+        window.clearTimeout(mcpTimeoutId)
+        setMcpToolsLoadingThreadId((current) => (current === threadId ? null : current))
+      }
+      const latestCapacity = await loadCapacitySnapshot()
+      const latestThreadEntry = latestCapacity.occupying_threads.find((entry) => entry.thread_id === threadId)
+      const occupyingAfterClaim = latestThreadEntry
+        ? Boolean(latestThreadEntry.occupying_resources)
+        : true
+      runtimeOccupancyRef.current[threadId] = occupyingAfterClaim
+      updateThread(threadId, (thread) => ({
+        ...thread,
+        occupyingResources: occupyingAfterClaim,
+        lastRuntimeActiveMs:
+          typeof latestThreadEntry?.last_active_ms === 'number'
+            ? latestThreadEntry.last_active_ms
+            : thread.lastRuntimeActiveMs
+      }))
+    }
+
+    return {
+      selectedProvider,
+      selectedModel,
+      enabledMcpTools: hasMcpToolSnapshot
+        ? availableMcpTools.filter((toolName) => threadSnapshot.mcpToolEnabled?.[toolName] !== false)
+        : undefined,
+      requestedFastMode: resolvedFastModeAvailable
+        ? Boolean(threadSnapshot.fastMode ?? resolvedFastModeDefault)
+        : false
+    }
+  }
+
+  function startThreadStreamRun({
+    threadId,
+    turnId,
+    assistantId,
+    baselineMessages,
+    startStream
+  }: {
+    threadId: string
+    turnId: string
+    assistantId: string
+    baselineMessages: Message[]
+    startStream: (handleEvent: (event: StreamEvent) => void, signal: AbortSignal) => Promise<void>
+  }) {
     if (streamAbortRef.current) {
       streamAbortRef.current.abort()
     }
@@ -1454,15 +1431,14 @@ function App() {
       currentStreamRef.current = null
     }
 
-    previousAssistantContentRef.current =
-      activeThread.messages.slice().reverse().find((message) => message.role === 'assistant')?.content ?? null
+    previousAssistantContentRef.current = getLastAssistantContent(baselineMessages)
     knownStreamIdsRef.current = new Set(
-      activeThread.messages
+      baselineMessages
         .map((message) => message.streamId)
         .filter((streamId): streamId is string => typeof streamId === 'string' && streamId.length > 0)
     )
     knownToolIdsRef.current = new Set(
-      activeThread.messages
+      baselineMessages
         .filter((message) => message.role === 'tool')
         .map((message) => message.id)
         .filter((id): id is string => typeof id === 'string' && id.length > 0)
@@ -1482,6 +1458,7 @@ function App() {
     messageIdMapRef.current.clear()
     messageIdMapRef.current.set('initial', assistantId)
     let streamErrorAppended = false
+
     const appendStreamErrorMessage = (error: unknown) => {
       if (streamErrorAppended) {
         return
@@ -1496,6 +1473,7 @@ function App() {
         ))
         const errorMessage: Message = {
           id: `msg-${Date.now()}-${Math.random()}-stream-error`,
+          turnId,
           role: 'assistant',
           content: friendlyError,
           createdAt: Date.now(),
@@ -1507,6 +1485,7 @@ function App() {
         }
       })
     }
+
     const handleStreamEvent = (event: StreamEvent) => {
       if (streamRunIdRef.current !== runId) {
         return
@@ -1534,6 +1513,7 @@ function App() {
           if (hasPending) return thread
           const pendingMsg: Message = {
             id: `tool-pending-${Date.now()}-${Math.random()}`,
+            turnId,
             role: 'tool',
             content: '',
             createdAt: Date.now(),
@@ -1569,18 +1549,10 @@ function App() {
 
         const newAssistantId = `msg-${Date.now()}-${Math.random()}-assistant`
         messageIdMapRef.current.set(messageId, newAssistantId)
-        const newMessage: Message = {
-          id: newAssistantId,
-          role: 'assistant',
-          content: '',
-          thinkingActive: false,
-          createdAt: Date.now(),
-          streamId: messageId,
-          status: 'streaming'
-        }
+        const newMessage = createAssistantPlaceholder(newAssistantId, Date.now(), turnId)
         updateThread(threadId, (thread) => ({
           ...thread,
-          messages: [...finalizeStreamingAssistants(thread.messages), newMessage]
+          messages: [...finalizeStreamingAssistants(thread.messages), { ...newMessage, streamId: messageId }]
         }))
         return newAssistantId
       }
@@ -1660,8 +1632,6 @@ function App() {
           return {
             ...message,
             content: next.text,
-            // Some providers stream reasoning separately from visible text.
-            // Preserve previously received thinking when the text delta itself carries none.
             thinking: next.thinking ?? message.thinking,
             thinkingActive: false,
             raw: next.raw,
@@ -1691,7 +1661,7 @@ function App() {
             }
           }
           updateThread(threadId, (thread) => {
-            const nextMessages = appendPendingToolMessages(thread.messages, assistantToolCalls)
+            const nextMessages = appendPendingToolMessages(thread.messages, assistantToolCalls, turnId)
             return nextMessages === thread.messages ? thread : { ...thread, messages: nextMessages }
           })
         }
@@ -1714,6 +1684,7 @@ function App() {
             const content = extractMessageContent(payload)
             const toolEntry: Message = {
               id: toolId ?? `tool-${Date.now()}-${Math.random()}`,
+              turnId,
               role: 'tool',
               content,
               createdAt: Date.now(),
@@ -1799,24 +1770,13 @@ function App() {
 
     let streamPromise: Promise<void>
     try {
-      streamPromise = streamChat({
-        baseUrl: settings.backendUrl,
-        message: text,
-        threadId,
-        enabledMcpTools,
-        fastMode: requestedFastMode,
-        attachedImageIds,
-        vlmProvider: selectedProvider,
-        vlmModel: selectedModel,
-        signal: abortController.signal,
-        onEvent: handleStreamEvent
-      })
+      streamPromise = startStream(handleStreamEvent, abortController.signal)
     } catch (error) {
       appendStreamErrorMessage(error)
       setThreadStreamStatus(threadId, 'complete')
       setIsStreaming(false)
       setIsSending(false)
-      return false
+      return
     }
     streamPromise
       .catch((error) => {
@@ -1836,7 +1796,7 @@ function App() {
             message.status === 'streaming'
               ? { ...message, thinkingActive: false, status: 'final' }
               : message
-            )
+          )
         }))
         setThreadStreamStatus(threadId, 'complete')
         setIsStreaming(false)
@@ -1849,8 +1809,172 @@ function App() {
         }
         messageIdMapRef.current.clear()
       })
+  }
+
+  const handleSend = async (text: string, pendingImages: PendingImageAttachment[] = []) => {
+    if (!activeThread) {
+      return false
+    }
+    const threadId = activeThread.id
+    const files = pendingImages.map((image) => image.file)
+    const { selectedProvider, selectedModel } = resolveThreadSelection(activeThread)
+    let attachedImageIds: string[] | undefined
+    const now = Date.now()
+    const turnId = `msg-${now}-user`
+    const userAttachedImages =
+      pendingImages.length > 0 ? buildPendingMessageImages(threadId, pendingImages, now) : undefined
+    const userMessage: Message = {
+      id: turnId,
+      turnId,
+      role: 'user',
+      content: text,
+      createdAt: now,
+      attachedImages: userAttachedImages
+    }
+    const assistantId = `msg-${now}-assistant`
+    const assistantMessage = createAssistantPlaceholder(assistantId, now, turnId)
+    const baselineMessages = activeThread.messages
+
+    setIsSending(true)
+    setThreadStreamStatus(threadId, 'streaming')
+    updateThread(threadId, (thread) => {
+      const shouldAutoTitle =
+        !thread.titleEditedManually && (thread.title === 'New chat' || thread.messages.length === 0)
+      const titleUpdate = shouldAutoTitle ? buildThreadTitleUpdate(thread, text.slice(0, 32)) : null
+      return {
+        ...thread,
+        ...(titleUpdate ?? {}),
+        vlmProvider: selectedProvider || thread.vlmProvider,
+        vlmModel: selectedModel || thread.vlmModel,
+        vlmLocked: thread.vlmLocked ?? false,
+        graphEvents: [],
+        messages: [...thread.messages, userMessage, assistantMessage]
+      }
+    })
+
+    if (files.length > 0) {
+      if (!settings.backendUrl) {
+        markAssistantRunFailed(threadId, assistantId, turnId, 'Backend is offline.')
+        return false
+      }
+      try {
+        const uploaded = await uploadThreadImages(settings.backendUrl, threadId, files)
+        attachedImageIds = uploaded
+          .map((image) => image.id)
+          .filter((imageId): imageId is string => typeof imageId === 'string' && imageId.length > 0)
+        const nextImages = uploaded.map((image, index) => ({
+          ...image,
+          previewUrl: pendingImages[index]?.previewUrl
+        }))
+        updateThread(threadId, (thread) => {
+          const nextMessages = thread.messages.map((message) =>
+            message.id === userMessage.id
+              ? { ...message, attachedImages: nextImages }
+              : message
+          )
+          return {
+            ...thread,
+            images: mergeThreadImages(thread.images ?? [], nextImages),
+            messages: nextMessages
+          }
+        })
+      } catch (error) {
+        const detail =
+          error instanceof Error && error.message.trim()
+            ? `Failed to upload images: ${error.message.trim()}`
+            : 'Failed to upload images.'
+        markAssistantRunFailed(threadId, assistantId, turnId, detail)
+        return false
+      }
+    }
+
+    let execution
+    try {
+      execution = await prepareThreadExecution(threadId, activeThread)
+    } catch (error) {
+      const message = formatThreadCreateError(error)
+      setMcpToolsErrorByThread((prev) => ({ ...prev, [threadId]: message }))
+      markAssistantRunFailed(threadId, assistantId, turnId, message)
+      return false
+    }
+
+    startThreadStreamRun({
+      threadId,
+      turnId,
+      assistantId,
+      baselineMessages,
+      startStream: (handleEvent, signal) =>
+        streamChat({
+          baseUrl: settings.backendUrl,
+          message: text,
+          threadId,
+          turnId,
+          enabledMcpTools: execution.enabledMcpTools,
+          fastMode: execution.requestedFastMode,
+          attachedImageIds,
+          vlmProvider: execution.selectedProvider,
+          vlmModel: execution.selectedModel,
+          signal,
+          onEvent: handleEvent
+        })
+    })
     setPromptHistory((current) => recordPromptHistory(current, text))
     return true
+  }
+
+  const handleRetryTurn = async (turnId: string) => {
+    if (!activeThread || isStreaming) {
+      return
+    }
+    const threadId = activeThread.id
+    const latestUserMessage = activeThread.messages
+      .slice()
+      .reverse()
+      .find((message) => message.role === 'user')
+    if (!latestUserMessage || latestUserMessage.turnId !== turnId) {
+      return
+    }
+
+    const baselineMessages = stripAgentMessagesForTurn(activeThread.messages, turnId)
+    const assistantId = `msg-${Date.now()}-assistant`
+    const assistantMessage = createAssistantPlaceholder(assistantId, Date.now(), turnId)
+
+    setIsSending(true)
+    setThreadStreamStatus(threadId, 'streaming')
+    updateThread(threadId, (thread) => ({
+      ...thread,
+      graphEvents: [],
+      messages: [...stripAgentMessagesForTurn(thread.messages, turnId), assistantMessage]
+    }))
+
+    let execution
+    try {
+      execution = await prepareThreadExecution(threadId, activeThread)
+    } catch (error) {
+      const message = formatThreadCreateError(error)
+      setMcpToolsErrorByThread((prev) => ({ ...prev, [threadId]: message }))
+      markAssistantRunFailed(threadId, assistantId, turnId, message)
+      return
+    }
+
+    startThreadStreamRun({
+      threadId,
+      turnId,
+      assistantId,
+      baselineMessages,
+      startStream: (handleEvent, signal) =>
+        retryChatStream({
+          baseUrl: settings.backendUrl,
+          threadId,
+          retryTurnId: turnId,
+          enabledMcpTools: execution.enabledMcpTools,
+          fastMode: execution.requestedFastMode,
+          vlmProvider: execution.selectedProvider,
+          vlmModel: execution.selectedModel,
+          signal,
+          onEvent: handleEvent
+        })
+    })
   }
 
   const isHeadlessRuntimeClaimed = useCallback(
@@ -2210,6 +2334,7 @@ function App() {
                     (isStreaming && currentStreamRef.current?.threadId === activeThread.id ? 'streaming' : 'complete')
                   }
                   onSend={handleSend}
+                  onRetryTurn={(turnId) => void handleRetryTurn(turnId)}
                   onStop={isStreaming ? handleStop : undefined}
                   backendUrl={settings.backendUrl}
                   examplePrompts={examplePrompts}

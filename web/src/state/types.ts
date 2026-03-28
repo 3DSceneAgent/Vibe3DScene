@@ -23,6 +23,7 @@ export type SceneHierarchyNode = {
 
 export type Message = {
   id: string
+  turnId?: string
   role: MessageRole
   content: string
   thinking?: string

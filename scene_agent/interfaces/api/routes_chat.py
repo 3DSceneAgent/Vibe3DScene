@@ -5,23 +5,26 @@ from dataclasses import dataclass, field
 from importlib import import_module
 import json
 import logging
+from pathlib import Path
 import threading
 import time
+from typing import Any
 import uuid
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import HumanMessage
+from scene_agent.agent.redis_checkpointer import get_graph_checkpointer
 from scene_agent.blender.session_manager import SessionResourceError, get_session_manager
 from scene_agent.config import get_settings
 from scene_agent.session import get_session_coordinator
-from typing import Any
 
-from .models import ChatRequest, ChatResponse
+from .models import ChatRequest, ChatResponse, RetryChatRequest
 from .shared import (
     assistant_message_display_text,
     build_graph_node_event_payload,
     claim_or_proxy_request,
     extract_message_reasoning_text,
+    extract_message_tool_call_names,
     extract_graph_step_events,
     log_event,
     message_has_tool_calls,
@@ -33,6 +36,8 @@ from .shared import (
     sanitize_message_for_stream,
     serialize_message,
     set_owner_headers,
+    resolve_thread_storage_dir,
+    send_blender_command_sync,
 )
 
 
@@ -178,6 +183,219 @@ def _summarize_stream_event_for_error(event: Any) -> dict[str, Any]:
     elif mode is not None:
         summary["mode_payload"] = _summarize_stream_payload_for_error(mode)
     return summary
+
+
+_RETRY_DIRNAME = "retry"
+_LATEST_RETRY_METADATA_FILENAME = "latest_turn.json"
+_LATEST_RETRY_SNAPSHOT_FILENAME = "latest_turn_pre.blend"
+
+
+def _build_human_message(request: ChatRequest) -> HumanMessage:
+    normalized_turn_id = request.turn_id.strip() if isinstance(request.turn_id, str) else ""
+    if normalized_turn_id:
+        return HumanMessage(content=request.message, id=normalized_turn_id)
+    return HumanMessage(content=request.message)
+
+
+def _retry_storage_dir(thread_id: str) -> Path:
+    return resolve_thread_storage_dir(thread_id) / _RETRY_DIRNAME
+
+
+def _retry_metadata_path(thread_id: str) -> Path:
+    return _retry_storage_dir(thread_id) / _LATEST_RETRY_METADATA_FILENAME
+
+
+def _retry_snapshot_path(thread_id: str) -> Path:
+    return _retry_storage_dir(thread_id) / _LATEST_RETRY_SNAPSHOT_FILENAME
+
+
+def _normalize_retry_attached_image_ids(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [
+        image_id
+        for image_id in value
+        if isinstance(image_id, str) and image_id.strip()
+    ]
+
+
+async def _get_checkpoint_tuple(
+    *,
+    thread_id: str,
+    checkpoint_id: str | None = None,
+    checkpoint_ns: str | None = None,
+) -> Any:
+    checkpointer = get_graph_checkpointer()
+    config = {"configurable": {"thread_id": thread_id}}
+    if checkpoint_ns:
+        config["configurable"]["checkpoint_ns"] = checkpoint_ns
+    if checkpoint_id:
+        config["configurable"]["checkpoint_id"] = checkpoint_id
+    return await asyncio.to_thread(checkpointer.get_tuple, config)
+
+
+async def _capture_latest_turn_retry_state(
+    *,
+    request: ChatRequest,
+    request_id: str,
+) -> None:
+    normalized_turn_id = request.turn_id.strip() if isinstance(request.turn_id, str) else ""
+    if not normalized_turn_id:
+        return
+
+    retry_dir = _retry_storage_dir(request.thread_id)
+    retry_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_path = _retry_snapshot_path(request.thread_id)
+    metadata_path = _retry_metadata_path(request.thread_id)
+
+    checkpoint_tuple = await _get_checkpoint_tuple(thread_id=request.thread_id)
+    checkpoint_id: str | None = None
+    checkpoint_ns = ""
+    if checkpoint_tuple is not None:
+        raw_checkpoint_id = checkpoint_tuple.checkpoint.get("id")
+        checkpoint_id = raw_checkpoint_id if isinstance(raw_checkpoint_id, str) and raw_checkpoint_id else None
+        configurable = checkpoint_tuple.config.get("configurable", {})
+        raw_checkpoint_ns = configurable.get("checkpoint_ns")
+        if isinstance(raw_checkpoint_ns, str):
+            checkpoint_ns = raw_checkpoint_ns
+
+    try:
+        await asyncio.to_thread(
+            send_blender_command_sync,
+            "save_blend",
+            {"filepath": str(snapshot_path), "copy": True},
+            request.thread_id,
+        )
+    except Exception as exc:
+        log_event(
+            "warning",
+            "retry_snapshot_capture_failed",
+            {
+                "request_id": request_id,
+                "thread_id": request.thread_id,
+                "turn_id": normalized_turn_id,
+                "error": str(exc),
+            },
+        )
+        try:
+            metadata_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return
+
+    metadata = {
+        "turn_id": normalized_turn_id,
+        "message": request.message,
+        "attached_image_ids": _normalize_retry_attached_image_ids(request.attached_image_ids),
+        "task_id": request.task_id,
+        "workflow_topology": request.workflow_topology,
+        "memory_profile": request.memory_profile,
+        "pre_turn_checkpoint_id": checkpoint_id,
+        "pre_turn_checkpoint_ns": checkpoint_ns,
+        "pre_turn_blend_snapshot": str(snapshot_path),
+        "updated_at_ms": int(time.time() * 1000),
+    }
+
+    try:
+        metadata_path.write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        log_event(
+            "warning",
+            "retry_metadata_write_failed",
+            {
+                "request_id": request_id,
+                "thread_id": request.thread_id,
+                "turn_id": normalized_turn_id,
+                "error": str(exc),
+            },
+        )
+        try:
+            metadata_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _load_latest_turn_retry_metadata(thread_id: str) -> dict[str, Any]:
+    metadata_path = _retry_metadata_path(thread_id)
+    if not metadata_path.exists():
+        raise HTTPException(status_code=409, detail="Latest turn retry data is unavailable.")
+    try:
+        loaded = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Latest turn retry data is unreadable.",
+        ) from exc
+    if not isinstance(loaded, dict):
+        raise HTTPException(status_code=409, detail="Latest turn retry data is invalid.")
+    return loaded
+
+
+async def _restore_latest_turn_retry_state(
+    *,
+    thread_id: str,
+    retry_turn_id: str,
+    request_id: str,
+) -> dict[str, Any]:
+    metadata = _load_latest_turn_retry_metadata(thread_id)
+    stored_turn_id = metadata.get("turn_id")
+    if not isinstance(stored_turn_id, str) or not stored_turn_id:
+        raise HTTPException(status_code=409, detail="Latest turn retry data is invalid.")
+    if stored_turn_id != retry_turn_id:
+        raise HTTPException(status_code=409, detail="Only the latest turn can be retried.")
+
+    snapshot_path = Path(str(metadata.get("pre_turn_blend_snapshot", "")))
+    if not snapshot_path.exists():
+        raise HTTPException(status_code=409, detail="Retry scene snapshot is missing.")
+
+    checkpoint_id_raw = metadata.get("pre_turn_checkpoint_id")
+    checkpoint_id = checkpoint_id_raw if isinstance(checkpoint_id_raw, str) and checkpoint_id_raw else None
+    checkpoint_ns_raw = metadata.get("pre_turn_checkpoint_ns")
+    checkpoint_ns = checkpoint_ns_raw if isinstance(checkpoint_ns_raw, str) else ""
+
+    checkpoint_tuple = None
+    if checkpoint_id:
+        checkpoint_tuple = await _get_checkpoint_tuple(
+            thread_id=thread_id,
+            checkpoint_id=checkpoint_id,
+            checkpoint_ns=checkpoint_ns,
+        )
+        if checkpoint_tuple is None:
+            raise HTTPException(status_code=409, detail="Retry checkpoint is missing.")
+
+    await asyncio.to_thread(
+        send_blender_command_sync,
+        "load_blend",
+        {"filepath": str(snapshot_path)},
+        thread_id,
+    )
+
+    checkpointer = get_graph_checkpointer()
+    await asyncio.to_thread(checkpointer.delete_thread, thread_id)
+
+    if checkpoint_tuple is not None:
+        await asyncio.to_thread(
+            checkpointer.put,
+            {"configurable": {"thread_id": thread_id, "checkpoint_ns": checkpoint_ns}},
+            checkpoint_tuple.checkpoint,
+            checkpoint_tuple.metadata,
+            checkpoint_tuple.checkpoint["channel_versions"],
+        )
+
+    log_event(
+        "info",
+        "retry_state_restored",
+        {
+            "request_id": request_id,
+            "thread_id": thread_id,
+            "turn_id": retry_turn_id,
+            "checkpoint_id": checkpoint_id,
+        },
+    )
+    return metadata
 
 
 router = APIRouter()
@@ -541,6 +759,7 @@ async def _produce_stream_events(
     existing_message_ids: set[str] = set()
     last_assistant_text: str | None = None
     streamed_assistant_message_ids: set[str] = set()
+    announced_tool_call_names: set[str] = set()
     saw_unidentified_assistant_delta = False
     scene_has_change = False
     done_payload: dict[str, Any] | None = None
@@ -585,6 +804,10 @@ async def _produce_stream_events(
         )
         config = {"configurable": {"thread_id": request.thread_id}}
         resolved_fast_mode = _resolve_fast_mode_for_request(request)
+        await _capture_latest_turn_retry_state(
+            request=request,
+            request_id=session.request_id,
+        )
         try:
             state = await agent.aget_state(config)
             state_messages = []
@@ -608,7 +831,7 @@ async def _produce_stream_events(
 
         stream = agent.astream(
             {
-                "messages": [HumanMessage(content=request.message)],
+                "messages": [_build_human_message(request)],
                 "thread_id": request.thread_id,
                 "enabled_tool_names": enabled_tool_names,
                 "attached_image_ids": request.attached_image_ids,
@@ -807,6 +1030,17 @@ async def _produce_stream_events(
                     if message_has_tool_calls(serialized) or is_tool_message:
                         scene_has_change = True
                         session.set_scene_has_change(True)
+                    if not is_tool_message and message_has_tool_calls(serialized):
+                        for tool_call_name in extract_message_tool_call_names(serialized):
+                            if tool_call_name in announced_tool_call_names:
+                                continue
+                            announced_tool_call_names.add(tool_call_name)
+                            session.publish(
+                                {
+                                    "event": "tool_call_started",
+                                    "tool_call": {"name": tool_call_name},
+                                }
+                            )
                     if message_type in {"human", "system"}:
                         continue
                     if message_type == "tool":
@@ -959,7 +1193,7 @@ async def chat(request: ChatRequest, request_http: Request, response: Response):
         # Run agent
         result = await agent.ainvoke(
             {
-                "messages": [HumanMessage(content=request.message)],
+                "messages": [_build_human_message(request)],
                 "thread_id": request.thread_id,
                 "enabled_tool_names": enabled_tool_names,
                 "attached_image_ids": request.attached_image_ids,
@@ -997,23 +1231,13 @@ async def chat(request: ChatRequest, request_http: Request, response: Response):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/chat/stream")
-async def chat_stream(request: ChatRequest, request_http: Request):
-    """
-    Chat with the agent (streaming via Server-Sent Events).
-    
-    Args:
-        request: ChatRequest with message and thread_id
-        
-    Returns:
-        StreamingResponse with SSE events
-    """
-    resolution, proxied = await claim_or_proxy_request(
-        request=request_http,
-        thread_id=request.thread_id,
-    )
-    if proxied is not None:
-        return proxied
+
+async def _build_chat_stream_response(
+    *,
+    request: ChatRequest,
+    request_http: Request,
+    resolution: Any,
+) -> StreamingResponse:
     settings = get_settings()
     keepalive_interval = _resolve_keepalive_interval_seconds(settings)
     requested_stream_id = (request_http.headers.get(_STREAM_REQUEST_ID_HEADER) or "").strip()
@@ -1102,4 +1326,76 @@ async def chat_stream(request: ChatRequest, request_http: Request):
         event_generator(),
         media_type="text/event-stream",
         headers=headers,
+    )
+
+
+@router.post("/chat/stream")
+async def chat_stream(request: ChatRequest, request_http: Request):
+    """
+    Chat with the agent (streaming via Server-Sent Events).
+    
+    Args:
+        request: ChatRequest with message and thread_id
+        
+    Returns:
+        StreamingResponse with SSE events
+    """
+    resolution, proxied = await claim_or_proxy_request(
+        request=request_http,
+        thread_id=request.thread_id,
+    )
+    if proxied is not None:
+        return proxied
+    return await _build_chat_stream_response(
+        request=request,
+        request_http=request_http,
+        resolution=resolution,
+    )
+
+
+@router.post("/chat/retry/stream")
+async def retry_chat_stream(request: RetryChatRequest, request_http: Request):
+    resolution, proxied = await claim_or_proxy_request(
+        request=request_http,
+        thread_id=request.thread_id,
+    )
+    if proxied is not None:
+        return proxied
+
+    request_id = f"{request.thread_id}:{int(time.time() * 1000)}:retry"
+    metadata = await _restore_latest_turn_retry_state(
+        thread_id=request.thread_id,
+        retry_turn_id=request.retry_turn_id,
+        request_id=request_id,
+    )
+
+    message = metadata.get("message")
+    if not isinstance(message, str) or not message.strip():
+        raise HTTPException(status_code=409, detail="Retry source message is unavailable.")
+
+    retry_chat_request = ChatRequest(
+        message=message,
+        thread_id=request.thread_id,
+        turn_id=request.retry_turn_id,
+        vlm_provider=request.vlm_provider,
+        vlm_model=request.vlm_model,
+        enabled_mcp_tools=request.enabled_mcp_tools,
+        attached_image_ids=_normalize_retry_attached_image_ids(metadata.get("attached_image_ids")),
+        task_id=metadata.get("task_id") if isinstance(metadata.get("task_id"), str) else None,
+        workflow_topology=(
+            metadata.get("workflow_topology")
+            if isinstance(metadata.get("workflow_topology"), str)
+            else None
+        ),
+        memory_profile=(
+            metadata.get("memory_profile")
+            if isinstance(metadata.get("memory_profile"), str)
+            else None
+        ),
+        fast_mode=request.fast_mode,
+    )
+    return await _build_chat_stream_response(
+        request=retry_chat_request,
+        request_http=request_http,
+        resolution=resolution,
     )

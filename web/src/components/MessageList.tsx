@@ -8,6 +8,7 @@ type MessageListProps = {
   messages: Message[]
   backendUrl: string
   streamStatus: 'streaming' | 'complete'
+  onRetryTurn?: (turnId: string) => void
 }
 
 const STICKY_BOTTOM_THRESHOLD_PX = 48
@@ -60,7 +61,7 @@ function groupMessagesIntoConversationTurns(messages: Message[]): ConversationTu
   return turns
 }
 
-export function MessageList({ messages, backendUrl, streamStatus }: MessageListProps) {
+export function MessageList({ messages, backendUrl, streamStatus, onRetryTurn }: MessageListProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const shouldStickToBottomRef = useRef(true)
   const scrollRafRef = useRef<number | null>(null)
@@ -105,6 +106,8 @@ export function MessageList({ messages, backendUrl, streamStatus }: MessageListP
           turn={turn}
           backendUrl={backendUrl}
           isActiveTurn={streamStatus === 'streaming' && index === turns.length - 1}
+          isLatestTurn={index === turns.length - 1}
+          onRetryTurn={onRetryTurn}
         />
       ))}
     </div>
@@ -115,17 +118,27 @@ const ConversationTurnItem = memo(
   function ConversationTurnItem({
     turn,
     backendUrl,
-    isActiveTurn
+    isActiveTurn,
+    isLatestTurn,
+    onRetryTurn
   }: {
     turn: ConversationTurn
     backendUrl: string
     isActiveTurn: boolean
+    isLatestTurn: boolean
+    onRetryTurn?: (turnId: string) => void
   }) {
     return (
       <div className="conversation-turn">
         {turn.userMessage && <UserMessageItem message={turn.userMessage} backendUrl={backendUrl} />}
         {(turn.agentMessages.length > 0 || isActiveTurn) && (
-          <AssistantTurn messages={turn.agentMessages} backendUrl={backendUrl} isActiveTurn={isActiveTurn} />
+          <AssistantTurn
+            messages={turn.agentMessages}
+            backendUrl={backendUrl}
+            isActiveTurn={isActiveTurn}
+            retryTurnId={isLatestTurn ? turn.userMessage?.turnId : undefined}
+            onRetryTurn={onRetryTurn}
+          />
         )}
       </div>
     )
@@ -133,7 +146,9 @@ const ConversationTurnItem = memo(
   (prev, next) =>
     prev.turn === next.turn &&
     prev.backendUrl === next.backendUrl &&
-    prev.isActiveTurn === next.isActiveTurn
+    prev.isActiveTurn === next.isActiveTurn &&
+    prev.isLatestTurn === next.isLatestTurn &&
+    prev.onRetryTurn === next.onRetryTurn
 )
 
 const UserMessageItem = memo(
@@ -170,16 +185,22 @@ const AssistantTurn = memo(
   function AssistantTurn({
     messages,
     backendUrl,
-    isActiveTurn
+    isActiveTurn,
+    retryTurnId,
+    onRetryTurn
   }: {
     messages: Message[]
     backendUrl: string
     isActiveTurn: boolean
+    retryTurnId?: string
+    onRetryTurn?: (turnId: string) => void
   }) {
     const hasPendingTool = messages.some(
       (message) => message.role === 'tool' && message.status === 'streaming'
     )
-    const showThinkingFooter = isActiveTurn && !hasPendingTool
+    const hasError = messages.some((message) => message.status === 'error')
+    const showThinkingFooter = isActiveTurn && !hasPendingTool && !hasError
+    const canRetry = Boolean(retryTurnId && onRetryTurn && (!isActiveTurn || hasError))
 
     return (
       <div className="assistant-turn">
@@ -187,13 +208,36 @@ const AssistantTurn = memo(
           <AssistantTurnItem key={message.id} message={message} backendUrl={backendUrl} />
         ))}
         {showThinkingFooter && <TurnThinkingFooter />}
+        {canRetry && retryTurnId && onRetryTurn && (
+          <div className="assistant-turn-actions">
+            <button
+              type="button"
+              className="assistant-turn-retry-btn"
+              aria-label="重试"
+              data-label="重试"
+              title="重试"
+              onClick={() => onRetryTurn(retryTurnId)}
+            >
+              <svg
+                className="assistant-turn-retry-icon"
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <path d="M20 6v5h-5" />
+                <path d="M20 11a8 8 0 1 0 2.1 5.4" />
+              </svg>
+            </button>
+          </div>
+        )}
       </div>
     )
   },
   (prev, next) =>
     prev.messages === next.messages &&
     prev.backendUrl === next.backendUrl &&
-    prev.isActiveTurn === next.isActiveTurn
+    prev.isActiveTurn === next.isActiveTurn &&
+    prev.retryTurnId === next.retryTurnId &&
+    prev.onRetryTurn === next.onRetryTurn
 )
 
 const AssistantTurnItem = memo(

@@ -1388,6 +1388,7 @@ async def get_agent(thread_id: str | None = None):
 class ChatRequest(BaseModel):
     message: str
     thread_id: str = "default"
+    turn_id: str | None = None
     vlm_provider: str | None = None
     vlm_model: str | None = None
     enabled_mcp_tools: list[str] | None = None
@@ -1395,6 +1396,15 @@ class ChatRequest(BaseModel):
     task_id: str | None = None
     workflow_topology: str | None = None
     memory_profile: str | None = None
+    fast_mode: bool | None = None
+
+
+class RetryChatRequest(BaseModel):
+    thread_id: str = "default"
+    retry_turn_id: str
+    vlm_provider: str | None = None
+    vlm_model: str | None = None
+    enabled_mcp_tools: list[str] | None = None
     fast_mode: bool | None = None
 
 

@@ -10,6 +10,7 @@ type ChatTabProps = {
   isStreaming: boolean
   streamStatus: 'streaming' | 'complete'
   onSend: (message: string, images: PendingImageAttachment[]) => Promise<boolean>
+  onRetryTurn?: (turnId: string) => void
   onStop?: () => void
   backendUrl: string
   examplePrompts: string[]
@@ -58,6 +59,7 @@ export function ChatTab({
   isStreaming,
   streamStatus,
   onSend,
+  onRetryTurn,
   onStop,
   backendUrl,
   examplePrompts,
@@ -139,7 +141,12 @@ export function ChatTab({
       )}
       {!minimalUi && <TodoPanel todos={todos} activeTodoId={activeTodoId} fastMode={fastMode} isStreaming={streamStatus === 'streaming'} />}
       <div className="chat-scroll-area">
-        <MessageList messages={thread.messages} backendUrl={backendUrl} streamStatus={streamStatus} />
+        <MessageList
+          messages={thread.messages}
+          backendUrl={backendUrl}
+          streamStatus={streamStatus}
+          onRetryTurn={onRetryTurn}
+        />
       </div>
       <ChatComposer
         disabled={isStreaming}

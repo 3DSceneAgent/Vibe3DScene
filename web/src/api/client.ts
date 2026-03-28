@@ -145,9 +145,22 @@ type StreamChatArgs = {
   baseUrl: string
   message: string
   threadId: string
+  turnId?: string
   enabledMcpTools?: string[]
   fastMode?: boolean
   attachedImageIds?: string[]
+  vlmProvider?: string
+  vlmModel?: string
+  onEvent: (event: StreamEvent) => void
+  signal?: AbortSignal
+}
+
+type RetryStreamChatArgs = {
+  baseUrl: string
+  threadId: string
+  retryTurnId: string
+  enabledMcpTools?: string[]
+  fastMode?: boolean
   vlmProvider?: string
   vlmModel?: string
   onEvent: (event: StreamEvent) => void
@@ -232,34 +245,17 @@ function parseSseChunk(
   }
 }
 
-export async function streamChat({
-  baseUrl,
-  message,
-  threadId,
-  enabledMcpTools,
-  fastMode,
-  attachedImageIds,
-  vlmProvider,
-  vlmModel,
+async function streamJsonSse({
+  url,
+  payload,
   onEvent,
   signal
-}: StreamChatArgs) {
-  const payload: Record<string, unknown> = { message, thread_id: threadId }
-  if (enabledMcpTools) {
-    payload.enabled_mcp_tools = enabledMcpTools
-  }
-  if (typeof fastMode === 'boolean') {
-    payload.fast_mode = fastMode
-  }
-  if (attachedImageIds && attachedImageIds.length > 0) {
-    payload.attached_image_ids = attachedImageIds
-  }
-  if (vlmProvider) {
-    payload.vlm_provider = vlmProvider
-  }
-  if (vlmModel) {
-    payload.vlm_model = vlmModel
-  }
+}: {
+  url: string
+  payload: Record<string, unknown>
+  onEvent: (event: StreamEvent) => void
+  signal?: AbortSignal
+}) {
   let sawTerminalEvent = false
   let resumeStreamId: string | null = null
   let lastEventId: string | null = null
@@ -277,7 +273,7 @@ export async function streamChat({
       requestHeaders['Last-Event-ID'] = lastEventId
     }
 
-    const response = await apiFetch(`${baseUrl}/chat/stream`, {
+    const response = await apiFetch(url, {
       method: 'POST',
       headers: requestHeaders,
       body: JSON.stringify(payload),
@@ -372,6 +368,81 @@ export async function streamChat({
   if (!sawTerminalEvent && !signal?.aborted) {
     onEvent({ error: 'Stream closed unexpectedly.' })
   }
+}
+
+export async function streamChat({
+  baseUrl,
+  message,
+  threadId,
+  turnId,
+  enabledMcpTools,
+  fastMode,
+  attachedImageIds,
+  vlmProvider,
+  vlmModel,
+  onEvent,
+  signal
+}: StreamChatArgs) {
+  const payload: Record<string, unknown> = { message, thread_id: threadId }
+  if (turnId) {
+    payload.turn_id = turnId
+  }
+  if (enabledMcpTools) {
+    payload.enabled_mcp_tools = enabledMcpTools
+  }
+  if (typeof fastMode === 'boolean') {
+    payload.fast_mode = fastMode
+  }
+  if (attachedImageIds && attachedImageIds.length > 0) {
+    payload.attached_image_ids = attachedImageIds
+  }
+  if (vlmProvider) {
+    payload.vlm_provider = vlmProvider
+  }
+  if (vlmModel) {
+    payload.vlm_model = vlmModel
+  }
+  await streamJsonSse({
+    url: `${baseUrl}/chat/stream`,
+    payload,
+    onEvent,
+    signal
+  })
+}
+
+export async function retryChatStream({
+  baseUrl,
+  threadId,
+  retryTurnId,
+  enabledMcpTools,
+  fastMode,
+  vlmProvider,
+  vlmModel,
+  onEvent,
+  signal
+}: RetryStreamChatArgs) {
+  const payload: Record<string, unknown> = {
+    thread_id: threadId,
+    retry_turn_id: retryTurnId
+  }
+  if (enabledMcpTools) {
+    payload.enabled_mcp_tools = enabledMcpTools
+  }
+  if (typeof fastMode === 'boolean') {
+    payload.fast_mode = fastMode
+  }
+  if (vlmProvider) {
+    payload.vlm_provider = vlmProvider
+  }
+  if (vlmModel) {
+    payload.vlm_model = vlmModel
+  }
+  await streamJsonSse({
+    url: `${baseUrl}/chat/retry/stream`,
+    payload,
+    onEvent,
+    signal
+  })
 }
 
 export async function getScene(

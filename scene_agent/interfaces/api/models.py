@@ -3,6 +3,7 @@
 
 from .shared import (
     ChatRequest,
+    RetryChatRequest,
     ChatResponse,
     ImageAssetResponse,
     ImageAssetListResponse,
@@ -27,6 +28,7 @@ from .shared import (
 
 __all__ = [
     "ChatRequest",
+    "RetryChatRequest",
     "ChatResponse",
     "ImageAssetResponse",
     "ImageAssetListResponse",

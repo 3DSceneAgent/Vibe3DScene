@@ -5,7 +5,7 @@ import json
 import pytest
 import requests
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from scene_agent.interfaces import api as api_module
 from scene_agent.interfaces.api import routes_chat
 from scene_agent.session.session_coordinator import OwnerResolution
@@ -301,6 +301,53 @@ async def fake_get_qwen_reasoning_stream_agent(_thread_id=None):
     return QwenReasoningStreamAgent()
 
 
+class ToolCallStartThenToolResultAgent:
+    async def astream(self, *_args, **_kwargs):
+        yield (
+            AIMessageChunk(
+                id="assistant-tool-start",
+                content="",
+                tool_calls=[
+                    {
+                        "name": "generate_hunyuan3d_model",
+                        "args": {"text_prompt": "test"},
+                        "id": "tool-1",
+                        "type": "tool_call",
+                    }
+                ],
+                tool_call_chunks=[
+                    {
+                        "name": "generate_hunyuan3d_model",
+                        "args": '{"text_prompt":"test"}',
+                        "id": "tool-1",
+                        "index": 0,
+                        "type": "tool_call_chunk",
+                    }
+                ],
+            ),
+            {"langgraph_node": "agent"},
+        )
+        await asyncio.sleep(0.01)
+        yield (
+            "updates",
+            {
+                "tools": {
+                    "messages": [
+                        ToolMessage(
+                            name="generate_hunyuan3d_model",
+                            content='{"status":"success"}',
+                            tool_call_id="tool-1",
+                        )
+                    ],
+                },
+            },
+        )
+
+
+async def fake_get_tool_call_start_then_tool_result_agent(_thread_id=None):
+    return ToolCallStartThenToolResultAgent()
+
+
 class ResumableAgent:
     async def astream(self, *_args, **_kwargs):
         yield ("messages", [{"type": "ai", "content": "hello"}])
@@ -498,6 +545,40 @@ def test_chat_stream_emits_qwen_reasoning_chunks_without_fake_tool_summary(monke
         "Need to inspect the scene first. Then I can call the scene tool."
     )
     assert assistant_messages[0]["messages"][0].get("content") == ""
+
+
+def test_chat_stream_emits_tool_call_started_before_tool_result(monkeypatch):
+    monkeypatch.setattr(api_module, "get_agent", fake_get_tool_call_start_then_tool_result_agent)
+    client = TestClient(api_module.app)
+
+    with client.stream("POST", "/chat/stream", json={"message": "hi", "thread_id": "t-tool-start"}) as response:
+        assert response.status_code == 200
+        payloads = collect_sse_payloads(response.iter_lines())
+
+    tool_start_index = next(
+        (
+            index
+            for index, payload in enumerate(payloads)
+            if payload.get("event") == "tool_call_started"
+            and payload.get("tool_call", {}).get("name") == "generate_hunyuan3d_model"
+        ),
+        None,
+    )
+    tool_result_index = next(
+        (
+            index
+            for index, payload in enumerate(payloads)
+            if any(
+                message.get("type") == "tool" and message.get("name") == "generate_hunyuan3d_model"
+                for message in payload.get("messages", [])
+            )
+        ),
+        None,
+    )
+
+    assert tool_start_index is not None
+    assert tool_result_index is not None
+    assert tool_start_index < tool_result_index
 
 
 def test_chat_stream_emits_done(monkeypatch):
