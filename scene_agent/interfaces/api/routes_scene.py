@@ -6,7 +6,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from scene_agent.blender.session_manager import SessionResourceError, get_session_manager
 from scene_agent.config import get_settings
 from scene_agent.memory.scene_memory import SceneMemory
@@ -14,13 +14,20 @@ from scene_agent.utils.diagnostics import elapsed_ms, new_request_id, start_time
 from scene_agent.utils.logging import log_event
 from scene_agent.utils.rendering import process_and_save_render
 
-from .models import BlendFileEntry, BlendFileListResponse
+from .models import (
+    BlendFileEntry,
+    BlendFileListResponse,
+    SceneArtifactManifestResponse,
+)
 from .shared import (
     blend_file_category,
+    load_thread_scene_artifact_manifest,
     build_headless_diagnostics,
     claim_or_proxy_request,
     execute_headless_export_code,
     headless_timeout_seconds_for_session,
+    resolve_thread_artifact_gltf_path,
+    resolve_thread_artifact_renders_dir,
     render_scene_level_views,
     resolve_thread_storage_dir,
     restart_headless_session_after_timeout,
@@ -708,3 +715,41 @@ async def download_scene_blend_file(thread_id: str, path: str, request: Request)
     )
     set_owner_headers(result, resolution)
     return result
+
+
+@router.get(
+    "/threads/{thread_id}/scene-artifacts/manifest",
+    response_model=SceneArtifactManifestResponse,
+)
+async def get_thread_scene_artifact_manifest(thread_id: str):
+    return load_thread_scene_artifact_manifest(thread_id)
+
+
+@router.get("/threads/{thread_id}/scene-artifacts/latest.glb")
+async def download_thread_scene_artifact_gltf(thread_id: str):
+    gltf_path = resolve_thread_artifact_gltf_path(thread_id)
+    if not gltf_path.exists() or not gltf_path.is_file():
+        raise HTTPException(status_code=404, detail="Persisted GLB not found.")
+    return FileResponse(
+        path=str(gltf_path),
+        media_type="model/gltf-binary",
+        filename=f"scene-{thread_id}.glb",
+    )
+
+
+@router.get("/threads/{thread_id}/scene-artifacts/renders/{filename}")
+async def get_thread_scene_artifact_render(thread_id: str, filename: str):
+    normalized = filename.strip().replace("\\", "/").lstrip("/")
+    if not normalized or "/" in normalized or "\x00" in normalized:
+        raise HTTPException(status_code=400, detail="Invalid render filename.")
+    renders_dir = resolve_thread_artifact_renders_dir(thread_id).resolve()
+    target = (renders_dir / normalized).resolve()
+    if target.parent != renders_dir:
+        raise HTTPException(status_code=400, detail="Invalid render filename.")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="Persisted render not found.")
+    return FileResponse(
+        path=str(target),
+        media_type="image/jpeg",
+        filename=target.name,
+    )

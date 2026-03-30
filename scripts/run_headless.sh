@@ -45,6 +45,7 @@ export BLENDER_MODE="headless"
 if [ -z "${SCENE_AGENT_RESET_REDIS_RUNTIME_ON_START:-}" ]; then
     export SCENE_AGENT_RESET_REDIS_RUNTIME_ON_START="1"
 fi
+export SCENE_AGENT_REQUIRE_REDIS="1"
 if [ -z "${SESSION_SWEEP_INTERVAL_SECONDS:-}" ]; then
     if ! dotenv_has_key "SESSION_SWEEP_INTERVAL_SECONDS"; then
         export SESSION_SWEEP_INTERVAL_SECONDS="5"
@@ -57,6 +58,31 @@ if [ -z "${SESSION_IDLE_TIMEOUT_SECONDS:-}" ]; then
         export SESSION_IDLE_TIMEOUT_SECONDS="200"
     fi
 fi
+
+echo "Checking Redis dependency for headless mode..."
+python - <<'PY'
+import sys
+
+from scene_agent.config import get_settings
+
+try:
+    from redis import Redis
+except Exception as exc:  # pragma: no cover - launcher preflight
+    print(f"Redis is required for run_headless.sh, but the redis Python package is unavailable: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+settings = get_settings()
+try:
+    client = Redis.from_url(settings.redis_url, decode_responses=True)
+    client.ping()
+except Exception as exc:  # pragma: no cover - launcher preflight
+    print(
+        f"Redis is required for run_headless.sh, but connection to {settings.redis_url} failed: {exc}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+print(f"Redis OK: {settings.redis_url}")
+PY
 
 echo "Starting headless API (workers=1)..."
 exec python main.py --mode api --host 0.0.0.0 --workers 1

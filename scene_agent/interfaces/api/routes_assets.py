@@ -3,7 +3,7 @@
 from importlib import import_module
 from typing import Any
 from fastapi import APIRouter, HTTPException, UploadFile, File, Request
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from scene_agent.agent.redis_checkpointer import get_graph_checkpointer
 from scene_agent.agent.todo_state import project_latest_todos
 from scene_agent.blender.session_manager import SessionResourceError, get_session_manager
@@ -153,6 +153,25 @@ async def list_image_assets(
     )
     set_owner_headers(response, resolution)
     return payload
+
+
+@router.get("/threads/{thread_id}/images/{image_id}")
+async def get_image_asset_file(thread_id: str, image_id: str):
+    """
+    Serve one persisted image asset file for stable message attachment rendering.
+    """
+    memory = get_image_asset_memory()
+    assets = memory.get_assets_by_ids(thread_id, [image_id])
+    if not assets:
+        raise HTTPException(status_code=404, detail="Image asset not found.")
+    asset = assets[0]
+    if not asset.stored_path:
+        raise HTTPException(status_code=404, detail="Image asset file is missing.")
+    return FileResponse(
+        path=asset.stored_path,
+        media_type=asset.content_type or "application/octet-stream",
+        filename=asset.filename or f"{asset.id}.png",
+    )
 
 @router.get("/todos/{thread_id}")
 async def get_todos(thread_id: str, request: Request, response: Response):

@@ -27,11 +27,12 @@ type ThreadListProps = {
 
 function getThreadLastActivityMs(thread: Thread): number {
   const createdAt = Number.isFinite(thread.createdAt) ? thread.createdAt : 0
+  const updatedAtMs = Number.isFinite(thread.updatedAtMs) ? Number(thread.updatedAtMs) : 0
   const lastMessageAt = thread.messages.reduce((latest, message) => {
     const timestamp = Number(message.createdAt)
     return Number.isFinite(timestamp) ? Math.max(latest, timestamp) : latest
   }, createdAt)
-  return Math.max(createdAt, lastMessageAt)
+  return Math.max(createdAt, updatedAtMs, lastMessageAt)
 }
 
 function clampMenuPosition(clientX: number, clientY: number, itemCount: number) {

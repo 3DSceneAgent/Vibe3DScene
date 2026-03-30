@@ -44,7 +44,58 @@ export type ImageAsset = {
   sha256: string
   uploaded_at: string
   source?: string
+  asset_url?: string | null
   previewUrl?: string
+}
+
+export type HistoryToolMedia = {
+  kind: string
+  value: string
+}
+
+export type HistoryMessage = {
+  id: string
+  turn_id?: string | null
+  role: 'user' | 'assistant' | 'tool' | string
+  content: string
+  created_at_ms: number
+  thinking?: string | null
+  tool_name?: string | null
+  tool_payload?: unknown
+  tool_media?: HistoryToolMedia[]
+  attached_images?: ImageAsset[]
+}
+
+export type ThreadHistoryInfo = {
+  thread_id: string
+  title: string
+  updated_at_ms: number
+  scene_revision?: number | null
+  messages: HistoryMessage[]
+  todos: TodoItem[]
+}
+
+export type SceneArtifactManifestInfo = {
+  thread_id: string
+  has_persisted_blend: boolean
+  scene_revision?: number | null
+  generated_at_ms?: number | null
+  gltf_url?: string | null
+  renders: RenderImage[]
+}
+
+export type ThreadSummaryInfo = {
+  thread_id: string
+  title: string
+  updated_at_ms: number
+  has_persisted_scene: boolean
+  scene_revision?: number | null
+  has_runtime: boolean
+}
+
+export type ThreadListInfo = {
+  threads: string[]
+  summaries: ThreadSummaryInfo[]
 }
 
 export type GraphNodeStream = {

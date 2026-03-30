@@ -50,6 +50,7 @@ async def root():
             "scene_renders": "GET /scene/{thread_id}/renders",
             "scene_gltf": "GET /scene/{thread_id}/gltf",
             "images": "GET/POST /threads/{thread_id}/images",
+            "image_asset": "GET /threads/{thread_id}/images/{image_id}",
             "example_prompts": "GET /example-prompts",
             "vlm_models": "GET /vlm/models",
             "mcp_tools": "GET /threads/{thread_id}/mcp-tools",
@@ -57,8 +58,11 @@ async def root():
             "session_debug": "GET /headless/session-debug",
             "release_runtime": "POST /threads/{thread_id}/release-runtime",
             "rename_thread_title": "PATCH /threads/{thread_id}/title",
+            "thread_history": "GET /threads/{thread_id}/history",
+            "scene_artifacts_manifest": "GET /threads/{thread_id}/scene-artifacts/manifest",
             "todos": "GET /todos/{thread_id}",
             "threads": "GET /threads",
+            "delete_all_threads": "DELETE /threads",
             "delete_thread": "DELETE /threads/{thread_id}"
         }
     }

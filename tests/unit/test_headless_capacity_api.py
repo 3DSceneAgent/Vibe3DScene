@@ -76,6 +76,52 @@ class _ManagerStub:
         return True, True
 
 
+class _PingClient:
+    def ping(self) -> bool:
+        return True
+
+
+def test_ensure_headless_redis_dependencies_available_accepts_redis_backends(monkeypatch):
+    monkeypatch.setattr(
+        api_shared,
+        "get_session_coordinator",
+        lambda: SimpleNamespace(registry=SimpleNamespace(client=_PingClient())),
+    )
+    monkeypatch.setattr(
+        api_shared,
+        "get_graph_checkpointer",
+        lambda: SimpleNamespace(_client=_PingClient()),
+    )
+    monkeypatch.setattr(
+        api_shared,
+        "get_image_asset_store",
+        lambda: SimpleNamespace(_client=_PingClient(), _fallback_mode=False),
+    )
+
+    api_shared.ensure_headless_redis_dependencies_available()
+
+
+def test_ensure_headless_redis_dependencies_available_rejects_inmemory_fallback(monkeypatch):
+    monkeypatch.setattr(
+        api_shared,
+        "get_session_coordinator",
+        lambda: SimpleNamespace(registry=SimpleNamespace(client=_PingClient())),
+    )
+    monkeypatch.setattr(
+        api_shared,
+        "get_graph_checkpointer",
+        lambda: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        api_shared,
+        "get_image_asset_store",
+        lambda: SimpleNamespace(_client=_PingClient(), _fallback_mode=False),
+    )
+
+    with pytest.raises(RuntimeError, match="Redis-backed graph checkpointing"):
+        api_shared.ensure_headless_redis_dependencies_available()
+
+
 def test_teardown_thread_session_releases_snapshot_ports(monkeypatch):
     thread_id = "thread-teardown-snapshot"
     session = SimpleNamespace(
@@ -143,8 +189,10 @@ def test_idle_sweeper_releases_snapshot_ports(monkeypatch):
     manager = _ManagerStub(session)
     coordinator = _CoordinatorStub()
     settings = SimpleNamespace(
+        blender_mode="headless",
         blender_host="localhost",
         session_sweep_interval_seconds=1,
+        session_shared_storage_root="/tmp/scene_agent_sessions",
     )
 
     sleep_calls = 0
@@ -200,8 +248,10 @@ def test_idle_sweeper_still_cleans_local_idle_session_when_not_owner(monkeypatch
     manager = _ManagerStub(session)
     coordinator = _CoordinatorNotOwner()
     settings = SimpleNamespace(
+        blender_mode="headless",
         blender_host="localhost",
         session_sweep_interval_seconds=1,
+        session_shared_storage_root="/tmp/scene_agent_sessions",
     )
 
     sleep_calls = 0

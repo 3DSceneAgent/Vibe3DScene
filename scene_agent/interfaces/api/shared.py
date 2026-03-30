@@ -6,15 +6,18 @@ Provides HTTP endpoints and streaming support.
 import asyncio
 import json
 import logging
+import mimetypes
 import os
 import re
+import shutil
 import tempfile
 import threading
 import time
 from pathlib import Path
 from typing import Dict, Any
+from urllib.parse import quote
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -23,6 +26,14 @@ from scene_agent.blender.connection import BlenderConnection
 from scene_agent.agent.graph import create_agent_graph
 from scene_agent.agent.redis_checkpointer import get_graph_checkpointer
 from scene_agent.agent.state import AgentState
+from scene_agent.agent.todo_state import project_latest_todos
+from scene_agent.agent.nodes.constants_runtime import (
+    FAST_MODE_EVIDENCE_REQUIRED_MESSAGE_ID,
+    RENDER_VISION_MESSAGE_ID,
+    SCENE_OBSERVE_MESSAGE_ID,
+    TODO_BLOCKED_RECOVERY_ACTION_MESSAGE_ID,
+    TODO_BLOCKED_RECOVERY_MESSAGE_ID,
+)
 from scene_agent.blender.session_manager import (
     SessionResourceError,
     SessionResourceReason,
@@ -37,6 +48,7 @@ from scene_agent.memory.reference_image_memory import (
     ImageAsset,
     get_image_asset_memory,
 )
+from scene_agent.memory.reference_image_store import get_image_asset_store
 from scene_agent.session import get_session_coordinator
 from scene_agent.session.owner_proxy import OwnerProxyError, forward_request_to_owner
 from scene_agent.utils.diagnostics import (
@@ -83,6 +95,9 @@ _agent_graphs_by_thread: Dict[str, Any] = {}
 _agent_graph_refresh_tasks: Dict[str, asyncio.Task] = {}
 _agent_graph_refresh_lock = threading.Lock()
 _idle_sweeper_task: asyncio.Task | None = None
+_artifact_refresh_tasks: Dict[str, asyncio.Task] = {}
+_artifact_refresh_deadlines: Dict[str, float] = {}
+_artifact_refresh_lock = threading.Lock()
 
 # Blender addon connection (direct socket)
 _blender_connection = None
@@ -106,6 +121,11 @@ _SCENE_LEVEL_RENDER_CAMERA_CONFIGS: tuple[tuple[str, float, float], ...] = (
     ("SceneCamera_TopDown", 0.0, 89.0),
 )
 _SCENE_LEVEL_RENDER_FOCAL_MM = 42.0
+_SCENE_ARTIFACTS_DIRNAME = "artifacts"
+_SCENE_ARTIFACT_RENDERS_DIRNAME = "renders"
+_SCENE_ARTIFACT_GLB_FILENAME = "latest.glb"
+_SCENE_ARTIFACT_MANIFEST_FILENAME = "scene_manifest.json"
+_DEFAULT_ARTIFACT_REFRESH_DEBOUNCE_SECONDS = 2.0
 _DEFAULT_API_LOG_PATH = Path(__file__).resolve().parents[3] / "logs" / "api_server.log"
 _API_LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
 
@@ -333,6 +353,43 @@ def _build_capacity_error(
 def _should_reset_redis_runtime_on_start() -> bool:
     raw = os.getenv("SCENE_AGENT_RESET_REDIS_RUNTIME_ON_START", "")
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _should_require_redis_for_headless() -> bool:
+    raw = os.getenv("SCENE_AGENT_REQUIRE_REDIS", "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def ensure_headless_redis_dependencies_available() -> None:
+    coordinator = get_session_coordinator()
+    registry = getattr(coordinator, "registry", None)
+    registry_client = getattr(registry, "client", None) if registry is not None else None
+    if registry_client is None:
+        raise RuntimeError("Headless mode requires Redis session coordination; registry is unavailable.")
+    try:
+        registry_client.ping()
+    except Exception as exc:
+        raise RuntimeError(f"Headless mode requires Redis session coordination: {exc}") from exc
+
+    checkpointer = get_graph_checkpointer()
+    checkpointer_client = getattr(checkpointer, "_client", None)
+    if checkpointer_client is None:
+        raise RuntimeError("Headless mode requires Redis-backed graph checkpointing; in-memory fallback is active.")
+    try:
+        checkpointer_client.ping()
+    except Exception as exc:
+        raise RuntimeError(f"Headless mode requires Redis-backed graph checkpointing: {exc}") from exc
+
+    image_store = get_image_asset_store()
+    if bool(getattr(image_store, "_fallback_mode", False)):
+        raise RuntimeError("Headless mode requires Redis-backed image metadata storage; fallback mode is active.")
+    image_store_client = getattr(image_store, "_client", None)
+    if image_store_client is None:
+        raise RuntimeError("Headless mode requires Redis-backed image metadata storage; Redis client is unavailable.")
+    try:
+        image_store_client.ping()
+    except Exception as exc:
+        raise RuntimeError(f"Headless mode requires Redis-backed image metadata storage: {exc}") from exc
 
 
 def restart_headless_session_after_timeout(thread_id: str) -> None:
@@ -1423,11 +1480,72 @@ class ImageAssetResponse(BaseModel):
     sha256: str
     uploaded_at: str
     source: str
+    asset_url: str | None = None
 
 
 class ImageAssetListResponse(BaseModel):
     thread_id: str
     images: list[ImageAssetResponse]
+
+
+class HistoryToolMediaResponse(BaseModel):
+    kind: str
+    value: str
+
+
+class HistoryMessageResponse(BaseModel):
+    id: str
+    turn_id: str | None = None
+    role: str
+    content: str
+    created_at_ms: int
+    thinking: str | None = None
+    tool_name: str | None = None
+    tool_payload: Any | None = None
+    tool_media: list[HistoryToolMediaResponse] = Field(default_factory=list)
+    attached_images: list[ImageAssetResponse] = Field(default_factory=list)
+
+
+class ThreadHistoryResponse(BaseModel):
+    thread_id: str
+    title: str
+    updated_at_ms: int
+    scene_revision: int | None = None
+    messages: list[HistoryMessageResponse] = Field(default_factory=list)
+    todos: list[Dict[str, Any]] = Field(default_factory=list)
+
+
+class SceneArtifactRenderResponse(BaseModel):
+    camera_name: str
+    image_url: str
+
+
+class SceneArtifactManifestResponse(BaseModel):
+    thread_id: str
+    has_persisted_blend: bool
+    scene_revision: int | None = None
+    generated_at_ms: int | None = None
+    gltf_url: str | None = None
+    renders: list[SceneArtifactRenderResponse] = Field(default_factory=list)
+
+
+class ThreadSummaryResponse(BaseModel):
+    thread_id: str
+    title: str
+    updated_at_ms: int
+    has_persisted_scene: bool
+    scene_revision: int | None = None
+    has_runtime: bool
+
+
+class ThreadListResponse(BaseModel):
+    threads: list[str] = Field(default_factory=list)
+    summaries: list[ThreadSummaryResponse] = Field(default_factory=list)
+
+
+class ClearThreadsResponse(BaseModel):
+    deleted_thread_ids: list[str] = Field(default_factory=list)
+    failed_thread_ids: list[str] = Field(default_factory=list)
 
 
 class ExamplePromptsResponse(BaseModel):
@@ -1558,6 +1676,7 @@ def serialize_image_asset(image: ImageAsset) -> ImageAssetResponse:
         sha256=image.sha256,
         uploaded_at=image.uploaded_at,
         source=image.source,
+        asset_url=build_thread_image_asset_url(image.thread_id, image.id),
     )
 
 
@@ -1574,6 +1693,550 @@ def resolve_thread_storage_dir(thread_id: str) -> Path:
         or settings.session_shared_storage_root
     )
     return Path(storage_root) / _safe_storage_session_id(thread_id)
+
+
+def build_thread_image_asset_url(thread_id: str, image_id: str) -> str:
+    return f"/threads/{quote(thread_id, safe='')}/images/{quote(image_id, safe='')}"
+
+
+def resolve_thread_artifacts_dir(thread_id: str) -> Path:
+    return resolve_thread_storage_dir(thread_id) / _SCENE_ARTIFACTS_DIRNAME
+
+
+def resolve_thread_artifact_renders_dir(thread_id: str) -> Path:
+    return resolve_thread_artifacts_dir(thread_id) / _SCENE_ARTIFACT_RENDERS_DIRNAME
+
+
+def resolve_thread_artifact_gltf_path(thread_id: str) -> Path:
+    return resolve_thread_artifacts_dir(thread_id) / _SCENE_ARTIFACT_GLB_FILENAME
+
+
+def resolve_thread_artifact_manifest_path(thread_id: str) -> Path:
+    return resolve_thread_artifacts_dir(thread_id) / _SCENE_ARTIFACT_MANIFEST_FILENAME
+
+
+def build_thread_artifact_gltf_url(thread_id: str) -> str:
+    return f"/threads/{quote(thread_id, safe='')}/scene-artifacts/latest.glb"
+
+
+def build_thread_artifact_render_url(thread_id: str, filename: str) -> str:
+    return f"/threads/{quote(thread_id, safe='')}/scene-artifacts/renders/{quote(filename, safe='')}"
+
+
+def _path_mtime_ms(path: Path) -> int | None:
+    try:
+        if not path.exists():
+            return None
+        return int(path.stat().st_mtime * 1000)
+    except OSError:
+        return None
+
+
+def _load_json_file(path: Path) -> dict[str, Any] | None:
+    try:
+        if not path.exists():
+            return None
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def get_thread_scene_revision(thread_id: str) -> int | None:
+    manifest_path = resolve_thread_artifact_manifest_path(thread_id)
+    manifest_raw = _load_json_file(manifest_path)
+    if isinstance(manifest_raw, dict):
+        scene_revision = manifest_raw.get("scene_revision")
+        if isinstance(scene_revision, int) and scene_revision > 0:
+            return scene_revision
+        generated_at_ms = manifest_raw.get("generated_at_ms")
+        if isinstance(generated_at_ms, int) and generated_at_ms > 0:
+            return generated_at_ms
+    return _path_mtime_ms(resolve_thread_storage_dir(thread_id) / "scene.blend")
+
+
+def _coerce_scene_artifact_renders(thread_id: str, raw_renders: Any) -> list[SceneArtifactRenderResponse]:
+    if not isinstance(raw_renders, list):
+        return []
+    renders: list[SceneArtifactRenderResponse] = []
+    for entry in raw_renders:
+        if not isinstance(entry, dict):
+            continue
+        camera_name = entry.get("camera_name")
+        image_url = entry.get("image_url")
+        if not isinstance(camera_name, str) or not camera_name:
+            continue
+        if not isinstance(image_url, str) or not image_url:
+            continue
+        renders.append(SceneArtifactRenderResponse(camera_name=camera_name, image_url=image_url))
+    return renders
+
+
+def load_thread_scene_artifact_manifest(thread_id: str) -> SceneArtifactManifestResponse:
+    manifest_path = resolve_thread_artifact_manifest_path(thread_id)
+    manifest_raw = _load_json_file(manifest_path) or {}
+    blend_path = resolve_thread_storage_dir(thread_id) / "scene.blend"
+    gltf_path = resolve_thread_artifact_gltf_path(thread_id)
+    has_persisted_blend = blend_path.exists() and blend_path.is_file()
+    raw_scene_revision = manifest_raw.get("scene_revision")
+    scene_revision = raw_scene_revision if isinstance(raw_scene_revision, int) and raw_scene_revision > 0 else None
+    raw_generated_at_ms = manifest_raw.get("generated_at_ms")
+    generated_at_ms = raw_generated_at_ms if isinstance(raw_generated_at_ms, int) and raw_generated_at_ms > 0 else None
+    raw_gltf_url = manifest_raw.get("gltf_url")
+    gltf_url = raw_gltf_url if isinstance(raw_gltf_url, str) and raw_gltf_url else None
+    if gltf_url and not gltf_path.exists():
+        gltf_url = None
+    if gltf_url is None and gltf_path.exists():
+        gltf_url = build_thread_artifact_gltf_url(thread_id)
+    renders = _coerce_scene_artifact_renders(thread_id, manifest_raw.get("renders"))
+    return SceneArtifactManifestResponse(
+        thread_id=thread_id,
+        has_persisted_blend=has_persisted_blend,
+        scene_revision=scene_revision or get_thread_scene_revision(thread_id),
+        generated_at_ms=generated_at_ms,
+        gltf_url=gltf_url,
+        renders=renders,
+    )
+
+
+def _headless_session_is_live(thread_id: str) -> bool:
+    session = get_session_manager().get(thread_id)
+    if session is None or session.mode != "headless":
+        return False
+    process = getattr(session, "process", None)
+    mcp_process = getattr(session, "mcp_process", None)
+    if process is None or mcp_process is None:
+        return False
+    try:
+        return process.poll() is None and mcp_process.poll() is None and session.port is not None
+    except Exception:
+        return False
+
+
+def _wait_for_file(path: Path, *, retries: int = 20, delay_seconds: float = 0.15) -> bool:
+    for attempt in range(retries):
+        try:
+            if path.exists() and path.stat().st_size > 0:
+                return True
+        except OSError:
+            pass
+        if attempt < retries - 1:
+            time.sleep(delay_seconds)
+    return False
+
+
+def _export_scene_gltf_to_path(thread_id: str, target_path: Path) -> bool:
+    temp_path = target_path.with_suffix(f".tmp-{int(time.time() * 1000)}.glb")
+    export_code = (
+        "import bpy\n"
+        f"bpy.ops.export_scene.gltf(filepath=r\"{temp_path}\", "
+        "export_format='GLB', export_apply=True, export_lights=True)\n"
+    )
+    try:
+        send_blender_command_sync("execute_code", {"code": export_code}, thread_id)
+        if not _wait_for_file(temp_path):
+            return False
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(temp_path, target_path)
+        return True
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+
+
+def _render_scene_level_views_to_artifacts(thread_id: str) -> list[dict[str, str]]:
+    renders_dir = resolve_thread_artifact_renders_dir(thread_id)
+    renders_dir.mkdir(parents=True, exist_ok=True)
+    new_filenames: set[str] = set()
+    renders: list[dict[str, str]] = []
+
+    for camera_name, azimuth, elevation in _SCENE_LEVEL_RENDER_CAMERA_CONFIGS:
+        temp_path = Path(tempfile.gettempdir()) / f"scene_artifact_{thread_id}_{camera_name}_{int(time.time() * 1000)}.png"
+        try:
+            result = send_blender_command_sync(
+                "camera_observe",
+                {
+                    "object_names": [],
+                    "mode": "single_view",
+                    "focal_length": _SCENE_LEVEL_RENDER_FOCAL_MM,
+                    "azimuth": azimuth,
+                    "elevation": elevation,
+                    "reuse_cameras": True,
+                    "camera_name": camera_name,
+                    "camera_kind": "scene_level",
+                    "filepath": str(temp_path),
+                },
+                thread_id,
+            )
+            filepath = Path(str((result or {}).get("filepath") or temp_path))
+            if not filepath.exists():
+                continue
+            image_url = process_and_save_render(
+                str(filepath),
+                thread_id,
+                camera_name,
+                renders_dir=renders_dir,
+                url_prefix=f"/threads/{quote(thread_id, safe='')}/scene-artifacts/renders",
+                log_event=log_event,
+            )
+            filename = Path(image_url).name
+            new_filenames.add(filename)
+            renders.append({"camera_name": camera_name, "image_url": image_url})
+        except Exception as exc:
+            log_event(
+                "warning",
+                "scene_artifact_render_failed",
+                {"thread_id": thread_id, "camera_name": camera_name, "error": str(exc)},
+            )
+        finally:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except OSError:
+                pass
+
+    for existing in renders_dir.glob("*.jpg"):
+        if existing.name in new_filenames:
+            continue
+        try:
+            existing.unlink()
+        except OSError:
+            pass
+
+    return renders
+
+
+def persist_thread_scene_artifacts_sync(thread_id: str) -> SceneArtifactManifestResponse | None:
+    settings = get_settings()
+    if settings.blender_mode != "headless":
+        return None
+    if not _headless_session_is_live(thread_id):
+        return load_thread_scene_artifact_manifest(thread_id)
+
+    storage_dir = resolve_thread_storage_dir(thread_id)
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    artifacts_dir = resolve_thread_artifacts_dir(thread_id)
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = resolve_thread_artifact_manifest_path(thread_id)
+
+    existing_manifest = load_thread_scene_artifact_manifest(thread_id)
+    manager = get_session_manager()
+    try:
+        manager.persist_session_blend(thread_id, min_interval_seconds=0.0)
+    except Exception:
+        pass
+
+    gltf_ok = _export_scene_gltf_to_path(thread_id, resolve_thread_artifact_gltf_path(thread_id))
+    renders = _render_scene_level_views_to_artifacts(thread_id)
+    revision = int(time.time() * 1000)
+    manifest_payload = {
+        "thread_id": thread_id,
+        "has_persisted_blend": bool((storage_dir / "scene.blend").exists()),
+        "scene_revision": revision,
+        "generated_at_ms": revision,
+        "gltf_url": build_thread_artifact_gltf_url(thread_id) if gltf_ok else existing_manifest.gltf_url,
+        "renders": renders if renders else [item.model_dump() for item in existing_manifest.renders],
+    }
+    _write_json_file(manifest_path, manifest_payload)
+    return load_thread_scene_artifact_manifest(thread_id)
+
+
+async def _run_thread_scene_artifact_refresh(thread_id: str) -> None:
+    try:
+        while True:
+            with _artifact_refresh_lock:
+                deadline = _artifact_refresh_deadlines.get(thread_id)
+            if deadline is None:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+                continue
+
+            await asyncio.to_thread(persist_thread_scene_artifacts_sync, thread_id)
+
+            with _artifact_refresh_lock:
+                latest_deadline = _artifact_refresh_deadlines.get(thread_id)
+                if latest_deadline == deadline:
+                    _artifact_refresh_deadlines.pop(thread_id, None)
+                    _artifact_refresh_tasks.pop(thread_id, None)
+                    return
+    except Exception as exc:
+        log_event(
+            "warning",
+            "scene_artifact_refresh_failed",
+            {"thread_id": thread_id, "error": str(exc)},
+        )
+        with _artifact_refresh_lock:
+            _artifact_refresh_deadlines.pop(thread_id, None)
+            _artifact_refresh_tasks.pop(thread_id, None)
+
+
+def schedule_thread_scene_artifact_refresh(
+    thread_id: str,
+    *,
+    debounce_seconds: float = _DEFAULT_ARTIFACT_REFRESH_DEBOUNCE_SECONDS,
+) -> bool:
+    if get_settings().blender_mode != "headless":
+        return False
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+
+    with _artifact_refresh_lock:
+        _artifact_refresh_deadlines[thread_id] = time.monotonic() + max(0.0, debounce_seconds)
+        task = _artifact_refresh_tasks.get(thread_id)
+        if task is None or task.done():
+            _artifact_refresh_tasks[thread_id] = loop.create_task(
+                _run_thread_scene_artifact_refresh(thread_id)
+            )
+    return True
+
+
+_INTERNAL_HISTORY_MESSAGE_IDS = frozenset(
+    {
+        RENDER_VISION_MESSAGE_ID,
+        SCENE_OBSERVE_MESSAGE_ID,
+        FAST_MODE_EVIDENCE_REQUIRED_MESSAGE_ID,
+        TODO_BLOCKED_RECOVERY_MESSAGE_ID,
+        TODO_BLOCKED_RECOVERY_ACTION_MESSAGE_ID,
+    }
+)
+
+
+def _load_thread_checkpoint_channel_values(thread_id: str) -> dict[str, Any]:
+    try:
+        checkpointer = get_graph_checkpointer()
+        get_tuple = getattr(checkpointer, "get_tuple", None)
+        if not callable(get_tuple):
+            return {}
+        snapshot = get_tuple({"configurable": {"thread_id": thread_id}})
+    except Exception:
+        return {}
+
+    checkpoint = getattr(snapshot, "checkpoint", None)
+    if checkpoint is None and isinstance(snapshot, dict):
+        checkpoint = snapshot.get("checkpoint")
+    if not isinstance(checkpoint, dict):
+        return {}
+    channel_values = checkpoint.get("channel_values")
+    return dict(channel_values) if isinstance(channel_values, dict) else {}
+
+
+def _load_thread_checkpoint_timestamp_ms(thread_id: str) -> int:
+    try:
+        checkpointer = get_graph_checkpointer()
+        get_tuple = getattr(checkpointer, "get_tuple", None)
+        if not callable(get_tuple):
+            return 0
+        snapshot = get_tuple({"configurable": {"thread_id": thread_id}})
+    except Exception:
+        return 0
+    checkpoint = getattr(snapshot, "checkpoint", None)
+    if not isinstance(checkpoint, dict):
+        return 0
+    checkpoint_id = checkpoint.get("id")
+    if isinstance(checkpoint_id, str):
+        prefix = checkpoint_id.split(".", 1)[0]
+        try:
+            return int(prefix)
+        except ValueError:
+            return 0
+    return 0
+
+
+def _list_checkpoint_thread_ids(*, limit: int = 2000) -> list[str]:
+    try:
+        checkpointer = get_graph_checkpointer()
+        client = getattr(checkpointer, "_client", None)
+        prefix = str(getattr(checkpointer, "_prefix", "")).strip()
+        if client is None or not prefix:
+            return []
+        thread_ids: list[str] = []
+        seen: set[str] = set()
+        pattern = f"{prefix}:ckpt:*:*:index"
+        prefix_text = f"{prefix}:ckpt:"
+        suffix_text = ":index"
+        for raw_key in client.scan_iter(pattern):
+            key = str(raw_key)
+            if not key.startswith(prefix_text) or not key.endswith(suffix_text):
+                continue
+            body = key[len(prefix_text) : -len(suffix_text)]
+            if ":" not in body:
+                continue
+            thread_id = body.rsplit(":", 1)[0]
+            if not thread_id or thread_id in seen:
+                continue
+            seen.add(thread_id)
+            thread_ids.append(thread_id)
+            if len(thread_ids) >= limit:
+                break
+        return thread_ids
+    except Exception:
+        return []
+
+
+def _collect_media_urls(value: Any, results: list[HistoryToolMediaResponse] | None = None) -> list[HistoryToolMediaResponse]:
+    collected = results if results is not None else []
+    if isinstance(value, str):
+        if (
+            value.startswith("/renders/")
+            or value.startswith("/threads/")
+            or (
+                re.match(r"^https?://", value, re.IGNORECASE)
+                and ("/renders/" in value or re.search(r"\.(?:png|jpe?g|gif|webp)(?:\?|$)", value, re.IGNORECASE))
+            )
+        ):
+            collected.append(HistoryToolMediaResponse(kind="url", value=value))
+        return collected
+    if isinstance(value, list):
+        for item in value:
+            _collect_media_urls(item, collected)
+        return collected
+    if isinstance(value, dict):
+        for item in value.values():
+            _collect_media_urls(item, collected)
+        return collected
+    return collected
+
+
+def _coerce_message_timestamp_ms(serialized: dict[str, Any], fallback_ms: int) -> int:
+    additional_kwargs = serialized.get("additional_kwargs")
+    if isinstance(additional_kwargs, dict):
+        raw_created_at_ms = additional_kwargs.get("created_at_ms")
+        try:
+            created_at_ms = int(raw_created_at_ms)
+            if created_at_ms > 0:
+                return created_at_ms
+        except (TypeError, ValueError):
+            pass
+    return fallback_ms
+
+
+def _extract_attached_image_ids(serialized: dict[str, Any]) -> list[str]:
+    additional_kwargs = serialized.get("additional_kwargs")
+    if not isinstance(additional_kwargs, dict):
+        return []
+    raw_ids = additional_kwargs.get("attached_image_ids")
+    if not isinstance(raw_ids, list):
+        return []
+    return [item for item in raw_ids if isinstance(item, str) and item.strip()]
+
+
+def _derive_thread_title(thread_id: str, messages: list[Any]) -> str:
+    meta = get_session_coordinator().get_session_meta(thread_id) or {}
+    raw_title = str(meta.get("title") or "").strip()
+    if raw_title:
+        return normalize_thread_title(raw_title)
+    for message in messages:
+        serialized = serialize_message(message)
+        if serialized.get("type") != "human":
+            continue
+        text = message_content_to_text(serialized.get("content")).strip()
+        if text:
+            return normalize_thread_title(text[:32]) or "New chat"
+    return "New chat"
+
+
+def build_thread_history_payload(thread_id: str) -> ThreadHistoryResponse:
+    channel_values = _load_thread_checkpoint_channel_values(thread_id)
+    raw_messages = channel_values.get("messages")
+    messages = list(raw_messages) if isinstance(raw_messages, list) else []
+    updated_at_ms = _load_thread_checkpoint_timestamp_ms(thread_id)
+    if updated_at_ms <= 0:
+        meta = get_session_coordinator().get_session_meta(thread_id) or {}
+        updated_at_ms = (
+            _safe_int_optional(meta.get("last_active_ms"))
+            or _safe_int_optional(meta.get("updated_at_ms"))
+            or int(time.time() * 1000)
+        )
+
+    assets_by_id = {
+        image.id: serialize_image_asset(image)
+        for image in get_image_asset_memory().list_assets(thread_id)
+    }
+
+    base_timestamp = max(0, updated_at_ms - max(0, len(messages) * 1000))
+    history_messages: list[HistoryMessageResponse] = []
+    current_turn_id: str | None = None
+    for index, raw_message in enumerate(messages):
+        serialized = serialize_message(raw_message)
+        message_type = str(serialized.get("type") or "")
+        message_id = serialized.get("id")
+        if not isinstance(message_id, str) or not message_id:
+            message_id = f"{thread_id}-history-{index}"
+        if message_id in _INTERNAL_HISTORY_MESSAGE_IDS or message_type == "system":
+            continue
+        role = "assistant"
+        if message_type == "human":
+            role = "user"
+        elif message_type == "tool":
+            role = "tool"
+        elif message_type not in {"ai", "assistant"}:
+            continue
+
+        fallback_ms = base_timestamp + index * 1000
+        created_at_ms = _coerce_message_timestamp_ms(serialized, fallback_ms)
+        content = message_content_to_text(serialized.get("content"))
+        thinking = extract_message_reasoning_text(serialized).strip() or None
+        if role == "assistant" and not content.strip() and not thinking:
+            continue
+        if role == "user":
+            current_turn_id = message_id
+        attached_images: list[ImageAssetResponse] = []
+        for image_id in _extract_attached_image_ids(serialized):
+            image = assets_by_id.get(image_id)
+            if image is not None:
+                attached_images.append(image)
+        tool_name = None
+        tool_payload = None
+        tool_media: list[HistoryToolMediaResponse] = []
+        if role == "tool":
+            raw_name = serialized.get("name")
+            tool_name = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else None
+            tool_payload = _sanitize_stream_value(serialized.get("content"))
+            tool_media = _collect_media_urls(serialized.get("content"))
+        history_messages.append(
+            HistoryMessageResponse(
+                id=message_id,
+                turn_id=current_turn_id,
+                role=role,
+                content=content,
+                created_at_ms=created_at_ms,
+                thinking=thinking,
+                tool_name=tool_name,
+                tool_payload=tool_payload,
+                tool_media=tool_media,
+                attached_images=attached_images,
+            )
+        )
+
+    todos = list(
+        project_latest_todos(
+            channel_values.get("todo_versions"),
+            fallback_todos_raw=channel_values.get("todos"),
+        )
+    )
+    return ThreadHistoryResponse(
+        thread_id=thread_id,
+        title=_derive_thread_title(thread_id, messages),
+        updated_at_ms=updated_at_ms,
+        scene_revision=get_thread_scene_revision(thread_id),
+        messages=history_messages,
+        todos=todos,
+    )
 
 
 def parse_example_prompts(markdown_text: str) -> list[str]:
@@ -1966,6 +2629,10 @@ async def _idle_session_sweeper() -> None:
             idle_sessions = manager.get_idle_sessions()
             for session in idle_sessions:
                 try:
+                    await asyncio.to_thread(
+                        persist_thread_scene_artifacts_sync,
+                        session.session_id,
+                    )
                     headless_host_snapshot = session.host or settings.blender_host
                     headless_port_snapshot = session.port
                     mcp_host_snapshot = session.mcp_host or os.getenv("BLENDER_MCP_HOST", "localhost")
@@ -2035,10 +2702,14 @@ async def _idle_session_sweeper() -> None:
 async def startup_event():
     """Initialize agent on startup"""
     global _idle_sweeper_task
+    require_headless_redis = False
     try:
         log_path = _configure_api_file_logging()
         log_event("info", "api_file_logging_enabled", {"log_path": str(log_path)})
         settings = get_settings()
+        require_headless_redis = settings.blender_mode == "headless" and _should_require_redis_for_headless()
+        if require_headless_redis:
+            ensure_headless_redis_dependencies_available()
         coordinator = get_session_coordinator()
         if _should_reset_redis_runtime_on_start():
             reset_result = coordinator.clear_runtime_state()
@@ -2068,6 +2739,8 @@ async def startup_event():
         log_event("info", "agent_initialized", {"mode": settings.blender_mode})
     except Exception as e:
         log_event("error", "agent_init_failed", {"error": str(e)})
+        if require_headless_redis:
+            raise
 
 
 @app.on_event("shutdown")
@@ -2088,6 +2761,13 @@ async def shutdown_event():
         manager = get_session_manager()
         for session in manager.list_sessions():
             if session.mode == "headless":
+                try:
+                    await asyncio.to_thread(
+                        persist_thread_scene_artifacts_sync,
+                        session.session_id,
+                    )
+                except Exception:
+                    pass
                 try:
                     manager.persist_session_blend(session.session_id)
                 except Exception:
@@ -2261,6 +2941,65 @@ def collect_headless_runtime_entries(*, frontend_client_id: str) -> list[dict[st
     return entries
 
 
+def build_thread_summaries(*, frontend_client_id: str) -> list[ThreadSummaryResponse]:
+    summaries: list[ThreadSummaryResponse] = []
+    runtime_entries = collect_headless_runtime_entries(frontend_client_id=frontend_client_id)
+    runtime_by_thread = {
+        str(entry.get("thread_id") or ""): entry
+        for entry in runtime_entries
+        if isinstance(entry, dict) and str(entry.get("thread_id") or "")
+    }
+    thread_ids = list_accessible_thread_ids(frontend_client_id=frontend_client_id)
+
+    for thread_id in thread_ids:
+        normalized_thread_id = str(thread_id or "")
+        if not normalized_thread_id:
+            continue
+        entry = runtime_by_thread.get(normalized_thread_id, {})
+        history = build_thread_history_payload(normalized_thread_id)
+        scene_manifest = load_thread_scene_artifact_manifest(normalized_thread_id)
+        summaries.append(
+            ThreadSummaryResponse(
+                thread_id=normalized_thread_id,
+                title=history.title,
+                updated_at_ms=history.updated_at_ms,
+                has_persisted_scene=scene_manifest.has_persisted_blend,
+                scene_revision=scene_manifest.scene_revision,
+                has_runtime=bool(entry.get("occupying_resources")),
+            )
+        )
+    summaries.sort(
+        key=lambda item: (int(item.updated_at_ms or 0), item.thread_id),
+        reverse=True,
+    )
+    return summaries
+
+
+def list_accessible_thread_ids(*, frontend_client_id: str) -> list[str]:
+    runtime_entries = collect_headless_runtime_entries(frontend_client_id=frontend_client_id)
+    runtime_by_thread = {
+        str(entry.get("thread_id") or ""): entry
+        for entry in runtime_entries
+        if isinstance(entry, dict) and str(entry.get("thread_id") or "")
+    }
+    thread_ids: list[str] = list(runtime_by_thread.keys())
+    seen = set(thread_ids)
+    for thread_id in _list_checkpoint_thread_ids():
+        normalized_thread_id = str(thread_id or "")
+        if not normalized_thread_id or normalized_thread_id in seen:
+            continue
+        meta = get_session_coordinator().get_session_meta(normalized_thread_id) or {}
+        client_id = _resolve_thread_frontend_client(normalized_thread_id, meta)
+        if (
+            client_id not in {frontend_client_id, _DEFAULT_FRONTEND_CLIENT_ID}
+            and frontend_client_id != _DEFAULT_FRONTEND_CLIENT_ID
+        ):
+            continue
+        seen.add(normalized_thread_id)
+        thread_ids.append(normalized_thread_id)
+    return thread_ids
+
+
 def collect_headless_runtime_debug_entries(
     *,
     frontend_client_id: str,
@@ -2426,6 +3165,11 @@ def _release_headless_runtime_resources(
         mcp_port_snapshot = session.mcp_port
 
         try:
+            persist_thread_scene_artifacts_sync(thread_id)
+            result["cleaned"].append("scene_artifacts_persisted")
+        except Exception:
+            pass
+        try:
             manager.persist_session_blend(thread_id)
             result["cleaned"].append("blend_persisted")
         except Exception:
@@ -2555,6 +3299,14 @@ def teardown_thread_session(thread_id: str) -> dict[str, Any]:
         if callable(delete_fn):
             delete_fn(thread_id)
             result["cleaned"].append("graph_checkpoints")
+    except Exception:
+        pass
+
+    try:
+        storage_dir = resolve_thread_storage_dir(thread_id)
+        if storage_dir.exists():
+            shutil.rmtree(storage_dir, ignore_errors=True)
+            result["cleaned"].append("scene_storage")
     except Exception:
         pass
 

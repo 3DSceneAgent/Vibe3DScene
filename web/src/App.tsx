@@ -6,11 +6,16 @@ import {
   getTodos,
   getSceneRenders,
   getSceneGltf,
+  getThreadSceneArtifactGltf,
   getSceneBlend,
   listSceneBlendFiles,
   getSceneBlendFile,
   deleteThread as deleteThreadApi,
+  deleteAllThreads as deleteAllThreadsApi,
   getHealth,
+  getThreadHistory,
+  getThreadSceneArtifactManifest,
+  getThreads,
   renameThreadTitle as renameThreadTitleApi,
   uploadThreadImages,
   listThreadImages,
@@ -24,8 +29,13 @@ import type {
   BlendFileEntry,
   GraphNodeStream,
   HeadlessSessionCapacityInfo,
+  HistoryMessage,
   ImageAsset,
+  SceneArtifactManifestInfo,
   StreamEvent,
+  ThreadHistoryInfo,
+  ThreadListInfo,
+  ThreadSummaryInfo,
   TodoItem,
   VlmProviderOption
 } from './api/types'
@@ -223,6 +233,12 @@ function buildPendingMessageImages(
   }))
 }
 
+function revokeObjectUrlIfNeeded(url: string | null | undefined) {
+  if (typeof url === 'string' && url.startsWith('blob:')) {
+    URL.revokeObjectURL(url)
+  }
+}
+
 function revokeThreadPreviewUrls(thread: Thread) {
   const previewUrls = new Set<string>()
   for (const image of thread.images ?? []) {
@@ -238,6 +254,107 @@ function revokeThreadPreviewUrls(thread: Thread) {
     }
   }
   previewUrls.forEach((previewUrl) => URL.revokeObjectURL(previewUrl))
+  revokeObjectUrlIfNeeded(thread.gltfUrl)
+}
+
+function historyMessageToUiMessage(message: HistoryMessage): Message {
+  return {
+    id: message.id,
+    turnId: message.turn_id ?? message.id,
+    role:
+      message.role === 'user' || message.role === 'assistant' || message.role === 'tool'
+        ? message.role
+        : 'assistant',
+    content: message.content,
+    thinking: message.thinking ?? undefined,
+    createdAt: message.created_at_ms,
+    toolName: message.tool_name ?? undefined,
+    toolPayload: message.tool_payload,
+    toolMedia: message.tool_media?.map((media) => ({ kind: 'url' as const, value: media.value })) ?? [],
+    attachedImages: message.attached_images ?? [],
+    status: 'final'
+  }
+}
+
+function applyThreadSummary(current: Thread | undefined, summary: ThreadSummaryInfo): Thread {
+  if (!current) {
+    return {
+      id: summary.thread_id,
+      title: summary.title || 'New chat',
+      titleEditedManually: false,
+      createdAt: summary.updated_at_ms || Date.now(),
+      updatedAtMs: summary.updated_at_ms || Date.now(),
+      messages: [],
+      todos: [],
+      renders: [],
+      gltfUrl: null,
+      sceneManifest: null,
+      sceneRevision: summary.scene_revision ?? null,
+      scene: null,
+      sceneHierarchy: [],
+      sceneHasChange: false,
+      images: [],
+      graphEvents: [],
+      occupyingResources: summary.has_runtime,
+      lastRuntimeActiveMs: summary.updated_at_ms || 0
+    }
+  }
+  return {
+    ...current,
+    title: current.titleEditedManually ? current.title : summary.title || current.title,
+    updatedAtMs: summary.updated_at_ms || current.updatedAtMs,
+    sceneRevision: summary.scene_revision ?? current.sceneRevision ?? null,
+    occupyingResources: summary.has_runtime,
+    lastRuntimeActiveMs: summary.updated_at_ms || current.lastRuntimeActiveMs || 0
+  }
+}
+
+function applyThreadHistory(current: Thread, history: ThreadHistoryInfo): Thread {
+  return {
+    ...current,
+    title: current.titleEditedManually ? current.title : history.title || current.title,
+    updatedAtMs: history.updated_at_ms,
+    messages: history.messages.map(historyMessageToUiMessage),
+    todos: history.todos ?? current.todos,
+    sceneRevision: history.scene_revision ?? current.sceneRevision ?? null
+  }
+}
+
+function applySceneManifest(current: Thread, manifest: SceneArtifactManifestInfo): Thread {
+  return {
+    ...current,
+    sceneManifest: manifest,
+    sceneRevision: manifest.scene_revision ?? current.sceneRevision ?? null,
+    renders: manifest.renders ?? current.renders ?? []
+  }
+}
+
+function isLocalOnlyDraftThread(thread: Thread): boolean {
+  return (
+    thread.messages.length === 0 &&
+    !thread.sceneManifest &&
+    !thread.sceneRevision &&
+    !thread.gltfUrl &&
+    (thread.renders?.length ?? 0) === 0 &&
+    !thread.occupyingResources
+  )
+}
+
+function reconcileThreadsWithBackend(currentThreads: Thread[], summaries: ThreadSummaryInfo[]): Thread[] {
+  const currentById = new Map(currentThreads.map((thread) => [thread.id, thread] as const))
+  const nextThreads = summaries.map((summary) => applyThreadSummary(currentById.get(summary.thread_id), summary))
+  const summaryIds = new Set(summaries.map((summary) => summary.thread_id))
+
+  for (const thread of currentThreads) {
+    if (summaryIds.has(thread.id)) {
+      continue
+    }
+    if (isLocalOnlyDraftThread(thread)) {
+      nextThreads.push(thread)
+    }
+  }
+
+  return nextThreads
 }
 
 function finalizeStreamingAssistants(messages: Message[], keepAssistantId?: string | null): Message[] {
@@ -453,6 +570,7 @@ function App() {
   const streamRunIdRef = useRef(0)
   const messageIdMapRef = useRef<Map<string, string>>(new Map())
   const saveThreadsTimerRef = useRef<number | null>(null)
+  const threadsRef = useRef(threads)
   const loadingRef = useRef<Record<string, ThreadLoadingState>>({})
   const autoFetchLastRunRef = useRef<Record<string, number>>({})
   const runtimeOccupancyRef = useRef<Record<string, boolean>>({})
@@ -546,6 +664,26 @@ function App() {
     [applyHeadlessCapacity, backendMode, backendStatus, settings.backendUrl]
   )
 
+  const syncThreadsFromBackend = useCallback(
+    async (signal?: AbortSignal): Promise<ThreadListInfo | null> => {
+      if (!isStorageHydrated || !settings.backendUrl || backendStatus !== 'online') {
+        return null
+      }
+      const threadList = await getThreads(settings.backendUrl, signal)
+      const nextThreads = reconcileThreadsWithBackend(threadsRef.current, threadList.summaries)
+      setThreads(nextThreads)
+      saveThreads(nextThreads)
+      setActiveThreadId((current) => {
+        if (current && nextThreads.some((thread) => thread.id === current)) {
+          return current
+        }
+        return nextThreads[0]?.id ?? null
+      })
+      return threadList
+    },
+    [backendStatus, isStorageHydrated, settings.backendUrl]
+  )
+
   const releaseThreadRuntimeForThread = useCallback(
     async (
       threadId: string,
@@ -603,7 +741,9 @@ function App() {
           if (loadedThreads.length > 0) {
             setThreads(loadedThreads)
             setActiveThreadId((current) =>
-              current && loadedThreads.some((thread) => thread.id === current) ? current : null
+              current && loadedThreads.some((thread) => thread.id === current)
+                ? current
+                : loadedThreads[0]?.id ?? null
             )
           }
           setSettings(loadedSettings)
@@ -651,6 +791,10 @@ function App() {
   useEffect(() => {
     savePromptHistory(promptHistory)
   }, [promptHistory])
+
+  useEffect(() => {
+    threadsRef.current = threads
+  }, [threads])
 
   useEffect(() => {
     loadingRef.current = loadingByThread
@@ -722,6 +866,70 @@ function App() {
       window.clearInterval(intervalId)
     }
   }, [settings.backendUrl])
+
+  useEffect(() => {
+    let cancelled = false
+    if (!isStorageHydrated || !settings.backendUrl || backendStatus !== 'online') {
+      return () => {
+        cancelled = true
+      }
+    }
+
+    const controller = new AbortController()
+    const fetchThreadSummaries = async () => {
+      try {
+        await syncThreadsFromBackend(controller.signal)
+      } catch (error) {
+        if (!cancelled) {
+          console.warn('Failed to load backend thread summaries', error)
+        }
+      }
+    }
+    void fetchThreadSummaries()
+    return () => {
+      cancelled = true
+      controller.abort()
+    }
+  }, [backendStatus, isStorageHydrated, settings.backendUrl, syncThreadsFromBackend])
+
+  useEffect(() => {
+    let cancelled = false
+    const threadId = activeThread?.id
+    if (!isStorageHydrated || !threadId || !settings.backendUrl || backendStatus !== 'online') {
+      return () => {
+        cancelled = true
+      }
+    }
+    if (currentStreamRef.current?.threadId === threadId && isStreaming) {
+      return () => {
+        cancelled = true
+      }
+    }
+
+    const controller = new AbortController()
+    const hydrateThread = async () => {
+      const [historyResult, manifestResult] = await Promise.allSettled([
+        getThreadHistory(settings.backendUrl, threadId, controller.signal),
+        getThreadSceneArtifactManifest(settings.backendUrl, threadId, controller.signal)
+      ])
+      if (cancelled) return
+      updateThread(threadId, (thread) => {
+        let nextThread = thread
+        if (historyResult.status === 'fulfilled') {
+          nextThread = applyThreadHistory(nextThread, historyResult.value)
+        }
+        if (manifestResult.status === 'fulfilled') {
+          nextThread = applySceneManifest(nextThread, manifestResult.value)
+        }
+        return nextThread
+      })
+    }
+    void hydrateThread()
+    return () => {
+      cancelled = true
+      controller.abort()
+    }
+  }, [activeThread?.id, backendStatus, isStorageHydrated, isStreaming, settings.backendUrl, updateThread])
 
   useEffect(() => {
     let cancelled = false
@@ -938,6 +1146,7 @@ function App() {
         title: 'New chat',
         titleEditedManually: false,
         createdAt: Date.now(),
+        updatedAtMs: Date.now(),
         messages: [],
         mcpToolEnabled: {},
         fastMode: fastModeAvailable ? fastModeDefault : undefined,
@@ -948,6 +1157,8 @@ function App() {
         scene: null,
         renders: [],
         gltfUrl: null,
+        sceneManifest: null,
+        sceneRevision: null,
         sceneHierarchy: [],
         sceneHasChange: false,
         images: [],
@@ -967,22 +1178,15 @@ function App() {
     }
   }
 
-  const deleteThread = (threadId: string) => {
-    // Fire-and-forget backend cleanup (kills Blender/MCP processes, releases ports).
-    if (settings.backendUrl) {
-      void deleteThreadApi(settings.backendUrl, threadId)
+  const deleteThread = async (threadId: string) => {
+    setThreadCreateError(null)
+    const target = threadsRef.current.find((thread) => thread.id === threadId)
+    if (target) {
+      revokeThreadPreviewUrls(target)
     }
-
-    setThreads((prev) => {
-      const target = prev.find((thread) => thread.id === threadId)
-      if (target?.gltfUrl) {
-        URL.revokeObjectURL(target.gltfUrl)
-      }
-      if (target) {
-        revokeThreadPreviewUrls(target)
-      }
-      return prev.filter((thread) => thread.id !== threadId)
-    })
+    const nextThreads = threadsRef.current.filter((thread) => thread.id !== threadId)
+    setThreads(nextThreads)
+    saveThreads(nextThreads)
     loadedThreadImagesRef.current.delete(threadId)
     delete autoFetchLastRunRef.current[threadId]
     delete sceneChangeRef.current[threadId]
@@ -1027,15 +1231,40 @@ function App() {
     setMcpToolsLoadingThreadId((current) => (current === threadId ? null : current))
     setVlmLoadingThreadId((current) => (current === threadId ? null : current))
     delete runtimeOccupancyRef.current[threadId]
-    if (activeThreadId === threadId) {
-      setActiveThreadId(null)
+    setActiveThreadId((current) => {
+      if (current !== threadId) {
+        return current
+      }
+      return nextThreads[0]?.id ?? null
+    })
+    if (settings.backendUrl) {
+      try {
+        await deleteThreadApi(settings.backendUrl, threadId)
+        if (backendStatus === 'online') {
+          await syncThreadsFromBackend()
+        }
+      } catch (error) {
+        setThreadCreateError(
+          error instanceof Error && error.message.trim()
+            ? `Failed to delete conversation: ${error.message.trim()}`
+            : 'Failed to delete conversation.'
+        )
+        if (backendStatus === 'online') {
+          try {
+            await syncThreadsFromBackend()
+          } catch (syncError) {
+            console.warn('Failed to refresh threads after delete failure', syncError)
+          }
+        }
+      }
     }
     if (backendStatus === 'online' && backendMode === 'headless' && settings.backendUrl) {
       void refreshHeadlessCapacity()
     }
   }
 
-  const deleteAllThreads = () => {
+  const deleteAllThreads = async () => {
+    setThreadCreateError(null)
     if (streamAbortRef.current) {
       streamAbortRef.current.abort()
     }
@@ -1049,17 +1278,11 @@ function App() {
     pendingToolTimestampsRef.current.clear()
     for (const timer of pendingToolTimersRef.current.values()) clearTimeout(timer)
     pendingToolTimersRef.current.clear()
-
-    setThreads((prev) => {
-      for (const thread of prev) {
-        if (settings.backendUrl) {
-          void deleteThreadApi(settings.backendUrl, thread.id)
-        }
-        if (thread.gltfUrl) URL.revokeObjectURL(thread.gltfUrl)
-        revokeThreadPreviewUrls(thread)
-      }
-      return []
-    })
+    for (const thread of threadsRef.current) {
+      revokeThreadPreviewUrls(thread)
+    }
+    setThreads([])
+    saveThreads([])
 
     loadedThreadImagesRef.current.clear()
     autoFetchLastRunRef.current = {}
@@ -1079,6 +1302,28 @@ function App() {
     setMcpToolsLoadingThreadId(null)
     setVlmLoadingThreadId(null)
     setActiveThreadId(null)
+
+    if (settings.backendUrl && backendStatus === 'online') {
+      try {
+        const result = await deleteAllThreadsApi(settings.backendUrl)
+        if (result.failed_thread_ids.length > 0) {
+          setThreadCreateError(
+            `Failed to delete ${result.failed_thread_ids.length} conversation${result.failed_thread_ids.length === 1 ? '' : 's'} on the backend.`
+          )
+        }
+      } catch (error) {
+        setThreadCreateError(
+          error instanceof Error && error.message.trim()
+            ? `Failed to clear backend conversations: ${error.message.trim()}`
+            : 'Failed to clear backend conversations.'
+        )
+      }
+      try {
+        await syncThreadsFromBackend()
+      } catch (error) {
+        console.warn('Failed to refresh threads after Clear All', error)
+      }
+    }
 
     if (backendStatus === 'online' && backendMode === 'headless' && settings.backendUrl) {
       void refreshHeadlessCapacity()
@@ -1100,7 +1345,13 @@ function App() {
       const previous = map.get(image.id)
       map.set(
         image.id,
-        previous ? { ...image, previewUrl: previous.previewUrl ?? image.previewUrl } : image
+        previous
+          ? {
+              ...image,
+              asset_url: image.asset_url ?? previous.asset_url,
+              previewUrl: previous.previewUrl ?? image.previewUrl
+            }
+          : image
       )
     })
     return Array.from(map.values())
@@ -1847,6 +2098,7 @@ function App() {
         vlmProvider: selectedProvider || thread.vlmProvider,
         vlmModel: selectedModel || thread.vlmModel,
         vlmLocked: thread.vlmLocked ?? false,
+        updatedAtMs: now,
         graphEvents: [],
         messages: [...thread.messages, userMessage, assistantMessage]
       }
@@ -1943,6 +2195,7 @@ function App() {
     setThreadStreamStatus(threadId, 'streaming')
     updateThread(threadId, (thread) => ({
       ...thread,
+      updatedAtMs: Date.now(),
       graphEvents: [],
       messages: [...stripAgentMessagesForTurn(thread.messages, turnId), assistantMessage]
     }))
@@ -2062,9 +2315,7 @@ function App() {
       const blob = await getSceneGltf(settings.backendUrl, targetId, controller.signal)
       const nextUrl = URL.createObjectURL(blob)
       updateThread(targetId, (thread) => {
-        if (thread.gltfUrl) {
-          URL.revokeObjectURL(thread.gltfUrl)
-        }
+        revokeObjectUrlIfNeeded(thread.gltfUrl)
         return { ...thread, gltfUrl: nextUrl }
       })
     } catch (error) {
@@ -2120,11 +2371,18 @@ function App() {
 
   const downloadGltf = useCallback(async () => {
     if (!activeThread) return
-    if (!requireHeadlessRuntimeForAction(activeThread.id, 'downloading GLTF')) return
     setThreadLoading(activeThread.id, { download: true })
     setSceneActionError(activeThread.id, null)
     try {
-      const blob = await getSceneGltf(settings.backendUrl, activeThread.id)
+      let blob: Blob
+      if (activeThread.sceneManifest?.gltf_url) {
+        blob = await getThreadSceneArtifactGltf(settings.backendUrl, activeThread.id)
+      } else {
+        if (!requireHeadlessRuntimeForAction(activeThread.id, 'downloading GLTF')) {
+          return
+        }
+        blob = await getSceneGltf(settings.backendUrl, activeThread.id)
+      }
       const filename = `scene-${activeThread.id}.glb`
       downloadBlob(blob, filename)
     } catch (error) {
@@ -2213,15 +2471,21 @@ function App() {
   const statusText = modeLabel ? `Server ${statusLabel} • ${modeLabel}` : `Server ${statusLabel}`
   const projectWebsiteUrl = 'https://3dsceneagent.github.io/vibe3dscene/'
   const projectGithubUrl = 'https://github.com/3DSceneAgent/Vibe3DScene'
+  const appLogoUrl = '/vibe3dscene_icon.png'
 
   return (
     <div className="app-shell">
       <aside className={`sidebar ${isSidebarCollapsed ? 'collapsed' : ''}`}>
         <div className="sidebar-header">
           {!isSidebarCollapsed && (
-            <div className="sidebar-titles">
-              <div className="app-title">Vibe 3D Scene</div>
-              <div className="app-subtitle">Chat & Scene Console</div>
+            <div className="sidebar-brand">
+              <div className="app-logo-shell" aria-hidden="true">
+                <img className="app-logo" src={appLogoUrl} alt="" />
+              </div>
+              <div className="sidebar-titles">
+                <div className="app-title">Vibe 3D Scene</div>
+                <div className="app-subtitle">Chat & Scene Console</div>
+              </div>
             </div>
           )}
           <button
@@ -2366,7 +2630,7 @@ function App() {
                   threadId={activeThread.id}
                   renders={activeThread.renders ?? []}
                   backendUrl={settings.backendUrl}
-                  gltfUrl={activeThread.gltfUrl ?? null}
+                  gltfUrl={activeThread.gltfUrl ?? activeThread.sceneManifest?.gltf_url ?? null}
                   sceneHierarchy={activeThread.sceneHierarchy ?? []}
                   environment={settings.viewportEnvironment}
                   viewportTheme={settings.viewportTheme}

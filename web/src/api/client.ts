@@ -1,13 +1,18 @@
 import type {
   BlendFileEntry,
   HeadlessSessionCapacityInfo,
+  HistoryMessage,
   ImageAsset,
   McpToolsInfo,
   RenameThreadTitleInfo,
   ReleaseRuntimeInfo,
   RenderImage,
+  SceneArtifactManifestInfo,
   SceneInfo,
   StreamEvent,
+  ThreadHistoryInfo,
+  ThreadListInfo,
+  ThreadSummaryInfo,
   TodoItem,
   VlmModelsInfo,
   VlmProviderOption,
@@ -213,6 +218,100 @@ function parseBlendFiles(payload: unknown): BlendFileEntry[] {
       }
     ]
   })
+}
+
+function parseImageAsset(entry: unknown): ImageAsset | null {
+  if (!entry || typeof entry !== 'object') return null
+  const maybe = entry as Partial<ImageAsset>
+  if (
+    typeof maybe.id !== 'string' ||
+    typeof maybe.thread_id !== 'string' ||
+    typeof maybe.filename !== 'string' ||
+    typeof maybe.content_type !== 'string' ||
+    typeof maybe.size_bytes !== 'number' ||
+    typeof maybe.sha256 !== 'string' ||
+    typeof maybe.uploaded_at !== 'string'
+  ) {
+    return null
+  }
+  return {
+    id: maybe.id,
+    thread_id: maybe.thread_id,
+    filename: maybe.filename,
+    content_type: maybe.content_type,
+    size_bytes: maybe.size_bytes,
+    sha256: maybe.sha256,
+    uploaded_at: maybe.uploaded_at,
+    source: typeof maybe.source === 'string' ? maybe.source : undefined,
+    asset_url: typeof maybe.asset_url === 'string' ? maybe.asset_url : undefined
+  }
+}
+
+function parseHistoryMessages(payload: unknown): HistoryMessage[] {
+  if (!Array.isArray(payload)) return []
+  return payload.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return []
+    const maybe = entry as Partial<HistoryMessage>
+    if (
+      typeof maybe.id !== 'string' ||
+      typeof maybe.role !== 'string' ||
+      typeof maybe.content !== 'string' ||
+      typeof maybe.created_at_ms !== 'number'
+    ) {
+      return []
+    }
+    const toolMedia = Array.isArray(maybe.tool_media)
+      ? maybe.tool_media.flatMap((media) => {
+          if (!media || typeof media !== 'object') return []
+          const candidate = media as { kind?: unknown; value?: unknown }
+          if (typeof candidate.kind !== 'string' || typeof candidate.value !== 'string') {
+            return []
+          }
+          return [{ kind: candidate.kind, value: candidate.value }]
+        })
+      : []
+    const attachedImages = Array.isArray(maybe.attached_images)
+      ? maybe.attached_images
+          .map((image) => parseImageAsset(image))
+          .filter((image): image is ImageAsset => image !== null)
+      : []
+    return [
+      {
+        id: maybe.id,
+        role: maybe.role,
+        content: maybe.content,
+        created_at_ms: maybe.created_at_ms,
+        turn_id: typeof maybe.turn_id === 'string' ? maybe.turn_id : undefined,
+        thinking: typeof maybe.thinking === 'string' ? maybe.thinking : undefined,
+        tool_name: typeof maybe.tool_name === 'string' ? maybe.tool_name : undefined,
+        tool_payload: maybe.tool_payload,
+        tool_media: toolMedia,
+        attached_images: attachedImages
+      }
+    ]
+  })
+}
+
+function parseThreadSummary(entry: unknown): ThreadSummaryInfo | null {
+  if (!entry || typeof entry !== 'object') return null
+  const maybe = entry as Partial<ThreadSummaryInfo>
+  if (
+    typeof maybe.thread_id !== 'string' ||
+    typeof maybe.title !== 'string' ||
+    typeof maybe.updated_at_ms !== 'number' ||
+    typeof maybe.has_persisted_scene !== 'boolean' ||
+    typeof maybe.has_runtime !== 'boolean'
+  ) {
+    return null
+  }
+  return {
+    thread_id: maybe.thread_id,
+    title: maybe.title,
+    updated_at_ms: maybe.updated_at_ms,
+    has_persisted_scene: maybe.has_persisted_scene,
+    scene_revision: typeof maybe.scene_revision === 'number' ? maybe.scene_revision : undefined,
+    has_runtime: maybe.has_runtime
+  }
 }
 
 function parseSseChunk(
@@ -497,6 +596,18 @@ export async function getSceneGltf(
   return await response.blob()
 }
 
+export async function getThreadSceneArtifactGltf(
+  baseUrl: string,
+  threadId: string,
+  signal?: AbortSignal
+): Promise<Blob> {
+  const response = await apiFetch(`${baseUrl}/threads/${threadId}/scene-artifacts/latest.glb`, { signal })
+  if (!response.ok) {
+    throw await buildHttpError(response, `Failed to load persisted glTF (${response.status})`)
+  }
+  return await response.blob()
+}
+
 export async function getSceneBlend(
   baseUrl: string,
   threadId: string,
@@ -550,8 +661,10 @@ export async function uploadThreadImages(
   if (!response.ok) {
     throw await buildHttpError(response, `Failed to upload images (${response.status})`)
   }
-  const data = (await response.json()) as { images?: ImageAsset[] }
-  return data.images ?? []
+  const data = (await response.json()) as { images?: unknown[] }
+  return Array.isArray(data.images)
+    ? data.images.map((image) => parseImageAsset(image)).filter((image): image is ImageAsset => image !== null)
+    : []
 }
 
 export async function listThreadImages(baseUrl: string, threadId: string): Promise<ImageAsset[]> {
@@ -559,8 +672,70 @@ export async function listThreadImages(baseUrl: string, threadId: string): Promi
   if (!response.ok) {
     throw await buildHttpError(response, `Failed to load images (${response.status})`)
   }
-  const data = (await response.json()) as { images?: ImageAsset[] }
-  return data.images ?? []
+  const data = (await response.json()) as { images?: unknown[] }
+  return Array.isArray(data.images)
+    ? data.images.map((image) => parseImageAsset(image)).filter((image): image is ImageAsset => image !== null)
+    : []
+}
+
+export async function getThreads(
+  baseUrl: string,
+  signal?: AbortSignal
+): Promise<ThreadListInfo> {
+  const response = await apiFetch(`${baseUrl}/threads`, { signal })
+  if (!response.ok) {
+    throw await buildHttpError(response, `Failed to load threads (${response.status})`)
+  }
+  const data = (await response.json()) as Partial<ThreadListInfo>
+  const summaries = Array.isArray(data.summaries)
+    ? data.summaries
+        .map((entry) => parseThreadSummary(entry))
+        .filter((entry): entry is ThreadSummaryInfo => entry !== null)
+    : []
+  const threads = Array.isArray(data.threads)
+    ? data.threads.filter((threadId): threadId is string => typeof threadId === 'string')
+    : summaries.map((summary) => summary.thread_id)
+  return { threads, summaries }
+}
+
+export async function getThreadHistory(
+  baseUrl: string,
+  threadId: string,
+  signal?: AbortSignal
+): Promise<ThreadHistoryInfo> {
+  const response = await apiFetch(`${baseUrl}/threads/${threadId}/history`, { signal })
+  if (!response.ok) {
+    throw await buildHttpError(response, `Failed to load thread history (${response.status})`)
+  }
+  const data = (await response.json()) as Partial<ThreadHistoryInfo>
+  return {
+    thread_id: typeof data.thread_id === 'string' ? data.thread_id : threadId,
+    title: typeof data.title === 'string' ? data.title : 'New chat',
+    updated_at_ms: typeof data.updated_at_ms === 'number' ? data.updated_at_ms : Date.now(),
+    scene_revision: typeof data.scene_revision === 'number' ? data.scene_revision : undefined,
+    messages: parseHistoryMessages(data.messages),
+    todos: Array.isArray(data.todos) ? (data.todos as TodoItem[]) : []
+  }
+}
+
+export async function getThreadSceneArtifactManifest(
+  baseUrl: string,
+  threadId: string,
+  signal?: AbortSignal
+): Promise<SceneArtifactManifestInfo> {
+  const response = await apiFetch(`${baseUrl}/threads/${threadId}/scene-artifacts/manifest`, { signal })
+  if (!response.ok) {
+    throw await buildHttpError(response, `Failed to load scene artifacts (${response.status})`)
+  }
+  const data = (await response.json()) as Partial<SceneArtifactManifestInfo>
+  return {
+    thread_id: typeof data.thread_id === 'string' ? data.thread_id : threadId,
+    has_persisted_blend: Boolean(data.has_persisted_blend),
+    scene_revision: typeof data.scene_revision === 'number' ? data.scene_revision : undefined,
+    generated_at_ms: typeof data.generated_at_ms === 'number' ? data.generated_at_ms : undefined,
+    gltf_url: typeof data.gltf_url === 'string' ? data.gltf_url : undefined,
+    renders: parseRenderImages({ renders: data.renders })
+  }
 }
 
 export async function deleteThread(
@@ -568,17 +743,37 @@ export async function deleteThread(
   threadId: string,
   signal?: AbortSignal
 ): Promise<void> {
-  try {
-    const response = await apiFetch(`${baseUrl}/threads/${threadId}`, {
-      method: 'DELETE',
-      signal
-    })
-    if (!response.ok) {
-      console.warn(`Backend thread delete returned ${response.status} for ${threadId}`)
-    }
-  } catch (error) {
-    // Best-effort: don't block frontend deletion if backend is unreachable.
-    console.warn('Failed to delete thread on backend', error)
+  const response = await apiFetch(`${baseUrl}/threads/${threadId}`, {
+    method: 'DELETE',
+    signal
+  })
+  if (!response.ok) {
+    throw await buildHttpError(response, `Failed to delete thread '${threadId}' (${response.status})`)
+  }
+}
+
+export async function deleteAllThreads(
+  baseUrl: string,
+  signal?: AbortSignal
+): Promise<{ deleted_thread_ids: string[]; failed_thread_ids: string[] }> {
+  const response = await apiFetch(`${baseUrl}/threads`, {
+    method: 'DELETE',
+    signal
+  })
+  if (!response.ok) {
+    throw await buildHttpError(response, `Failed to delete all threads (${response.status})`)
+  }
+  const payload = (await response.json()) as {
+    deleted_thread_ids?: unknown
+    failed_thread_ids?: unknown
+  }
+  return {
+    deleted_thread_ids: Array.isArray(payload.deleted_thread_ids)
+      ? payload.deleted_thread_ids.filter((value): value is string => typeof value === 'string')
+      : [],
+    failed_thread_ids: Array.isArray(payload.failed_thread_ids)
+      ? payload.failed_thread_ids.filter((value): value is string => typeof value === 'string')
+      : []
   }
 }
 

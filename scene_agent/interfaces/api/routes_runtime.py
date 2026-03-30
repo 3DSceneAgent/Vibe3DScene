@@ -7,6 +7,9 @@ from scene_agent.config import get_settings
 from scene_agent.session import get_session_coordinator
 
 from .models import (
+    ClearThreadsResponse,
+    ThreadHistoryResponse,
+    ThreadListResponse,
     HeadlessRuntimeThreadEntry,
     HeadlessSessionCapacityResponse,
     HeadlessSessionDebugEntry,
@@ -16,6 +19,9 @@ from .models import (
     RenameThreadTitleResponse,
 )
 from .shared import (
+    build_thread_history_payload,
+    list_accessible_thread_ids,
+    build_thread_summaries,
     claim_or_proxy_request,
     collect_headless_runtime_debug_entries,
     collect_headless_runtime_entries,
@@ -28,8 +34,8 @@ from .shared import (
     teardown_thread_session,
 )
 router = APIRouter()
-@router.get("/threads")
-async def list_threads():
+@router.get("/threads", response_model=ThreadListResponse)
+async def list_threads(request: Request):
     """
     List all active threads (sessions).
     
@@ -37,8 +43,49 @@ async def list_threads():
         List of thread IDs
     """
     coordinator = get_session_coordinator()
-    threads = coordinator.list_threads(limit=1000)
-    return {"threads": threads}
+    client_id = resolve_frontend_client_id(request)
+    summaries = build_thread_summaries(frontend_client_id=client_id)
+    return ThreadListResponse(
+        threads=[summary.thread_id for summary in summaries],
+        summaries=summaries,
+    )
+
+
+@router.delete("/threads", response_model=ClearThreadsResponse)
+async def delete_all_threads(request: Request):
+    request_client_id = resolve_frontend_client_id(request)
+    thread_ids = list_accessible_thread_ids(frontend_client_id=request_client_id)
+    deleted_thread_ids: list[str] = []
+    failed_thread_ids: list[str] = []
+
+    for thread_id in thread_ids:
+        try:
+            result = await asyncio.to_thread(teardown_thread_session, thread_id)
+            deleted_thread_ids.append(thread_id)
+            log_event(
+                "info",
+                "thread_deleted",
+                {"thread_id": thread_id, "cleaned": result.get("cleaned", [])},
+            )
+        except Exception as exc:
+            failed_thread_ids.append(thread_id)
+            log_event(
+                "error",
+                "thread_delete_failed",
+                {"thread_id": thread_id, "error": str(exc), "bulk_delete": True},
+            )
+
+    return ClearThreadsResponse(
+        deleted_thread_ids=deleted_thread_ids,
+        failed_thread_ids=failed_thread_ids,
+    )
+
+
+@router.get("/threads/{thread_id}/history", response_model=ThreadHistoryResponse)
+async def get_thread_history(thread_id: str, request: Request):
+    request_client_id = resolve_frontend_client_id(request)
+    ensure_frontend_client_can_manage_thread(thread_id, request_client_id)
+    return build_thread_history_payload(thread_id)
 
 @router.get("/headless/session-capacity", response_model=HeadlessSessionCapacityResponse)
 async def get_headless_session_capacity(request: Request):

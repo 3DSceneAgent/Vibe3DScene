@@ -32,11 +32,19 @@ def test_upload_and_list_reference_images(tmp_path, monkeypatch):
     assert upload_response.status_code == 200
     upload_payload = upload_response.json()
     assert len(upload_payload["images"]) == 2
+    assert all(image["asset_url"].startswith("/threads/thread-2/images/") for image in upload_payload["images"])
 
     list_response = client.get("/threads/thread-2/images")
     assert list_response.status_code == 200
     list_payload = list_response.json()
     assert len(list_payload["images"]) == 2
+    first_asset = list_payload["images"][0]
+    assert first_asset["asset_url"] == f"/threads/thread-2/images/{first_asset['id']}"
+
+    download_response = client.get(first_asset["asset_url"])
+    assert download_response.status_code == 200
+    assert download_response.headers["content-type"] == "image/png"
+    assert download_response.content
 
 
 def test_list_images_limit_returns_latest(tmp_path, monkeypatch):

@@ -7,6 +7,7 @@ import {
   type EnvironmentPreset
 } from '../constants/environmentPresets'
 import type { SceneHierarchyNode } from '../state/types'
+import { resolveMediaUrl } from '../utils/url'
 import { GltfViewer } from './GltfViewer'
 import { RenderGallery } from './RenderGallery'
 import { SceneInfoPanel } from './SceneInfoPanel'
@@ -269,6 +270,7 @@ export function SceneTab({
   const isSceneActionBusy = loading.scene || loading.renders || loading.gltf
   const fetchActionHint = !canRunActions ? idleActionHint : null
   const isHierarchyCollapsed = minimalUi || objectsCollapsed
+  const resolvedGltfUrl = resolveMediaUrl(gltfUrl ?? undefined, backendUrl) ?? null
   const handleHierarchyChange = useCallback(
     (hierarchy: SceneHierarchyNode[]) => onHierarchyChange(threadId, hierarchy),
     [onHierarchyChange, threadId]
@@ -465,7 +467,7 @@ export function SceneTab({
     <div className={`scene-core ${isHierarchyCollapsed ? 'objects-collapsed' : ''}`}>
       <div className="scene-core-viewport">
         <GltfViewer
-          gltfUrl={gltfUrl}
+          gltfUrl={resolvedGltfUrl}
           environment={environment}
           viewportTheme={viewportTheme}
           uiTheme={uiTheme}

@@ -1,4 +1,11 @@
-import type { GraphNodeStream, ImageAsset, RenderImage, SceneInfo, TodoItem } from '../api/types'
+import type {
+  GraphNodeStream,
+  ImageAsset,
+  RenderImage,
+  SceneArtifactManifestInfo,
+  SceneInfo,
+  TodoItem
+} from '../api/types'
 import type { EnvironmentPreset } from '../constants/environmentPresets'
 
 export type MessageRole = 'user' | 'assistant' | 'tool'
@@ -45,6 +52,7 @@ export type Thread = {
   title: string
   titleEditedManually?: boolean
   createdAt: number
+  updatedAtMs?: number
   messages: Message[]
   mcpToolEnabled?: Record<string, boolean>
   fastMode?: boolean
@@ -55,6 +63,8 @@ export type Thread = {
   scene?: SceneInfo | null
   renders?: RenderImage[]
   gltfUrl?: string | null
+  sceneManifest?: SceneArtifactManifestInfo | null
+  sceneRevision?: number | null
   sceneHierarchy?: SceneHierarchyNode[]
   sceneHasChange?: boolean
   images?: ImageAsset[]

@@ -32,12 +32,18 @@ def test_reference_images_contract(tmp_path, monkeypatch):
     assert payload["thread_id"] == "thread-1"
     assert len(payload["images"]) == 1
     assert payload["images"][0]["filename"] == "ref.png"
+    assert payload["images"][0]["asset_url"] == f"/threads/thread-1/images/{payload['images'][0]['id']}"
 
     list_response = client.get("/threads/thread-1/images")
     assert list_response.status_code == 200
     list_payload = list_response.json()
     assert list_payload["thread_id"] == "thread-1"
     assert len(list_payload["images"]) == 1
+    assert list_payload["images"][0]["asset_url"] == payload["images"][0]["asset_url"]
+
+    download_response = client.get(payload["images"][0]["asset_url"])
+    assert download_response.status_code == 200
+    assert download_response.headers["content-type"] == "image/png"
 
 
 def test_removed_legacy_reference_image_endpoints(tmp_path, monkeypatch):

@@ -14,6 +14,7 @@ def _coerce_snapshot_todos(raw: Any) -> list[TodoItem]:
     if not isinstance(raw, list):
         return []
     todos: list[TodoItem] = []
+    fallback_created_at = "1970-01-01T00:00:00Z"
     for item in raw:
         if not isinstance(item, dict):
             continue
@@ -22,6 +23,8 @@ def _coerce_snapshot_todos(raw: Any) -> list[TodoItem]:
         status = item.get("status")
         created_at = item.get("created_at")
         completed_at = item.get("completed_at")
+        if not isinstance(created_at, str) or not created_at:
+            created_at = completed_at if isinstance(completed_at, str) and completed_at else fallback_created_at
         if not (
             isinstance(todo_id, str)
             and todo_id

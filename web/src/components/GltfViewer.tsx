@@ -9,6 +9,12 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls'
 import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader'
 // @ts-expect-error project does not include three example type declarations in this workspace.
 import { Sky } from 'three/examples/jsm/objects/Sky'
+// @ts-expect-error project does not include three example type declarations in this workspace.
+import { Wireframe } from 'three/examples/jsm/lines/Wireframe'
+// @ts-expect-error project does not include three example type declarations in this workspace.
+import { WireframeGeometry2 } from 'three/examples/jsm/lines/WireframeGeometry2'
+// @ts-expect-error project does not include three example type declarations in this workspace.
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial'
 import {
   environmentPresets,
   type EnvironmentPreset,
@@ -20,6 +26,7 @@ type ViewportTheme = 'auto' | 'dark' | 'light'
 type UiTheme = 'dark' | 'light'
 type ProceduralSkyConfig = NonNullable<EnvironmentPresetConfig['proceduralSky']>
 const PROCEDURAL_SKY_RADIUS = 450
+const WIREFRAME_OVERLAY_LINEWIDTH = 1.85
 type ViewportPalette = {
   background: number
   defaultGridMajor: number
@@ -395,16 +402,17 @@ function buildWireframeOverlay(
     }
     if (!mesh.isMesh || !mesh.geometry) return
 
-    const wireframeGeometry = new THREE.WireframeGeometry(mesh.geometry)
-    const wireframeMaterial = new THREE.LineBasicMaterial({
+    const wireframeGeometry = new WireframeGeometry2(mesh.geometry)
+    const wireframeMaterial = new LineMaterial({
       color,
+      linewidth: WIREFRAME_OVERLAY_LINEWIDTH,
       transparent: true,
       opacity: 0.95,
-      depthTest: false,
+      depthTest: true,
       depthWrite: false
     })
     wireframeMaterial.toneMapped = false
-    const wireframe = new THREE.LineSegments(wireframeGeometry, wireframeMaterial)
+    const wireframe = new Wireframe(wireframeGeometry, wireframeMaterial)
     wireframe.matrixAutoUpdate = false
     wireframe.matrix.copy(mesh.matrixWorld)
     wireframe.frustumCulled = false

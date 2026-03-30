@@ -33,6 +33,7 @@ from .shared import (
     normalize_stream_event,
     resolve_enabled_tool_names,
     resolve_thread_vlm_for_chat,
+    schedule_thread_scene_artifact_refresh,
     sanitize_message_for_stream,
     serialize_message,
     set_owner_headers,
@@ -192,9 +193,19 @@ _LATEST_RETRY_SNAPSHOT_FILENAME = "latest_turn_pre.blend"
 
 def _build_human_message(request: ChatRequest) -> HumanMessage:
     normalized_turn_id = request.turn_id.strip() if isinstance(request.turn_id, str) else ""
+    additional_kwargs: dict[str, Any] = {
+        "created_at_ms": int(time.time() * 1000),
+    }
+    attached_image_ids = _normalize_retry_attached_image_ids(request.attached_image_ids)
+    if attached_image_ids:
+        additional_kwargs["attached_image_ids"] = attached_image_ids
     if normalized_turn_id:
-        return HumanMessage(content=request.message, id=normalized_turn_id)
-    return HumanMessage(content=request.message)
+        return HumanMessage(
+            content=request.message,
+            id=normalized_turn_id,
+            additional_kwargs=additional_kwargs,
+        )
+    return HumanMessage(content=request.message, additional_kwargs=additional_kwargs)
 
 
 def _retry_storage_dir(thread_id: str) -> Path:
@@ -1155,6 +1166,8 @@ async def _produce_stream_events(
                 pass
         if done_payload is not None:
             session.publish(done_payload)
+        if scene_has_change:
+            schedule_thread_scene_artifact_refresh(request.thread_id)
         session.mark_done()
         asyncio.create_task(_expire_stream_session_later(session.stream_request_id))
 

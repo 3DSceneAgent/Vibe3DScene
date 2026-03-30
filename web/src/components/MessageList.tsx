@@ -3,6 +3,7 @@ import type { Message } from '../state/types'
 import { ToolResultBlock } from './ToolResultBlock'
 import { MarkdownMessage } from './MarkdownMessage'
 import { parseTodos } from '../utils/message'
+import { resolveMediaUrl } from '../utils/url'
 
 type MessageListProps = {
   messages: Message[]
@@ -162,8 +163,11 @@ const UserMessageItem = memo(
             <div className="message-attachments" aria-label="Attached images">
               {attachedImages.map((image) => (
                 <div className="message-attachment" key={image.id}>
-                  {image.previewUrl ? (
-                    <img src={image.previewUrl} alt={image.filename} />
+                  {image.previewUrl || image.asset_url ? (
+                    <img
+                      src={image.previewUrl || resolveMediaUrl(image.asset_url || undefined, backendUrl)}
+                      alt={image.filename}
+                    />
                   ) : (
                     <div className="message-attachment-placeholder">{image.filename}</div>
                   )}

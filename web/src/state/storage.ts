@@ -83,7 +83,11 @@ function sanitizeThreads(threads: Thread[]): Thread[] {
       const nextMessage = { ...message }
       delete nextMessage.raw
       delete nextMessage.toolPayload
-      delete nextMessage.toolMedia
+      if (nextMessage.toolMedia) {
+        nextMessage.toolMedia = nextMessage.toolMedia.filter(
+          (media) => media.kind === 'url' && typeof media.value === 'string' && !media.value.startsWith('data:')
+        )
+      }
       if (nextMessage.attachedImages) {
         nextMessage.attachedImages = nextMessage.attachedImages.map((image) => {
           const sanitizedImage = { ...image }
@@ -100,7 +104,7 @@ function sanitizeThreads(threads: Thread[]): Thread[] {
     return {
       ...persistedThread,
       messages,
-      renders: [],
+      renders: persistedThread.renders ?? [],
       gltfUrl: null,
       sceneHierarchy: [],
       sceneHasChange: false,
