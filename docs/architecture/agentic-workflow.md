@@ -1,162 +1,230 @@
-# Agentic Workflow and Deployment Topologies
+# Architecture and Deployment Overview
 
-This document extracts the runtime agentic workflow from `docs/architecture/current-agent-workflow.md` and adds explicit deployment topologies for both single-worker and multi-worker operation.
+Last updated: 2026-03-30
 
-## 1. Agentic Workflow (Runtime Graph)
+This document provides a high-level view of the current Vibe3DScene architecture, deployment topologies, and system boundaries. For the exact runtime graph and node-level control flow, see [Current Agent Workflow](./current-agent-workflow.md).
 
-The graph uses a **visual-first** architecture where verification is a fixed sequential step (not a conditional branch), and scene-level cameras auto-render after every scene mutation.
-
-### Two Runtime Paths
-
-| Path | Trigger | scene_observe | verify |
-|------|---------|---------------|--------|
-| **Scene mutation** | import, generate, execute_blender_code, set_texture | Runs (4 scene cameras re-render) | Structured multi-view feedback |
-| **Object-level inspection** | camera_act, render_from_objects, camera_observe | Skips (no scene mutation) | Focused object-level feedback + todo context |
-
-```mermaid
-flowchart TD
-    A["Client (Web/CLI)"] --> B["FastAPI /chat or /chat/stream"]
-    B --> C["Resolve thread VLM selection"]
-    C --> D["get_agent(thread_id)"]
-
-    D --> E{"Graph exists and VLM match?"}
-    E -- "No" --> F["create_agent_graph(session_id, provider, model, api_key)"]
-    F --> G["get_blender_tools(session_id)"]
-    G --> H["model.bind_tools(tools)"]
-    H --> I["compile LangGraph with checkpointer"]
-    I --> J["cache graph by thread_id"]
-    E -- "Yes" --> J
-
-    J --> K["agent.ainvoke / agent.astream"]
-    K --> L["Node: agent"]
-    L --> M["Node: post_agent (decision/todo extract)"]
-    M --> N{"has tool calls?"}
-    N -- "Yes" --> O["Node: tools (ToolNode)"]
-    O --> P["Node: update_memory"]
-    P --> PA["Node: scene_observe (conditional)"]
-    PA --> PB["Node: verify (conditional)"]
-    PB --> Q["Node: checkpoint_loop"]
-    Q --> R{"run todo_check?"}
-    R -- "Yes" --> S["Node: todo_check"]
-    R -- "No" --> L
-
-    N -- "No" --> V["Node: checkpoint_finalize"]
-    V --> W{"run todo_check?"}
-    W -- "Yes" --> S
-    W -- "No" --> X["Node: finalize"]
-    S --> Y{"completed or blocked?"}
-    Y -- "Yes" --> X
-    Y -- "No" --> L
-    X --> Z["END / return response"]
-
-    O --> BA["MCP tools"]
-    BA --> BB["Blender addon socket server"]
-    BB --> BC["Scene mutate / render / export"]
-
-    CA["Idle sweeper / shutdown"] --> CB["persist .blend"]
-    CB --> CC["terminate headless Blender + MCP process"]
-```
-
-### Key Design Decisions
-
-- **verify is sequential, not a routing branch.** It runs between `scene_observe` and `checkpoint_loop` as a fixed step, skipping internally when there is no new unverified render. This ensures visual verification always precedes `todo_check`, preventing premature "completed" claims.
-- **scene_observe is conditional.** It only fires when the latest tool batch contains scene-mutating tools. Object-level camera work (camera_act, render_from_objects) skips scene_observe entirely — the agent's own render flows directly to verify.
-- **checkpoint_loop routing is simplified** to `todo_check | agent` (two targets instead of three). Verify no longer competes with todo_check for routing priority.
-
-### Local Camera Persistence Policy (Object-Level)
-
-- `scene_observe` remains **ephemeral** and bbox-driven for global diagnostics. It does not maintain a persistent 4-camera pool.
-- Object-level tools (`camera_observe`, `render_from_objects`, `camera_act`) use a **persistent local work-camera pool** in the Blender addon (`Camera_Work_*`).
-- Reuse path:
-  - `render_from_objects(..., reuse_cameras=True)` and `camera_observe(..., reuse_cameras=True)` first query `CameraManager.find_matching_camera(...)`.
-  - If no suitable camera is found, a new local work camera is created and registered.
-- Eviction path (to avoid camera explosion):
-  - Invalid local cameras are removed first.
-  - Idle local cameras are removed after TTL (`LOCAL_CAMERA_IDLE_TTL_SECONDS`, default `900`).
-  - Remaining overflow is trimmed by LRU up to `LOCAL_CAMERA_POOL_MAX_SIZE` (default `24`).
-  - Active/focused cameras are protected from eviction.
-
-### Verification Input Policy
-
-- **Global verification (`render_source=scene_observe`)**
-  - Input render: scene-level auto observation output.
-  - Targets: full user request + optional uploaded reference images.
-- **Local verification (`render_source=agent_camera`)**
-  - Input render: latest object-level render from `camera_act`/`render_from_*`/`camera_observe`.
-  - Targets: user request + optional references + current in-progress/pending todo context.
-  - Goal: make local refinement checks align with current todo objectives rather than only coarse global intent.
-
-## 2. Single-Worker Architecture
-
-Single-worker means one API process serving requests directly.
+## 1. End-to-End Runtime Layers
 
 ```mermaid
 flowchart LR
-    U[Web UI / CLI] --> API[FastAPI process\nworkers=1]
-    API --> COORD[Session coordinator]
-    COORD --> AG[LangGraph Agent]
-    AG --> MCP[MCP tools]
-    MCP --> BL[Blender addon socket]
-    BL --> OUT[Scene / Render / Assets]
-    COORD --> REDIS[(Redis)]
-    API --> FS[(Shared/local session storage)]
+    U[Web UI / CLI / Blender client] --> API[FastAPI]
+    API --> G[LangGraph runtime]
+    G --> MCP[MCP server and tool registry]
+    MCP --> B[Blender socket or headless Blender session]
+    MCP --> T[External tool services]
+    API --> S[(Redis + persisted storage)]
+    B --> O[Scene / Render / Export]
+    T --> O
 ```
 
-Reference startup command (current baseline):
+The runtime is composed of five major layers:
+
+1. Client layer
+   - Web UI, CLI, and Blender-connected client flows
+2. API layer
+   - FastAPI endpoints for chat, streaming, scene artifacts, threads, images, runtime control, and diagnostics
+3. Graph layer
+   - LangGraph-based workflow execution, memory, verification, and todo/evaluator control
+4. Tool layer
+   - MCP server, Blender tools, retrieval/generation tools, and external service adapters
+5. Durability and coordination layer
+   - Redis-backed ownership/checkpointing plus persisted scene and image storage
+
+## 2. Runtime Roles
+
+### FastAPI
+
+The API layer is responsible for:
+
+- request ownership resolution
+- thread-level provider/model resolution
+- graph reuse or rebuild
+- streaming transport
+- thread/runtime management APIs
+- history, image, and artifact access
+
+### LangGraph runtime
+
+The graph runtime is responsible for:
+
+- request initialization
+- reference-image context preparation
+- routing into `direct_mode` or `plan_mode`
+- single-agent or experimental dual-agent execution
+- verification and evaluator-based convergence
+
+### MCP server
+
+The MCP layer is the bridge between the agent runtime and the tool surface.
+
+It handles:
+
+- tool registration
+- tool gating from environment and runtime mode
+- connections to Blender tools
+- connections to optional external retrieval/generation/reconstruction services
+
+### Blender runtime
+
+Blender can run in two broad ways:
+
+- `local-client`
+  - the backend connects to an already running Blender addon
+- `headless`
+  - the backend launches and manages per-thread Blender/MCP runtime processes
+
+### External tool services
+
+Optional services such as TRELLIS2, SceneSmith compatibility APIs, SAM reconstruction, retrieval backends, PCG, and other generators are deployed outside this repository in the sibling `3DAgentTools` stack.
+
+## 3. Single-Worker Topology
+
+Single-worker mode is the simplest deployment. One API process owns requests directly and uses Redis only as an optional durability and coordination backend.
+
+```mermaid
+flowchart LR
+    U[Client] --> API[FastAPI process]
+    API --> G[LangGraph runtime]
+    G --> MCP[MCP tools]
+    MCP --> B[Blender socket / headless runtime]
+    API --> R[(Redis)]
+    API --> FS[(Session storage and image storage)]
+```
+
+Typical use cases:
+
+- local development
+- single-machine experiments
+- debugging agent/tool behavior without owner-proxy forwarding
+
+Representative startup commands:
 
 ```bash
-cd /Users/fishwowater/projects/3DSceneAgent
-python main.py --mode api --host 0.0.0.0 --port 8000 --workers 1
+python main.py --mode api --port 8000
+./scripts/run_headless.sh
+./scripts/run_local_client.sh
 ```
 
-## 3. Multi-Worker Architecture (Docker + Gateway + Owner Proxy)
+## 4. Multi-Worker Topology
 
-In multi-worker mode, every API instance still runs with `--workers 1`. Horizontal scaling is achieved by running multiple API processes/containers behind a gateway.
+In multi-worker mode, horizontal scaling is handled outside the graph itself. Each API instance still runs as a single logical worker for thread ownership.
 
 ```mermaid
 flowchart LR
-    C[Client] --> GW[Nginx Gateway :8000]
-    GW --> W1[API Worker 1\nworkers=1]
-    GW --> W2[API Worker 2\nworkers=1]
+    C[Client] --> GW[Gateway / Nginx]
+    GW --> W1[API Worker 1]
+    GW --> W2[API Worker 2]
 
-    W1 --> R[(Redis Control Plane)]
+    W1 --> R[(Redis control plane)]
     W2 --> R
 
-    W1 --> D1{"Is owner for thread_id?"}
-    W2 --> D2{"Is owner for thread_id?"}
+    W1 --> O1{"Owns thread?"}
+    W2 --> O2{"Owns thread?"}
 
-    D1 -- Yes --> E1[Execute request locally]
-    D1 -- No --> P1[Owner proxy forward to owner]
-    D2 -- Yes --> E2[Execute request locally]
-    D2 -- No --> P2[Owner proxy forward to owner]
+    O1 -->|Yes| E1[Execute locally]
+    O1 -->|No| P1[Proxy to owner]
+    O2 -->|Yes| E2[Execute locally]
+    O2 -->|No| P2[Proxy to owner]
 
-    E1 --> HS1[Headless session manager\nBlender + per-session MCP]
-    E2 --> HS2[Headless session manager\nBlender + per-session MCP]
-
-    HS1 --> S[(Session storage / reference images)]
-    HS2 --> S
+    E1 --> HS1[Headless session manager]
+    E2 --> HS2[Headless session manager]
+    HS1 --> FS[(Shared session and image storage)]
+    HS2 --> FS
 ```
 
-Request routing behavior:
-- Any worker can receive the request from gateway.
-- Worker checks Redis ownership/lease for `thread_id`.
-- Owner executes locally.
-- Non-owner forwards request/stream to owner through `owner_proxy`.
+Important properties:
 
-## 4. Multi-Worker Docker Quickstart
+- Redis stores thread ownership and lease metadata
+- any worker can receive the initial request
+- only the owner executes that thread locally
+- non-owner workers proxy requests and streams to the owner
+- persisted storage allows the owner runtime to recover thread state after restarts or worker changes
 
-```bash
-cd /Users/fishwowater/projects/3DSceneAgent
-cp docker/.env.multiprocess.example docker/.env.multiprocess
-# edit docker/.env.multiprocess (provider and API keys)
-docker compose -f docker/docker-compose.multiprocess.yml up --build
-```
+## 5. Owner Proxy, Redis, and Persisted State
 
-Gateway endpoint:
-- `http://localhost:8000`
+These three pieces are what make multi-worker operation practical.
 
-Related files:
-- `docker/docker-compose.multiprocess.yml`
-- `docker/nginx/multiprocess.conf`
-- `scene_agent/session/owner_proxy.py`
-- `docs/architecture/multiprocess-migration-plan.md`
+### Owner proxy
+
+The owner-proxy layer ensures thread affinity without forcing the external gateway to understand application state.
+
+It allows:
+
+- sticky execution per `thread_id`
+- request forwarding to the current owner
+- better safety for long-running streams
+
+### Redis
+
+Redis acts as the control plane for:
+
+- worker registration
+- thread ownership and leases
+- checkpointer persistence when available
+- session/runtime metadata
+
+### Persisted storage
+
+Persistent filesystem storage is used for:
+
+- `.blend` files for headless session recovery
+- uploaded reference images
+- retry snapshots and artifacts
+- scene exports and renders
+
+## 6. Where MCP and Tool Servers Sit
+
+The MCP server belongs to this repository. The heavier tool services do not.
+
+Current separation:
+
+- in-repo
+  - MCP runtime
+  - tool registry
+  - Blender-facing tools
+  - service adapters and gating logic
+- out-of-repo
+  - TRELLIS2
+  - retrieval backends
+  - SceneSmith compatibility APIs
+  - SAM reconstruction service
+  - PCG services
+  - supporting databases and service-level compose stacks
+
+This split makes the core agent runtime lighter to develop and deploy while keeping optional GPU- and service-heavy components isolated.
+
+For the exact tool/service breakdown, see:
+
+- [MCP Server and Tools](../integrations/mcp-server-and-tools.md)
+- [Tool Servers](../deployment/tool-servers.md)
+
+## 7. Relationship Between Runtime Workflow and System Architecture
+
+These two architecture documents intentionally serve different purposes:
+
+- [Current Agent Workflow](./current-agent-workflow.md)
+  - exact runtime graph
+  - node responsibilities
+  - todo lifecycle
+  - verification contract
+  - `fast_mode`
+  - image routing
+- this document
+  - system boundaries
+  - deployment modes
+  - ownership model
+  - durability and coordination layers
+  - placement of MCP and external services
+
+## 8. Operational Summary
+
+At a high level, the project now behaves like a layered scene-agent platform rather than a single monolithic Blender bot:
+
+- requests enter through FastAPI
+- runtime control lives in LangGraph
+- tool invocation is mediated by MCP
+- Blender and external services execute the actual scene, rendering, retrieval, and generation work
+- Redis and persisted storage provide coordination and recovery
+
+That separation is what enabled the recent additions around `fast_mode`, dual-agent experimentation, externalized tool servers, persisted thread recovery, and the newer frontend/runtime UX.
