@@ -40,6 +40,8 @@ export const defaultSettings: Settings = {
   autoFetchIntervalSeconds: 10,
   viewportTheme: 'auto',
   viewportEnvironment: DEFAULT_ENVIRONMENT_PRESET,
+  environmentLightIntensity: 1,
+  environmentBackgroundIntensity: 0.78,
   showViewportGrid: true,
   showHdriBackground: false,
   uiMode: 'default'
@@ -269,6 +271,7 @@ function loadSettingsFromLocalStorage(): Settings {
 }
 
 function normalizeSettings(settings: Partial<Settings> | null | undefined): Settings {
+  const legacySettings = settings as (Partial<Settings> & { skylightIntensity?: number }) | null | undefined
   const rawTheme = settings?.theme
   const nextTheme =
     rawTheme && legacyDarkThemes.has(rawTheme)
@@ -297,6 +300,18 @@ function normalizeSettings(settings: Partial<Settings> | null | undefined): Sett
     Number.isFinite(rawAutoFetchIntervalSeconds) && rawAutoFetchIntervalSeconds > 0
       ? Math.min(300, Math.max(1, Math.round(rawAutoFetchIntervalSeconds)))
       : defaultSettings.autoFetchIntervalSeconds
+  const rawEnvironmentLightIntensity = Number(
+    settings?.environmentLightIntensity ?? legacySettings?.skylightIntensity
+  )
+  const nextEnvironmentLightIntensity =
+    Number.isFinite(rawEnvironmentLightIntensity)
+      ? Math.min(1.35, Math.max(0.35, Math.round(rawEnvironmentLightIntensity * 100) / 100))
+      : defaultSettings.environmentLightIntensity
+  const rawEnvironmentBackgroundIntensity = Number(settings?.environmentBackgroundIntensity)
+  const nextEnvironmentBackgroundIntensity =
+    Number.isFinite(rawEnvironmentBackgroundIntensity)
+      ? Math.min(1.35, Math.max(0.15, Math.round(rawEnvironmentBackgroundIntensity * 100) / 100))
+      : defaultSettings.environmentBackgroundIntensity
   const normalizedBackendUrl = normalizeBackendUrl(settings?.backendUrl)
 
   return {
@@ -306,6 +321,8 @@ function normalizeSettings(settings: Partial<Settings> | null | undefined): Sett
     autoFetchIntervalSeconds: nextAutoFetchIntervalSeconds,
     viewportTheme: nextViewportTheme,
     viewportEnvironment: nextViewportEnvironment,
+    environmentLightIntensity: nextEnvironmentLightIntensity,
+    environmentBackgroundIntensity: nextEnvironmentBackgroundIntensity,
     showViewportGrid:
       typeof settings?.showViewportGrid === 'boolean'
         ? settings.showViewportGrid

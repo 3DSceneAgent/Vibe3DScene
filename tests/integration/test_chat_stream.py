@@ -348,6 +348,35 @@ async def fake_get_tool_call_start_then_tool_result_agent(_thread_id=None):
     return ToolCallStartThenToolResultAgent()
 
 
+class DuplicateNamedToolCallsAgent:
+    async def astream(self, *_args, **_kwargs):
+        yield (
+            AIMessage(
+                id="assistant-duplicate-tools",
+                content="",
+                tool_calls=[
+                    {
+                        "name": "observe_scene_global",
+                        "args": {},
+                        "id": "tool-1",
+                        "type": "tool_call",
+                    },
+                    {
+                        "name": "observe_scene_global",
+                        "args": {},
+                        "id": "tool-2",
+                        "type": "tool_call",
+                    },
+                ],
+            ),
+            {"langgraph_node": "agent"},
+        )
+
+
+async def fake_get_duplicate_named_tool_calls_agent(_thread_id=None):
+    return DuplicateNamedToolCallsAgent()
+
+
 class ResumableAgent:
     async def astream(self, *_args, **_kwargs):
         yield ("messages", [{"type": "ai", "content": "hello"}])
@@ -579,6 +608,32 @@ def test_chat_stream_emits_tool_call_started_before_tool_result(monkeypatch):
     assert tool_start_index is not None
     assert tool_result_index is not None
     assert tool_start_index < tool_result_index
+    assert payloads[tool_start_index]["tool_call"]["id"] == "tool-1"
+
+
+def test_chat_stream_emits_started_event_for_each_same_named_tool_call(monkeypatch):
+    monkeypatch.setattr(api_module, "get_agent", fake_get_duplicate_named_tool_calls_agent)
+    client = TestClient(api_module.app)
+
+    with client.stream(
+        "POST",
+        "/chat/stream",
+        json={"message": "hi", "thread_id": "t-duplicate-tool-start"},
+    ) as response:
+        assert response.status_code == 200
+        payloads = collect_sse_payloads(response.iter_lines())
+
+    started_payloads = [
+        payload
+        for payload in payloads
+        if payload.get("event") == "tool_call_started"
+        and payload.get("tool_call", {}).get("name") == "observe_scene_global"
+    ]
+
+    assert [payload.get("tool_call", {}).get("id") for payload in started_payloads] == [
+        "tool-1",
+        "tool-2",
+    ]
 
 
 def test_chat_stream_emits_done(monkeypatch):

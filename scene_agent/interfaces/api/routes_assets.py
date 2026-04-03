@@ -1,6 +1,7 @@
 """API routes."""
 
 from importlib import import_module
+import os
 from typing import Any
 from fastapi import APIRouter, HTTPException, UploadFile, File, Request
 from fastapi.responses import FileResponse, Response
@@ -136,7 +137,11 @@ async def list_image_assets(
     """
     List image assets for a thread.
     """
-    resolution, proxied = await claim_or_proxy_request(request=request, thread_id=thread_id)
+    resolution, proxied = await claim_or_proxy_request(
+        request=request,
+        thread_id=thread_id,
+        record_activity=False,
+    )
     if proxied is not None:
         return proxied
 
@@ -167,6 +172,8 @@ async def get_image_asset_file(thread_id: str, image_id: str):
     asset = assets[0]
     if not asset.stored_path:
         raise HTTPException(status_code=404, detail="Image asset file is missing.")
+    if not os.path.isfile(asset.stored_path):
+        raise HTTPException(status_code=404, detail="Image asset file is missing.")
     return FileResponse(
         path=asset.stored_path,
         media_type=asset.content_type or "application/octet-stream",
@@ -184,7 +191,11 @@ async def get_todos(thread_id: str, request: Request, response: Response):
     Returns:
         List of todos with their status
     """
-    resolution, proxied = await claim_or_proxy_request(request=request, thread_id=thread_id)
+    resolution, proxied = await claim_or_proxy_request(
+        request=request,
+        thread_id=thread_id,
+        record_activity=False,
+    )
     if proxied is not None:
         return proxied
     settings = get_settings()

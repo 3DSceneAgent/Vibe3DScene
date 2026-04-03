@@ -4,6 +4,8 @@ Last updated: 2026-03-30
 
 This repository no longer ships the old in-repo `tool_servers/` stack. Optional external services now live in the sibling `../3DAgentTools` checkout.
 
+For shared host settings, service endpoint variables, and related defaults, see the central [Configuration Reference](../reference/configuration.md).
+
 ## 1. Why Tool Servers Were Split Out
 
 The external tool stack includes GPU-heavy, service-heavy, and dependency-heavy components that are operationally different from the core agent runtime.
@@ -30,22 +32,13 @@ The main repository refers to the external tool stack through:
 - the default sibling path `../3DAgentTools`
 - optional override via `AGENT_TOOLS_ROOT`
 
-## 3. Typical Services
+## 3. Clone and Basic Startup
 
-Depending on your configuration, `3DAgentTools` may provide services such as:
+Clone the external tools repository next to this repo:
 
-- TRELLIS2
-- retrieval backend services
-- SceneSmith compatibility APIs
-- SAM reconstruction service
-- PCG / Infinigen service
-- supporting databases such as PostgreSQL for retrieval workflows
-
-The exact enabled set depends on your environment configuration and which services you choose to start.
-
-## 4. Startup Modes
-
-The external stack is designed to support both containerized and local shell workflows depending on the service.
+```bash
+git clone --recurse-submodules https://github.com/3DSceneAgent/3DAgentTools ../3DAgentTools
+```
 
 Typical startup flow:
 
@@ -63,9 +56,26 @@ cd ../3DAgentTools
 ./stop_tool_servers.sh
 ```
 
+## 4. Typical Services
+
+Depending on your configuration, `3DAgentTools` may provide services such as:
+
+- TRELLIS2
+- retrieval backend services
+- SceneSmith compatibility APIs
+- SAM reconstruction service
+- PCG / Infinigen service
+- supporting databases such as PostgreSQL for retrieval workflows
+
+The exact enabled set depends on your environment configuration and which services you choose to start.
+
+## 5. Startup Modes
+
+The external stack is designed to support both containerized and local shell workflows depending on the service.
+
 Some setups also support local shell management scripts rather than Docker-only execution.
 
-## 5. Host and Port Coordination
+## 6. Host and Port Coordination
 
 The main repository does not assume hardcoded endpoints only. It resolves tool-service endpoints through environment variables.
 
@@ -93,7 +103,7 @@ Recommended pattern:
 - if services are colocated on one machine, set `TOOL_SERVICE_HOST` once
 - override only the services that differ from the shared default
 
-## 6. How the Main Repository Uses Tool Servers
+## 7. How the Main Repository Uses Tool Servers
 
 The main repository uses external tool servers indirectly:
 
@@ -104,7 +114,7 @@ The main repository uses external tool servers indirectly:
 
 This means a missing tool server should disable a tool family cleanly rather than breaking the entire agent runtime.
 
-## 7. Minimal Adoption Strategy
+## 8. Minimal Adoption Strategy
 
 You do not need the entire external stack to use the project.
 
@@ -119,8 +129,9 @@ Common deployment patterns:
 - full stack
   - combine retrieval, generation, reconstruction, and PCG services
 
-## 8. Related Docs
+## 9. Related Docs
 
 - [MCP Server and Tools](../integrations/mcp-server-and-tools.md)
-- [Architecture and Deployment Overview](../architecture/agentic-workflow.md)
+- [System Architecture](../architecture/system-architecture.md)
+- [Startup and Deployment Guide](./startup-and-deployment.md)
 - [Configuration Reference](../reference/configuration.md)

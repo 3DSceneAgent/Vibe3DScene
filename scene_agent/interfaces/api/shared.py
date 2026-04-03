@@ -686,14 +686,20 @@ def get_blender_connection() -> BlenderConnection:
     return _blender_connection
 
 
-def get_blender_connection_for_thread(thread_id: str) -> BlenderConnection:
+def get_blender_connection_for_thread(
+    thread_id: str,
+    *,
+    preserve_activity: bool = False,
+) -> BlenderConnection:
     settings = get_settings()
     if settings.blender_mode == "local-client":
         return get_blender_connection()
 
     coordinator = get_session_coordinator()
     manager = get_session_manager()
-    session = manager.ensure(thread_id, "headless")
+    session = manager.get(thread_id) if preserve_activity else None
+    if session is None:
+        session = manager.ensure(thread_id, "headless")
     manager.ensure_session_storage(thread_id)
     host = os.getenv("BLENDER_HEADLESS_HOST", settings.blender_host)
     base_port = int(os.getenv("BLENDER_HEADLESS_BASE_PORT", "9876"))
@@ -817,7 +823,11 @@ def get_blender_connection_for_thread(thread_id: str) -> BlenderConnection:
                                     with open(session.log_path, "r") as f:
                                         log_content = f.read()
                                     error_msg += f"\n\nProcess Log:\n{log_content[-2000:]}"
-                                manager.set_error(thread_id, error_msg)
+                                if preserve_activity:
+                                    session.status = "error"
+                                    session.error = error_msg
+                                else:
+                                    manager.set_error(thread_id, error_msg)
                                 raise Exception(error_msg)
                             log_event(
                                 "debug",
@@ -842,18 +852,31 @@ def get_blender_connection_for_thread(thread_id: str) -> BlenderConnection:
                         with open(session.log_path, "r") as f:
                             log_content = f.read()
                         error_msg += f"\n\nProcess Log:\n{log_content[-2000:]}"
-                    manager.set_error(thread_id, error_msg)
+                    if preserve_activity:
+                        session.status = "error"
+                        session.error = error_msg
+                    else:
+                        manager.set_error(thread_id, error_msg)
                     raise Exception(error_msg)
             else:
                 log_event("debug", "headless_connection_reused", {"thread_id": thread_id})
 
             if not connection.sock:
                 error_message = "Could not connect to headless Blender session."
-                manager.set_error(thread_id, error_message)
+                if preserve_activity:
+                    session.status = "error"
+                    session.error = error_message
+                else:
+                    manager.set_error(thread_id, error_message)
                 raise Exception(error_message)
 
-            manager.set_ready(thread_id, connection)
-            coordinator.touch_activity(thread_id)
+            if preserve_activity:
+                session.connection = connection
+                session.status = "ready"
+                session.error = None
+            else:
+                manager.set_ready(thread_id, connection)
+                coordinator.touch_activity(thread_id)
             coordinator.update_session_runtime_fields(
                 thread_id,
                 {
@@ -883,21 +906,29 @@ def get_blender_connection_for_thread(thread_id: str) -> BlenderConnection:
 def send_blender_command_sync(
     command_type: str,
     params: Dict[str, Any] | None = None,
-    thread_id: str | None = None
+    thread_id: str | None = None,
+    *,
+    preserve_activity: bool = False,
 ) -> Dict[str, Any]:
     global _blender_connection
     settings = get_settings()
     if settings.blender_mode == "headless" and thread_id:
         coordinator = get_session_coordinator()
         manager = get_session_manager()
-        session = manager.ensure(thread_id, "headless")
+        session = manager.get(thread_id) if preserve_activity else None
+        if session is None:
+            session = manager.ensure(thread_id, "headless")
         last_error: Exception | None = None
         for _attempt in range(2):
-            blender = get_blender_connection_for_thread(thread_id)
+            blender = get_blender_connection_for_thread(
+                thread_id,
+                preserve_activity=preserve_activity,
+            )
             with session.lock:
                 try:
                     result = blender.send_command(command_type, params)
-                    coordinator.touch_activity(thread_id)
+                    if not preserve_activity:
+                        coordinator.touch_activity(thread_id)
                     return result
                 except Exception as exc:
                     last_error = exc
@@ -906,7 +937,11 @@ def send_blender_command_sync(
                     except Exception:
                         pass
                     session.connection = None
-                    manager.set_error(thread_id, f"{command_type} failed: {exc}")
+                    if preserve_activity:
+                        session.status = "error"
+                        session.error = f"{command_type} failed: {exc}"
+                    else:
+                        manager.set_error(thread_id, f"{command_type} failed: {exc}")
                     coordinator.update_session_runtime_fields(
                         thread_id,
                         {"status": "error"},
@@ -947,6 +982,7 @@ def serialize_message(message: Any) -> Dict[str, Any]:
             "usage_metadata": getattr(message, "usage_metadata", None),
             "name": getattr(message, "name", None),
             "id": getattr(message, "id", None),
+            "tool_call_id": getattr(message, "tool_call_id", None),
         }
     return {"type": "unknown", "content": str(message)}
 
@@ -1166,6 +1202,28 @@ def _extract_tool_call_name(tool_call: Any) -> str | None:
     return None
 
 
+def _extract_tool_call_id(tool_call: Any) -> str | None:
+    if isinstance(tool_call, dict):
+        for candidate in (
+            tool_call.get("id"),
+            tool_call.get("tool_call_id"),
+            tool_call.get("call_id"),
+        ):
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        function_value = tool_call.get("function")
+        if isinstance(function_value, dict):
+            function_id = function_value.get("id")
+            if isinstance(function_id, str) and function_id.strip():
+                return function_id.strip()
+        return None
+    for attr in ("id", "tool_call_id", "call_id"):
+        raw_value = getattr(tool_call, attr, None)
+        if isinstance(raw_value, str) and raw_value.strip():
+            return raw_value.strip()
+    return None
+
+
 def _extract_reasoning_from_value(value: Any) -> str:
     if value is None:
         return ""
@@ -1243,54 +1301,88 @@ def extract_message_reasoning_text(serialized: Dict[str, Any]) -> str:
     return ""
 
 
-def extract_message_tool_call_names(serialized: Dict[str, Any]) -> list[str]:
-    names: list[str] = []
-    seen: set[str] = set()
+def extract_message_tool_calls(serialized: Dict[str, Any]) -> list[dict[str, str]]:
+    tool_calls: list[dict[str, str]] = []
+    seen_keys: set[str] = set()
+    fallback_counters: dict[str, int] = {}
 
-    def add_name(raw_name: str | None) -> None:
-        if not isinstance(raw_name, str):
+    def add_call(raw_tool_call: Any, *, source: str) -> None:
+        name = _extract_tool_call_name(raw_tool_call)
+        call_id = _extract_tool_call_id(raw_tool_call)
+        if not name and not call_id:
             return
-        name = raw_name.strip()
-        if not name or name in seen:
-            return
-        seen.add(name)
-        names.append(name)
 
-    def add_tool_calls(raw_calls: Any) -> None:
+        if call_id:
+            key = call_id
+        else:
+            base = f"{source}:{name or 'tool'}"
+            count = fallback_counters.get(base, 0)
+            fallback_counters[base] = count + 1
+            key = f"{base}:{count}"
+
+        if key in seen_keys:
+            return
+        seen_keys.add(key)
+
+        entry: dict[str, str] = {"key": key}
+        if name:
+            entry["name"] = name
+        if call_id:
+            entry["id"] = call_id
+        tool_calls.append(entry)
+
+    def add_tool_calls(raw_calls: Any, *, source: str) -> None:
         if not isinstance(raw_calls, list):
             return
         for tool_call in raw_calls:
-            add_name(_extract_tool_call_name(tool_call))
+            add_call(tool_call, source=source)
 
-    add_tool_calls(serialized.get("tool_calls"))
-    add_tool_calls(serialized.get("tool_call_chunks"))
+    add_tool_calls(serialized.get("tool_calls"), source="tool_calls")
+    add_tool_calls(serialized.get("tool_call_chunks"), source="tool_call_chunks")
 
     additional_kwargs = serialized.get("additional_kwargs")
     if isinstance(additional_kwargs, dict):
-        add_tool_calls(additional_kwargs.get("tool_calls"))
+        add_tool_calls(
+            additional_kwargs.get("tool_calls"),
+            source="additional_kwargs.tool_calls",
+        )
 
-    def scan_content_blocks(raw_content: Any) -> None:
+    def scan_content_blocks(raw_content: Any, *, source: str) -> None:
         if isinstance(raw_content, list):
-            for item in raw_content:
-                scan_content_blocks(item)
+            for index, item in enumerate(raw_content):
+                scan_content_blocks(item, source=f"{source}[{index}]")
             return
         if not isinstance(raw_content, dict):
             return
 
         item_type = _content_block_type(raw_content)
         if item_type in _TOOL_LIKE_CONTENT_TYPES:
-            add_name(_extract_tool_call_name(raw_content))
+            add_call(raw_content, source=source)
             return
 
         nested_value = raw_content.get("value")
         if isinstance(nested_value, dict):
             nested_type = _content_block_type(nested_value)
             if nested_type in _TOOL_LIKE_CONTENT_TYPES:
-                add_name(_extract_tool_call_name(nested_value))
+                add_call(nested_value, source=f"{source}.value")
                 return
+        if isinstance(nested_value, list):
+            scan_content_blocks(nested_value, source=f"{source}.value")
 
-    scan_content_blocks(serialized.get("content"))
-    scan_content_blocks(serialized.get("content_blocks"))
+    scan_content_blocks(serialized.get("content"), source="content")
+    scan_content_blocks(serialized.get("content_blocks"), source="content_blocks")
+    return tool_calls
+
+
+def extract_message_tool_call_names(serialized: Dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for tool_call in extract_message_tool_calls(serialized):
+        name = tool_call.get("name")
+        if not isinstance(name, str) or not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
     return names
 
 
@@ -1667,6 +1759,10 @@ class BlendFileListResponse(BaseModel):
 
 
 def serialize_image_asset(image: ImageAsset) -> ImageAssetResponse:
+    asset_url = None
+    stored_path = str(image.stored_path or "").strip()
+    if stored_path and os.path.isfile(stored_path):
+        asset_url = build_thread_image_asset_url(image.thread_id, image.id)
     return ImageAssetResponse(
         id=image.id,
         thread_id=image.thread_id,
@@ -1676,7 +1772,7 @@ def serialize_image_asset(image: ImageAsset) -> ImageAssetResponse:
         sha256=image.sha256,
         uploaded_at=image.uploaded_at,
         source=image.source,
-        asset_url=build_thread_image_asset_url(image.thread_id, image.id),
+        asset_url=asset_url,
     )
 
 
@@ -1692,7 +1788,7 @@ def resolve_thread_storage_dir(thread_id: str) -> Path:
         or os.getenv("SESSION_BLEND_ROOT")
         or settings.session_shared_storage_root
     )
-    return Path(storage_root) / _safe_storage_session_id(thread_id)
+    return Path(os.path.expanduser(storage_root)) / _safe_storage_session_id(thread_id)
 
 
 def build_thread_image_asset_url(thread_id: str, image_id: str) -> str:
@@ -1841,7 +1937,12 @@ def _export_scene_gltf_to_path(thread_id: str, target_path: Path) -> bool:
         "export_format='GLB', export_apply=True, export_lights=True)\n"
     )
     try:
-        send_blender_command_sync("execute_code", {"code": export_code}, thread_id)
+        send_blender_command_sync(
+            "execute_code",
+            {"code": export_code},
+            thread_id,
+            preserve_activity=True,
+        )
         if not _wait_for_file(temp_path):
             return False
         target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1878,6 +1979,7 @@ def _render_scene_level_views_to_artifacts(thread_id: str) -> list[dict[str, str
                     "filepath": str(temp_path),
                 },
                 thread_id,
+                preserve_activity=True,
             )
             filepath = Path(str((result or {}).get("filepath") or temp_path))
             if not filepath.exists():
@@ -2507,11 +2609,12 @@ async def claim_or_proxy_request(
     *,
     request: Request,
     thread_id: str,
+    record_activity: bool = True,
 ) -> tuple[Any, Response | None]:
     coordinator = get_session_coordinator()
     settings = get_settings()
     request_client_id = resolve_frontend_client_id(request)
-    resolution = coordinator.claim_or_get_owner(thread_id)
+    resolution = coordinator.claim_or_get_owner(thread_id, record_activity=record_activity)
     if resolution.is_owner:
         _bind_frontend_client_to_thread_if_unclaimed(thread_id, request_client_id)
         return resolution, None
@@ -2958,11 +3061,15 @@ def build_thread_summaries(*, frontend_client_id: str) -> list[ThreadSummaryResp
         entry = runtime_by_thread.get(normalized_thread_id, {})
         history = build_thread_history_payload(normalized_thread_id)
         scene_manifest = load_thread_scene_artifact_manifest(normalized_thread_id)
+        effective_updated_at_ms = max(
+            int(history.updated_at_ms or 0),
+            int(scene_manifest.generated_at_ms or 0),
+        )
         summaries.append(
             ThreadSummaryResponse(
                 thread_id=normalized_thread_id,
                 title=history.title,
-                updated_at_ms=history.updated_at_ms,
+                updated_at_ms=effective_updated_at_ms,
                 has_persisted_scene=scene_manifest.has_persisted_blend,
                 scene_revision=scene_manifest.scene_revision,
                 has_runtime=bool(entry.get("occupying_resources")),

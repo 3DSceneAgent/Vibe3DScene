@@ -1,4 +1,4 @@
-# Current Agent Workflow
+# Runtime Workflow
 
 Last updated: 2026-03-30
 
@@ -369,13 +369,3 @@ Internal nodes filtered from user-facing SSE include:
 - `verifier_feedback`
 
 This keeps the stream focused on user-visible assistant output, tool activity, and graph progress events rather than internal control tokens.
-
-## 11. Summary of Major Differences from the Older Workflow
-
-- Routing is now explicit: `direct_mode` vs `plan_mode`
-- `fast_mode` is a supported runtime path
-- todos are planner-created and evaluator-managed
-- single-agent and dual-agent share the same verification contract
-- reference images are routed through persisted assets plus task-scoped bindings
-- retry and persisted runtime state are now part of the operational model
-- the current graph is no longer the older fixed `agent -> tools -> observe -> verify -> checkpoint` pipeline

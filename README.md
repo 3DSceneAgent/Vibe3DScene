@@ -24,11 +24,10 @@
 
 ## Table of Contents
 - [1. Overview](#1-overview)
-- [2. What's New in the Current Architecture](#2-whats-new-in-the-current-architecture)
-- [3. Quickstart](#3-quickstart)
-- [4. Repository Structure](#4-repository-structure)
-- [5. Documentation Map](#5-documentation-map)
-- [6. Acknowledgements](#6-acknowledgements)
+- [2. Quickstart](#2-quickstart)
+- [3. Repository Structure](#3-repository-structure)
+- [4. Documentation Map](#4-documentation-map)
+- [5. Acknowledgements](#5-acknowledgements)
 - [License](#license)
 - [Contributing](#contributing)
 
@@ -60,26 +59,13 @@ flowchart LR
 
 For the exact runtime graph and deployment topologies, see:
 
-- [Current Agent Workflow](./docs/architecture/current-agent-workflow.md)
-- [Architecture and Deployment Overview](./docs/architecture/agentic-workflow.md)
+- [Runtime Workflow](./docs/architecture/runtime-workflow.md)
+- [System Architecture](./docs/architecture/system-architecture.md)
+- [CHANGELOG](./CHANGELOG.md)
 
-## 2. What's New in the Current Architecture
+## 2. Quickstart
 
-Compared with the older README and earlier single-path workflow, the current project includes several large changes:
-
-- Router-driven execution with `direct_mode` and `plan_mode`, instead of treating every request as the same render-and-verify loop.
-- `fast_mode`, which can skip the normal observe/verify cycle when the request does not need full visual verification.
-- Todo-driven planning and a unified evaluator loop that owns completion, skip, and replan decisions.
-- Experimental dual-agent topology with builder/verifier roles for planning-heavy requests.
-- Decoupled tool servers in the sibling `../3DAgentTools` repository rather than an in-repo `tool_servers/` stack.
-- Expanded MCP tooling, including SceneSmith retrieval/material flows, SAM-based reconstruction, and Tripo3D generation.
-- First-class `qwen` provider support alongside OpenAI, Anthropic, and Gemini.
-- Better retry and persistence behavior, including graph checkpoints, persisted `.blend` state, persisted image assets, and retry snapshots for the latest turn.
-- A cleaner frontend with image attachments, improved todo visibility, better render and GLB previews, environment-light controls, and improved 3D viewport behavior.
-
-## 3. Quickstart
-
-### 3.1 Prerequisites
+### 2.1 Prerequisites
 
 - Python 3.11+
 - Blender 3.6+
@@ -87,7 +73,7 @@ Compared with the older README and earlier single-path workflow, the current pro
 - Redis for recommended persistence and multi-worker coordination
 - Docker if you want to run external tool services in containers
 
-### 3.2 Install
+### 2.2 Install
 
 ```bash
 git clone --recurse-submodules https://github.com/3DSceneAgent/Vibe3DScene
@@ -107,7 +93,7 @@ If you also want the optional external tool stack:
 git clone --recurse-submodules https://github.com/3DSceneAgent/3DAgentTools ../3DAgentTools
 ```
 
-### 3.3 Common Run Modes
+### 2.3 Common Run Modes
 
 | Goal | Command |
 | --- | --- |
@@ -120,14 +106,20 @@ git clone --recurse-submodules https://github.com/3DSceneAgent/3DAgentTools ../3
 
 After the backend starts, open the web app and point it at `http://localhost:8000`.
 
-### 3.4 Setup References
+If you want single-agent `verify` to add internal geometry penetration checks on top of the existing VLM visual check, enable:
 
-- Installation, runtime modes, and deployment: [Architecture and Deployment Overview](./docs/architecture/agentic-workflow.md)
+- `SCENE_AGENT_ENABLE_PENETRATION_VERIFY=true`
+- optional tuning via `SCENE_AGENT_PENETRATION_THRESHOLD_M` (default `0.02`), `SCENE_AGENT_PENETRATION_MAX_CANDIDATE_PAIRS`, and `SCENE_AGENT_PENETRATION_MAX_REPORTED_PAIRS`
+
+### 2.4 Setup References
+
+- Installation, runtime modes, single-worker and multi-worker startup: [Startup and Deployment Guide](./docs/deployment/startup-and-deployment.md)
 - Tool servers and external services: [Tool Servers](./docs/deployment/tool-servers.md)
 - MCP server, tool categories, and gating: [MCP Server and Tools](./docs/integrations/mcp-server-and-tools.md)
 - Environment variables and provider configuration: [Configuration Reference](./docs/reference/configuration.md)
+- Major project version updates: [CHANGELOG](./CHANGELOG.md)
 
-## 4. Repository Structure
+## 3. Repository Structure
 
 ```text
 scene_agent/     Core runtime: graph, sessions, memory, providers, API/CLI
@@ -139,20 +131,24 @@ scripts/         Local helpers, smoke tests, validation, and cleanup tools
 ../3DAgentTools/ Optional sibling checkout for external tool services
 ```
 
-## 5. Documentation Map
+## 4. Documentation Map
 
-- [Current Agent Workflow](./docs/architecture/current-agent-workflow.md)
+- [Runtime Workflow](./docs/architecture/runtime-workflow.md)
   - Exact runtime graph, state flow, `direct_mode` vs `plan_mode`, single-agent vs dual-agent, evaluator behavior, image routing, and persistence touchpoints.
-- [Architecture and Deployment Overview](./docs/architecture/agentic-workflow.md)
+- [System Architecture](./docs/architecture/system-architecture.md)
   - High-level layers, single-worker vs multi-worker deployment, owner-proxy behavior, Redis coordination, and persisted sessions.
+- [Startup and Deployment Guide](./docs/deployment/startup-and-deployment.md)
+  - Local setup, macOS/Linux prerequisites, single-worker and multi-worker startup flows, and Docker entry points.
 - [MCP Server and Tools](./docs/integrations/mcp-server-and-tools.md)
   - MCP server role, tool categories, runtime gating, mode constraints, and optional external services.
 - [Tool Servers](./docs/deployment/tool-servers.md)
   - External `3DAgentTools` stack, expected services, startup options, and host/port coordination.
 - [Configuration Reference](./docs/reference/configuration.md)
   - Provider, API, session, persistence, tool, and frontend-related environment variables.
+- [CHANGELOG](./CHANGELOG.md)
+  - Date-based summary of major updates.
 
-## 6. Acknowledgements
+## 5. Acknowledgements
 
 - [Blender-MCP](https://github.com/ahujasid/blender-mcp)
 - [VIGA](https://github.com/Fugtemypt123/VIGA)

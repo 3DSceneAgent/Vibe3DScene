@@ -11,6 +11,8 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Literal, Any, List
 
+_CACHE_ROOT = os.path.expanduser("~/.cache/vibe3dscene")
+
 SessionMode = Literal["local-client", "headless"]
 SessionStatus = Literal["starting", "ready", "error", "closed"]
 SessionResourceReason = Literal[
@@ -417,7 +419,7 @@ class SessionManager:
                     idle_timeout_raw = str(settings.session_idle_timeout_seconds)
             except Exception:
                 pass
-        root = root or "/tmp/scene_agent_sessions"
+        root = os.path.expanduser(root or os.path.join(_CACHE_ROOT, "sessions"))
         try:
             max_snapshots = int(max_snapshots_raw or "20")
         except ValueError:
@@ -579,7 +581,9 @@ def start_headless_process(
         print(f"Starting headless Blender for session: {session.session_id}")
         print(f"  Command: {full_command}")
         
-        log_dir = os.getenv("BLENDER_HEADLESS_LOG_DIR", "/tmp/scene_agent_headless_logs")
+        log_dir = os.path.expanduser(
+            os.getenv("BLENDER_HEADLESS_LOG_DIR", os.path.join(_CACHE_ROOT, "headless_logs"))
+        )
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, f"headless_{session.session_id}_{int(time.time() * 1000)}.log")
         session.log_path = log_path
@@ -643,7 +647,9 @@ def start_mcp_process(
     try:
         env.setdefault("PYTHONUNBUFFERED", "1")
         full_command = f"{command} {' '.join(args)}"
-        log_dir = os.getenv("BLENDER_MCP_LOG_DIR", "/tmp/scene_agent_mcp_logs")
+        log_dir = os.path.expanduser(
+            os.getenv("BLENDER_MCP_LOG_DIR", os.path.join(_CACHE_ROOT, "mcp_logs"))
+        )
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, f"mcp_{session.session_id}_{int(time.time() * 1000)}.log")
         session.mcp_log_path = log_path

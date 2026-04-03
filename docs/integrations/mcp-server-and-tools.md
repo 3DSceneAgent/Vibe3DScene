@@ -4,6 +4,8 @@ Last updated: 2026-03-30
 
 This document summarizes the role of the in-repo MCP server, how tools are registered and gated, and which tool families are currently supported.
 
+For environment variables, endpoint overrides, and service-related settings, see the central [Configuration Reference](../reference/configuration.md).
+
 Primary code references:
 
 - `mcp_server/runtime.py`
@@ -50,23 +52,12 @@ The registry can also reject invalid combinations. Important examples include:
 
 Some tools are always available, while others depend on runtime mode.
 
-### `local-client`
+| Runtime mode | Characteristics | Typical mode-sensitive tools |
+| --- | --- | --- |
+| `local-client` | Connects to an already running Blender addon and supports viewport-centric observation. | `get_viewport_screenshot`, local observation flows |
+| `headless` | Backend launches and manages Blender/MCP runtime processes, with better fit for persisted sessions and automation. | TRELLIS2, headless generation or reconstruction workflows |
 
-Typical characteristics:
-
-- connects to an already running Blender addon
-- supports viewport-centric observation flows
-- can expose tools such as `get_viewport_screenshot`
-
-### `headless`
-
-Typical characteristics:
-
-- the backend owns Blender and MCP runtime processes
-- better suited to persisted sessions and automated scene construction
-- required for some heavier generation or reconstruction workflows
-
-### Mode-sensitive examples
+Examples:
 
 - `get_viewport_screenshot` is only valid in `local-client`
 - TRELLIS2 is gated to `headless`
@@ -74,92 +65,21 @@ Typical characteristics:
 
 ## 4. Tool Families
 
-### Scene control and inspection
-
-Examples:
-
-- `get_scene_info`
-- `get_object_info`
-- `clear_scene`
-- `delete_objects`
-- `execute_blender_code`
-- `import_glb_model`
-- `import_blend_contents`
-
-These tools are the core Blender-facing scene manipulation and inspection surface.
-
-### Camera, observation, and rendering
-
-Examples:
-
-- `observe_scene_global`
-- `render_from_camera`
-- `render_from_objects`
-- `camera_observe`
-- `camera_act`
-- `camera_set_pose`
-- `get_viewport_screenshot`
-
-These tools provide evidence collection, local inspection, and rendering support for verification and iterative editing.
-
-### Session memory and rollback
-
-Examples:
-
-- `undo_last_snapshot`
-
-These tools support rollback-oriented recovery during scene editing.
-
-### Retrieval and material tools
-
-Examples:
-
-- PolyHaven
-  - `search_polyhaven_assets`
-  - `download_polyhaven_asset`
-  - `set_texture`
-- Objaverse-style retrieval
-  - `search_3d_assets_by_text`
-  - `import_retrieved_asset`
-- SceneSmith compatibility retrieval
-  - `search_hssd_assets`
-  - `import_hssd_asset`
-  - `search_ambientcg_materials`
-  - `apply_ambientcg_material`
-- Sketchfab
-  - `search_sketchfab_models`
-  - `get_sketchfab_model_preview`
-  - `download_sketchfab_model`
-
-### 3D generation tools
-
-Examples:
-
-- Rodin / Hyper3D
-  - `generate_hyper3d_model_via_text`
-  - `generate_hyper3d_model_via_images`
-  - `poll_rodin_job_status`
-  - `import_generated_asset`
-- TRELLIS2
-  - `generate_trellis2_model`
-- Hunyuan3D
-  - `generate_hunyuan3d_model`
-- Tripo3D
-  - `generate_tripo3d_model`
-
-### Reconstruction tools
-
-Examples:
-
-- SAM-based scene reconstruction
-  - `reconstruct_full_scene`
-
-### PCG tools
-
-Examples:
-
-- `get_infinigen_available_assets`
-- `generate_infinigen_assets`
+| Category | Provider / Source | Representative tools | Notes |
+| --- | --- | --- | --- |
+| Scene control and inspection | Blender core | `get_scene_info`, `get_object_info`, `clear_scene`, `delete_objects`, `execute_blender_code`, `import_glb_model`, `import_blend_contents` | Core Blender-facing manipulation and inspection. |
+| Camera, observation, and rendering | Blender core | `observe_scene_global`, `render_from_camera`, `render_from_objects`, `camera_observe`, `camera_act`, `camera_set_pose`, `get_viewport_screenshot` | Evidence collection and visual inspection. |
+| Session memory and rollback | Blender core | `undo_last_snapshot` | Recovery-oriented tool path. |
+| Retrieval and materials | PolyHaven | `search_polyhaven_assets`, `download_polyhaven_asset`, `set_texture` | Controlled by `ENABLE_POLYHAVEN`. |
+| Retrieval | Objaverse-compatible backend | `search_3d_assets_by_text`, `import_retrieved_asset` | Active when `ASSET_RETRIEVAL_BACKEND=objaverse`. |
+| Retrieval and materials | SceneSmith compatibility API | `search_hssd_assets`, `import_hssd_asset`, `search_ambientcg_materials`, `apply_ambientcg_material` | Active for SceneSmith retrieval; AmbientCG is independently gated. |
+| Retrieval | Sketchfab | `search_sketchfab_models`, `get_sketchfab_model_preview`, `download_sketchfab_model` | Requires `ENABLE_SKETCHFAB`, API key, and reachable API. |
+| 3D generation | Rodin / Hyper3D | `generate_hyper3d_model_via_text`, `generate_hyper3d_model_via_images`, `poll_rodin_job_status`, `import_generated_asset` | Mutually exclusive with other generator families. |
+| 3D generation | TRELLIS2 | `generate_trellis2_model` | Headless-only in current gating. |
+| 3D generation | Hunyuan3D | `generate_hunyuan3d_model` | Headless-only in current gating. |
+| 3D generation | Tripo3D | `generate_tripo3d_model` | Available in `local-client` or `headless` when enabled. |
+| Reconstruction | SAM / SAM3D service | `reconstruct_full_scene` | SAM-based full-scene reconstruction. |
+| PCG | Infinigen / PCG service | `get_infinigen_available_assets`, `generate_infinigen_assets` | Depends on the PCG service stack. |
 
 ## 5. Retrieval Backend Selection
 
@@ -187,6 +107,8 @@ Common patterns:
 
 This allows a single deployment to colocate multiple tool services while still supporting per-service overrides.
 
+For the complete variable list and defaults, see [Configuration Reference](../reference/configuration.md).
+
 ## 7. Operational Notes
 
 - The MCP server belongs to this repository.
@@ -196,7 +118,7 @@ This allows a single deployment to colocate multiple tool services while still s
 
 ## 8. Related Docs
 
-- [Architecture and Deployment Overview](../architecture/agentic-workflow.md)
-- [Current Agent Workflow](../architecture/current-agent-workflow.md)
+- [System Architecture](../architecture/system-architecture.md)
+- [Runtime Workflow](../architecture/runtime-workflow.md)
 - [Tool Servers](../deployment/tool-servers.md)
 - [Configuration Reference](../reference/configuration.md)

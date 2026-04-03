@@ -7,19 +7,23 @@ export type EnvironmentPreset =
   | 'overcast'
   | 'workshop'
 
-export type ProceduralSkyConfig = {
+export type ProceduralSkyVisualConfig = {
   turbidity: number
   rayleigh: number
   mieCoefficient: number
   mieDirectionalG: number
   elevation: number
   azimuth: number
+}
+
+export type ProceduralSkyConfig = ProceduralSkyVisualConfig & {
   skyColor: string
   groundColor: string
   hemisphereIntensity: number
   sunColor: string
   sunIntensity: number
   environmentIntensity: number
+  background?: Partial<ProceduralSkyVisualConfig>
 }
 
 export type EnvironmentPresetConfig = {
@@ -51,26 +55,34 @@ export const environmentPresets: Record<EnvironmentPreset, EnvironmentPresetConf
   },
   skylight: {
     label: 'Skylight',
-    description: 'Procedural daylight sky with PMREM-based environment lighting and no HDRI asset.',
-    ambient: 0.02,
-    directional: 0.92,
+    description: 'Procedural clear-sky environment with a dedicated skybox background and PMREM lighting.',
+    ambient: 0.03,
+    directional: 0.84,
     color: '#dcefff',
-    exposure: 0.88,
+    exposure: 0.94,
     hdriUrl: null,
     sourceUrl: null,
     proceduralSky: {
-      turbidity: 3.8,
-      rayleigh: 1.9,
-      mieCoefficient: 0.018,
-      mieDirectionalG: 0.84,
-      elevation: 42,
+      turbidity: 3.0,
+      rayleigh: 2.0,
+      mieCoefficient: 0.010,
+      mieDirectionalG: 0.80,
+      elevation: 38,
       azimuth: 132,
-      skyColor: '#dcefff',
-      groundColor: '#4d5563',
-      hemisphereIntensity: 0.54,
+      skyColor: '#dff0ff',
+      groundColor: '#6f7885',
+      hemisphereIntensity: 0.44,
       sunColor: '#fff2d6',
-      sunIntensity: 0.88,
-      environmentIntensity: 0.48
+      sunIntensity: 0.78,
+      environmentIntensity: 0.58,
+      background: {
+        turbidity: 2.2,
+        rayleigh: 2.8,
+        mieCoefficient: 0.006,
+        mieDirectionalG: 0.76,
+        elevation: 34,
+        azimuth: 132
+      }
     }
   },
   studio: {

@@ -13,8 +13,10 @@ from scene_agent.interfaces.api import shared as api_shared
 from scene_agent.memory.reference_image_memory import ImageAsset
 
 
-def test_build_thread_history_payload_serializes_attached_images_and_tool_media(monkeypatch):
+def test_build_thread_history_payload_serializes_attached_images_and_tool_media(tmp_path, monkeypatch):
     thread_id = "thread-history"
+    image_path = tmp_path / "chair.png"
+    image_path.write_bytes(b"png")
     image_asset = ImageAsset(
         id="img-1",
         thread_id=thread_id,
@@ -22,7 +24,7 @@ def test_build_thread_history_payload_serializes_attached_images_and_tool_media(
         content_type="image/png",
         size_bytes=123,
         sha256="abc123",
-        stored_path="/tmp/chair.png",
+        stored_path=str(image_path),
         uploaded_at="2026-03-28T00:00:00",
         source="upload",
     )
@@ -95,6 +97,61 @@ def test_build_thread_history_payload_serializes_attached_images_and_tool_media(
     assert payload.messages[0].attached_images[0].asset_url == f"/threads/{thread_id}/images/img-1"
     assert payload.messages[2].tool_media[0].value == "/renders/preview.jpg"
     assert payload.todos[0]["id"] == "todo-1"
+
+
+def test_build_thread_history_payload_omits_asset_url_for_missing_files(monkeypatch):
+    thread_id = "thread-history-missing"
+    image_asset = ImageAsset(
+        id="img-missing",
+        thread_id=thread_id,
+        filename="dog2.jpg",
+        content_type="image/jpeg",
+        size_bytes=123,
+        sha256="abc123",
+        stored_path="/tmp/definitely-missing-dog2.jpg",
+        uploaded_at="2026-03-28T00:00:00",
+        source="upload",
+    )
+
+    class _Checkpointer:
+        @staticmethod
+        def get_tuple(_config):
+            return SimpleNamespace(
+                checkpoint={
+                    "id": "1770000000123.0001",
+                    "channel_values": {
+                        "messages": [
+                            HumanMessage(
+                                content="Use this dog reference",
+                                id="turn-1",
+                                additional_kwargs={
+                                    "created_at_ms": 1770000000001,
+                                    "attached_image_ids": ["img-missing"],
+                                },
+                            ),
+                        ],
+                    },
+                }
+            )
+
+    class _ImageMemory:
+        @staticmethod
+        def list_assets(_thread_id):
+            return [image_asset]
+
+    class _Coordinator:
+        @staticmethod
+        def get_session_meta(_thread_id):
+            return {"title": "Dog thread"}
+
+    monkeypatch.setattr(api_shared, "get_graph_checkpointer", lambda: _Checkpointer())
+    monkeypatch.setattr(api_shared, "get_image_asset_memory", lambda: _ImageMemory())
+    monkeypatch.setattr(api_shared, "get_session_coordinator", lambda: _Coordinator())
+
+    payload = api_shared.build_thread_history_payload(thread_id)
+
+    assert payload.messages[0].attached_images[0].filename == "dog2.jpg"
+    assert payload.messages[0].attached_images[0].asset_url is None
 
 
 def test_load_thread_scene_artifact_manifest_reads_persisted_artifacts(tmp_path, monkeypatch):
@@ -191,6 +248,54 @@ def test_list_threads_route_returns_backend_summaries(monkeypatch):
     payload = response.json()
     assert payload["threads"] == ["thread-summary"]
     assert payload["summaries"][0]["has_persisted_scene"] is True
+
+
+def test_build_thread_summaries_uses_latest_scene_or_chat_activity(monkeypatch):
+    monkeypatch.setattr(
+        api_shared,
+        "collect_headless_runtime_entries",
+        lambda frontend_client_id: [
+            {
+                "thread_id": "thread-scene",
+                "occupying_resources": False,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        api_shared,
+        "list_accessible_thread_ids",
+        lambda frontend_client_id: ["thread-chat", "thread-scene"],
+    )
+    monkeypatch.setattr(
+        api_shared,
+        "build_thread_history_payload",
+        lambda thread_id: api_shared.ThreadHistoryResponse(
+            thread_id=thread_id,
+            title=f"title-{thread_id}",
+            updated_at_ms=1770000000100 if thread_id == "thread-chat" else 1770000000200,
+            scene_revision=None,
+            messages=[],
+            todos=[],
+        ),
+    )
+    monkeypatch.setattr(
+        api_shared,
+        "load_thread_scene_artifact_manifest",
+        lambda thread_id: api_shared.SceneArtifactManifestResponse(
+            thread_id=thread_id,
+            has_persisted_blend=thread_id == "thread-scene",
+            scene_revision=1770000000999 if thread_id == "thread-scene" else None,
+            generated_at_ms=1770000000300 if thread_id == "thread-scene" else None,
+            gltf_url=None,
+            renders=[],
+        ),
+    )
+
+    summaries = api_shared.build_thread_summaries(frontend_client_id="client-a")
+
+    assert [summary.thread_id for summary in summaries] == ["thread-scene", "thread-chat"]
+    assert summaries[0].updated_at_ms == 1770000000300
+    assert summaries[1].updated_at_ms == 1770000000100
 
 
 def test_delete_all_threads_route_tears_down_each_accessible_thread(monkeypatch):

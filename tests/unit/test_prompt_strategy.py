@@ -231,6 +231,7 @@ def test_strategy_includes_image_referenced_hunyuan_comparison_guidance():
 
     assert "input_image_name=... or input_image_id=..." in prompt
     assert "auto-resolve it for image-to-3D" in prompt
+    assert "Default generation_mode='rapid'" in prompt
     assert "Hunyuan often returns the model as Type=OBJ with a .zip bundle" in prompt
     assert "prefer preferred_model_asset.url when present" in prompt
     assert "select the Type=OBJ ResultFile3Ds URL" in prompt

@@ -18,9 +18,10 @@ def test_get_todos_reads_persisted_state_without_starting_headless_runtime(monke
         }
     ]
 
-    async def fake_claim_or_proxy_request(*, request, thread_id: str):
+    async def fake_claim_or_proxy_request(*, request, thread_id: str, record_activity: bool = True):
         _ = request
         assert thread_id == "thread-lazy-todos"
+        assert record_activity is False
         return SimpleNamespace(owner_worker_id="", lease_epoch=None), None
 
     async def fail_get_agent(_thread_id: str | None = None):
@@ -63,9 +64,10 @@ def test_get_todos_uses_live_agent_when_headless_runtime_is_occupied(monkeypatch
             assert config == {"configurable": {"thread_id": thread_id}}
             return SimpleNamespace(values={"todos": live_todos})
 
-    async def fake_claim_or_proxy_request(*, request, thread_id: str):
+    async def fake_claim_or_proxy_request(*, request, thread_id: str, record_activity: bool = True):
         _ = request
         assert thread_id == "thread-live-todos"
+        assert record_activity is False
         return SimpleNamespace(owner_worker_id="", lease_epoch=None), None
 
     async def fake_get_agent(request_thread_id: str | None = None):

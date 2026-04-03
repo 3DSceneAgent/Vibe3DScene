@@ -22,11 +22,15 @@ type SceneTabProps = {
   gltfUrl: string | null
   sceneHierarchy: SceneHierarchyNode[]
   environment: EnvironmentPreset
+  environmentLightIntensity: number
+  environmentBackgroundIntensity: number
   viewportTheme: ViewportTheme
   uiTheme: UiTheme
   showViewportGrid: boolean
   showHdriBackground: boolean
   onEnvironmentChange: (preset: EnvironmentPreset) => void
+  onEnvironmentLightIntensityChange: (value: number) => void
+  onEnvironmentBackgroundIntensityChange: (value: number) => void
   onFetchRenders: (includeLocalWork?: boolean) => void
   onFetchGltf: () => void
   onDownloadGltf: () => void
@@ -236,11 +240,15 @@ export function SceneTab({
   gltfUrl,
   sceneHierarchy,
   environment,
+  environmentLightIntensity,
+  environmentBackgroundIntensity,
   viewportTheme,
   uiTheme,
   showViewportGrid,
   showHdriBackground,
   onEnvironmentChange,
+  onEnvironmentLightIntensityChange,
+  onEnvironmentBackgroundIntensityChange,
   onFetchRenders,
   onFetchGltf,
   onDownloadGltf,
@@ -260,17 +268,20 @@ export function SceneTab({
   const [alwaysAutoFrameCamera] = useState(false)
   const [twoSidedRendering, setTwoSidedRendering] = useState(false)
   const [wireframeOverlay, setWireframeOverlay] = useState(false)
+  const [isEnvironmentMenuOpen, setIsEnvironmentMenuOpen] = useState(false)
   const [includeLocalWorkRenders, setIncludeLocalWorkRenders] = useState(false)
   const [renderPanelHeight, setRenderPanelHeight] = useState(DEFAULT_RENDER_PANEL_HEIGHT)
   const [layoutHeight, setLayoutHeight] = useState(0)
   const [isResizingLayout, setIsResizingLayout] = useState(false)
   const layoutRef = useRef<HTMLDivElement | null>(null)
+  const environmentMenuRef = useRef<HTMLDivElement | null>(null)
   const showRenderGallery = !minimalUi
   const hasRenders = showRenderGallery && renders.length > 0
   const isSceneActionBusy = loading.scene || loading.renders || loading.gltf
   const fetchActionHint = !canRunActions ? idleActionHint : null
   const isHierarchyCollapsed = minimalUi || objectsCollapsed
   const resolvedGltfUrl = resolveMediaUrl(gltfUrl ?? undefined, backendUrl) ?? null
+  const viewerKey = `${threadId}:${resolvedGltfUrl ?? 'empty'}`
   const handleHierarchyChange = useCallback(
     (hierarchy: SceneHierarchyNode[]) => onHierarchyChange(threadId, hierarchy),
     [onHierarchyChange, threadId]
@@ -288,6 +299,32 @@ export function SceneTab({
       window.removeEventListener('keydown', handleEscape)
     }
   }, [isFullscreen])
+
+  useEffect(() => {
+    if (!isEnvironmentMenuOpen) return
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (
+        environmentMenuRef.current &&
+        !environmentMenuRef.current.contains(event.target as Node)
+      ) {
+        setIsEnvironmentMenuOpen(false)
+      }
+    }
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsEnvironmentMenuOpen(false)
+      }
+    }
+
+    document.addEventListener('mousedown', handlePointerDown)
+    window.addEventListener('keydown', handleEscape)
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown)
+      window.removeEventListener('keydown', handleEscape)
+    }
+  }, [isEnvironmentMenuOpen])
 
   useEffect(() => {
     const layoutElement = layoutRef.current
@@ -381,25 +418,114 @@ export function SceneTab({
   const renderViewportControls = () => (
     <>
       <div
-        className="viewer-environment-control"
+        ref={environmentMenuRef}
+        className="viewer-environment-menu-anchor"
         title={environmentPresets[environment].description}
       >
-        <label className="viewer-environment-label" htmlFor={`viewer-environment-${threadId}`}>
-          Light
-        </label>
-        <select
-          id={`viewer-environment-${threadId}`}
-          className="styled-select viewer-environment-select"
-          value={environment}
-          aria-label="Viewport environment"
-          onChange={(event) => onEnvironmentChange(event.target.value as EnvironmentPreset)}
+        <button
+          type="button"
+          className={`ghost-btn viewer-environment-trigger ${isEnvironmentMenuOpen ? 'is-active' : ''}`}
+          aria-haspopup="dialog"
+          aria-expanded={isEnvironmentMenuOpen}
+          onClick={() => setIsEnvironmentMenuOpen((open) => !open)}
         >
-          {environmentPresetOptions.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
+          <span className="viewer-environment-trigger-label">Light</span>
+          <span className="viewer-environment-trigger-value">
+            {environmentPresets[environment].label}
+          </span>
+          <svg
+            className="viewer-environment-trigger-icon"
+            width="12"
+            height="12"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <polyline points="4 6 8 10 12 6" />
+          </svg>
+        </button>
+        {isEnvironmentMenuOpen && (
+          <div className="viewer-environment-menu" role="dialog" aria-label="Viewport lighting controls">
+            <div className="viewer-environment-menu-section">
+              <label className="viewer-environment-menu-field" htmlFor={`viewer-environment-${threadId}`}>
+                <span className="viewer-environment-label">Preset</span>
+                <select
+                  id={`viewer-environment-${threadId}`}
+                  className="styled-select viewer-environment-select"
+                  value={environment}
+                  aria-label="Viewport environment"
+                  onChange={(event) => onEnvironmentChange(event.target.value as EnvironmentPreset)}
+                >
+                  {environmentPresetOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            {environment !== 'none' && (
+              <div className="viewer-environment-menu-section">
+                <div className="viewer-environment-intensity-control">
+                  <label
+                    className="viewer-environment-label"
+                    htmlFor={`viewer-environment-intensity-${threadId}`}
+                  >
+                    Intensity
+                  </label>
+                  <input
+                    id={`viewer-environment-intensity-${threadId}`}
+                    className="viewer-environment-intensity-slider"
+                    type="range"
+                    min={35}
+                    max={135}
+                    step={1}
+                    value={Math.round(clamp(environmentLightIntensity, 0.35, 1.35) * 100)}
+                    aria-label="Environment lighting intensity"
+                    onChange={(event) =>
+                      onEnvironmentLightIntensityChange(Number(event.target.value) / 100)
+                    }
+                  />
+                  <span className="viewer-environment-intensity-value" aria-hidden="true">
+                    {Math.round(clamp(environmentLightIntensity, 0.35, 1.35) * 100)}%
+                  </span>
+                </div>
+              </div>
+            )}
+            {environment !== 'none' && showHdriBackground && (
+              <div className="viewer-environment-menu-section">
+                <div className="viewer-environment-intensity-control">
+                  <label
+                    className="viewer-environment-label"
+                    htmlFor={`viewer-environment-background-intensity-${threadId}`}
+                  >
+                    Bg
+                  </label>
+                  <input
+                    id={`viewer-environment-background-intensity-${threadId}`}
+                    className="viewer-environment-intensity-slider"
+                    type="range"
+                    min={15}
+                    max={135}
+                    step={1}
+                    value={Math.round(clamp(environmentBackgroundIntensity, 0.15, 1.35) * 100)}
+                    aria-label="Environment background intensity"
+                    onChange={(event) =>
+                      onEnvironmentBackgroundIntensityChange(Number(event.target.value) / 100)
+                    }
+                  />
+                  <span className="viewer-environment-intensity-value" aria-hidden="true">
+                    {Math.round(clamp(environmentBackgroundIntensity, 0.15, 1.35) * 100)}%
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
       <span className="viewer-header-sep" aria-hidden="true" />
       <div className="viewer-control-group">
@@ -467,8 +593,11 @@ export function SceneTab({
     <div className={`scene-core ${isHierarchyCollapsed ? 'objects-collapsed' : ''}`}>
       <div className="scene-core-viewport">
         <GltfViewer
+          key={viewerKey}
           gltfUrl={resolvedGltfUrl}
           environment={environment}
+          environmentLightIntensity={environmentLightIntensity}
+          environmentBackgroundIntensity={environmentBackgroundIntensity}
           viewportTheme={viewportTheme}
           uiTheme={uiTheme}
           showGrid={showViewportGrid}

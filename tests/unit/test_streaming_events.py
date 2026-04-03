@@ -60,6 +60,7 @@ def test_serialize_event_wraps_non_dict() -> None:
 def test_message_is_tool() -> None:
     message = ToolMessage(content="ok", name="blender", tool_call_id="tool-1")
     data = serialize_message(message)
+    assert data["tool_call_id"] == "tool-1"
     assert message_is_tool(data) is True
 
 

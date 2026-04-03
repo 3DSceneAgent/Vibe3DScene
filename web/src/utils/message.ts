@@ -1,4 +1,4 @@
-import type { ToolMedia } from '../state/types'
+import type { Message, ToolMedia } from '../state/types'
 
 export type TodoItem = {
   status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'skipped'
@@ -9,6 +9,30 @@ export type AssistantToolCall = {
   id?: string
   name?: string
   key: string
+}
+
+export function countConversationMessages(messages: Message[]): number {
+  let count = 0
+  let currentTurnHasAssistant = false
+
+  for (const message of messages) {
+    if (message.role === 'user') {
+      count += 1
+      currentTurnHasAssistant = false
+      continue
+    }
+
+    if (message.role !== 'assistant') {
+      continue
+    }
+
+    if (!currentTurnHasAssistant) {
+      count += 1
+      currentTurnHasAssistant = true
+    }
+  }
+
+  return count
 }
 
 export function parseTodos(raw: string): TodoItem[] {
@@ -491,13 +515,39 @@ export function extractToolPayload(message: unknown): {
   name?: string
   payload: unknown
   media: ToolMedia[]
+  toolCallId?: string
 } | null {
   if (!isToolMessage(message) || typeof message !== 'object' || message === null) return null
-  const maybe = message as { name?: unknown; content?: unknown }
+  const maybe = message as {
+    name?: unknown
+    content?: unknown
+    tool_call_id?: unknown
+    call_id?: unknown
+  }
   const payload = maybe.content ?? message
   const name = typeof maybe.name === 'string' ? maybe.name : undefined
   const media = collectMediaReferences(payload)
-  return { name, payload, media }
+  const explicitToolCallId =
+    typeof maybe.tool_call_id === 'string' && maybe.tool_call_id.trim()
+      ? maybe.tool_call_id.trim()
+      : typeof maybe.call_id === 'string' && maybe.call_id.trim()
+        ? maybe.call_id.trim()
+        : undefined
+  const nestedToolCallId =
+    explicitToolCallId ??
+    (payload && typeof payload === 'object'
+      ? (() => {
+          const maybePayload = payload as { tool_call_id?: unknown; call_id?: unknown }
+          if (typeof maybePayload.tool_call_id === 'string' && maybePayload.tool_call_id.trim()) {
+            return maybePayload.tool_call_id.trim()
+          }
+          if (typeof maybePayload.call_id === 'string' && maybePayload.call_id.trim()) {
+            return maybePayload.call_id.trim()
+          }
+          return undefined
+        })()
+      : undefined)
+  return { name, payload, media, toolCallId: nestedToolCallId }
 }
 
 export function isAssistantMessage(message: unknown): boolean {

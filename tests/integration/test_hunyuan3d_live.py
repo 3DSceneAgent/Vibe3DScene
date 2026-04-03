@@ -226,8 +226,31 @@ def test_live_hunyuan3d_text_to_3d(monkeypatch: pytest.MonkeyPatch) -> None:
     finished_at = time.perf_counter()
 
     parsed = _assert_successful_hunyuan_response(raw_response)
+    assert parsed.get("generation_mode") == "rapid", parsed
     _persist_case_result(
         case_name="text_to_3d",
+        raw_response=raw_response,
+        parsed_response=parsed,
+        started_at_monotonic=started_at,
+        finished_at_monotonic=finished_at,
+    )
+
+
+def test_live_hunyuan3d_pro_text_to_3d(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ensure_live_hunyuan_ready(monkeypatch)
+
+    started_at = time.perf_counter()
+    raw_response = generate_hunyuan3d_model(
+        None,
+        text_prompt="A stylized ceramic teapot with a lid, game-ready product render.",
+        generation_mode="pro",
+    )
+    finished_at = time.perf_counter()
+
+    parsed = _assert_successful_hunyuan_response(raw_response)
+    assert parsed.get("generation_mode") == "pro", parsed
+    _persist_case_result(
+        case_name="text_to_3d_pro",
         raw_response=raw_response,
         parsed_response=parsed,
         started_at_monotonic=started_at,

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -280,6 +282,124 @@ def test_idle_sweeper_still_cleans_local_idle_session_when_not_owner(monkeypatch
     assert manager.shutdown_calls == [thread_id]
     assert ("idle-headless-host", "headless", 9970) in coordinator.release_calls
     assert ("idle-mcp-host", "mcp", 9971) in coordinator.release_calls
+
+
+def test_send_blender_command_sync_preserve_activity_skips_touch_activity(monkeypatch):
+    thread_id = "thread-maintenance-command"
+    session = SimpleNamespace(
+        lock=threading.Lock(),
+        connection=None,
+        status="ready",
+        error=None,
+    )
+    coordinator = _CoordinatorStub()
+
+    class _Manager:
+        def get(self, session_id: str) -> SimpleNamespace | None:
+            return session if session_id == thread_id else None
+
+        def ensure(self, session_id: str, mode: str) -> SimpleNamespace:
+            _ = mode
+            assert session_id == thread_id
+            return session
+
+        def set_error(self, session_id: str, error: str) -> None:
+            assert session_id == thread_id
+            session.status = "error"
+            session.error = error
+
+    class _Blender:
+        def send_command(self, command_type: str, params: dict[str, object] | None) -> dict[str, object]:
+            assert command_type == "camera_observe"
+            assert params == {"filepath": "/tmp/test.png"}
+            return {"success": True}
+
+    recorded_preserve_activity: list[bool] = []
+
+    def fake_get_blender_connection_for_thread(
+        session_id: str,
+        *,
+        preserve_activity: bool = False,
+    ) -> _Blender:
+        assert session_id == thread_id
+        recorded_preserve_activity.append(preserve_activity)
+        return _Blender()
+
+    monkeypatch.setattr(api_shared, "get_settings", lambda: SimpleNamespace(blender_mode="headless"))
+    monkeypatch.setattr(api_shared, "get_session_manager", lambda: _Manager())
+    monkeypatch.setattr(api_shared, "get_session_coordinator", lambda: coordinator)
+    monkeypatch.setattr(
+        api_shared,
+        "get_blender_connection_for_thread",
+        fake_get_blender_connection_for_thread,
+    )
+
+    result = api_shared.send_blender_command_sync(
+        "camera_observe",
+        {"filepath": "/tmp/test.png"},
+        thread_id,
+        preserve_activity=True,
+    )
+
+    assert result == {"success": True}
+    assert recorded_preserve_activity == [True]
+    assert coordinator.runtime_updates == []
+
+
+def test_scene_artifact_export_and_renders_preserve_idle_activity(monkeypatch, tmp_path):
+    thread_id = "thread-artifact-maintenance"
+    recorded_calls: list[tuple[str, bool]] = []
+
+    def fake_send_blender_command_sync(
+        command_type: str,
+        params: dict[str, object] | None = None,
+        thread_id_arg: str | None = None,
+        *,
+        preserve_activity: bool = False,
+    ) -> dict[str, object]:
+        assert thread_id_arg == thread_id
+        recorded_calls.append((command_type, preserve_activity))
+        if command_type == "execute_code":
+            payload = str((params or {}).get("code") or "")
+            marker = 'filepath=r"'
+            filepath = payload.split(marker, 1)[1].split('"', 1)[0]
+            Path(filepath).write_bytes(b"glb")
+            return {"success": True}
+        filepath = str((params or {}).get("filepath") or "")
+        Path(filepath).write_bytes(b"png")
+        return {"filepath": filepath}
+
+    render_urls: list[str] = []
+
+    def fake_process_and_save_render(
+        filepath: str,
+        thread_id_arg: str,
+        camera_name: str,
+        **_: object,
+    ) -> str:
+        assert thread_id_arg == thread_id
+        assert Path(filepath).exists()
+        url = f"/threads/{thread_id}/scene-artifacts/renders/{camera_name}.jpg"
+        render_urls.append(url)
+        return url
+
+    monkeypatch.setattr(api_shared, "send_blender_command_sync", fake_send_blender_command_sync)
+    monkeypatch.setattr(api_shared, "process_and_save_render", fake_process_and_save_render)
+    monkeypatch.setattr(
+        api_shared,
+        "resolve_thread_artifact_renders_dir",
+        lambda _thread_id: tmp_path / "renders",
+    )
+
+    gltf_target = tmp_path / "latest.glb"
+    assert api_shared._export_scene_gltf_to_path(thread_id, gltf_target) is True
+    renders = api_shared._render_scene_level_views_to_artifacts(thread_id)
+
+    assert gltf_target.exists()
+    assert renders
+    assert len(renders) == len(api_shared._SCENE_LEVEL_RENDER_CAMERA_CONFIGS)
+    assert all(preserve_activity for _, preserve_activity in recorded_calls)
+    assert {command_type for command_type, _ in recorded_calls} == {"execute_code", "camera_observe"}
 
 
 def test_get_mcp_tools_returns_structured_503_for_capacity_errors(monkeypatch):

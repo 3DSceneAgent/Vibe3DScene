@@ -321,11 +321,18 @@ function applyThreadHistory(current: Thread, history: ThreadHistoryInfo): Thread
 }
 
 function applySceneManifest(current: Thread, manifest: SceneArtifactManifestInfo): Thread {
+  const manifestRenders = Array.isArray(manifest.renders) ? manifest.renders : []
+  const currentRenders = current.renders ?? []
+  const manifestUpdatedAtMs =
+    typeof manifest.generated_at_ms === 'number' && Number.isFinite(manifest.generated_at_ms)
+      ? manifest.generated_at_ms
+      : 0
   return {
     ...current,
     sceneManifest: manifest,
     sceneRevision: manifest.scene_revision ?? current.sceneRevision ?? null,
-    renders: manifest.renders ?? current.renders ?? []
+    renders: manifestRenders.length > 0 ? manifestRenders : currentRenders,
+    updatedAtMs: Math.max(Number(current.updatedAtMs) || 0, manifestUpdatedAtMs)
   }
 }
 
@@ -423,6 +430,7 @@ function createPendingToolMessage(
     createdAt,
     status: 'streaming',
     toolCallKey: toolCall.key,
+    toolCallId: toolCall.id,
     toolName: toolCall.name
   }
 }
@@ -471,46 +479,67 @@ function appendPendingToolMessages(
   return changed ? nextMessages : messages
 }
 
-function resolveToolMessage(messages: Message[], toolEntry: Message): Message[] {
-  const finalizedMessages = finalizeStreamingAssistants(messages)
-  const turnStartIndex = getCurrentTurnStartIndex(finalizedMessages)
+function findPendingToolMessage(
+  messages: Message[],
+  toolEntry: Message
+): { index: number; message: Message } | null {
+  const turnStartIndex = getCurrentTurnStartIndex(messages)
   let oldestPendingIndex = -1
-  let matchingPendingIndex = -1
+  let matchingNameIndex = -1
 
-  for (let index = turnStartIndex; index < finalizedMessages.length; index += 1) {
-    const message = finalizedMessages[index]
+  for (let index = turnStartIndex; index < messages.length; index += 1) {
+    const message = messages[index]
     if (message.role !== 'tool' || message.status !== 'streaming') {
       continue
     }
     if (oldestPendingIndex === -1) {
       oldestPendingIndex = index
     }
-    if (toolEntry.toolName && message.toolName === toolEntry.toolName) {
-      matchingPendingIndex = index
-      break
+    if (toolEntry.toolCallId && message.toolCallId === toolEntry.toolCallId) {
+      return { index, message }
+    }
+    if (toolEntry.toolCallKey && message.toolCallKey === toolEntry.toolCallKey) {
+      return { index, message }
+    }
+    if (
+      matchingNameIndex === -1 &&
+      toolEntry.toolName &&
+      message.toolName === toolEntry.toolName
+    ) {
+      matchingNameIndex = index
     }
   }
 
-  const targetIndex =
-    matchingPendingIndex !== -1
-      ? matchingPendingIndex
+  const fallbackIndex =
+    matchingNameIndex !== -1
+      ? matchingNameIndex
       : !toolEntry.toolName && oldestPendingIndex !== -1
         ? oldestPendingIndex
         : -1
+  if (fallbackIndex === -1) {
+    return null
+  }
+  return { index: fallbackIndex, message: messages[fallbackIndex] }
+}
 
-  if (targetIndex === -1) {
+function resolveToolMessage(messages: Message[], toolEntry: Message): Message[] {
+  const finalizedMessages = finalizeStreamingAssistants(messages)
+  const match = findPendingToolMessage(finalizedMessages, toolEntry)
+
+  if (!match) {
     return finalizedMessages === messages ? [...messages, toolEntry] : [...finalizedMessages, toolEntry]
   }
 
-  const target = finalizedMessages[targetIndex]
+  const target = match.message
   const replacement: Message = {
     ...toolEntry,
     id: target.id,
     createdAt: target.createdAt,
-    toolCallKey: target.toolCallKey
+    toolCallKey: target.toolCallKey,
+    toolCallId: target.toolCallId ?? toolEntry.toolCallId
   }
 
-  return finalizedMessages.map((message, index) => (index === targetIndex ? replacement : message))
+  return finalizedMessages.map((message, index) => (index === match.index ? replacement : message))
 }
 
 function App() {
@@ -591,9 +620,43 @@ function App() {
     () => (activeThread ? sceneActionErrorByThread[activeThread.id] ?? null : null),
     [activeThread, sceneActionErrorByThread]
   )
-  const updateThread = useCallback((threadId: string, updater: (thread: Thread) => Thread) => {
-    setThreads((prev) => prev.map((thread) => (thread.id === threadId ? updater(thread) : thread)))
-  }, [])
+  const updateThread = useCallback(
+    (
+      threadId: string,
+      updater: (thread: Thread) => Thread,
+      options?: {
+        moveToFront?: boolean
+      }
+    ) => {
+      setThreads((prev) => {
+        const index = prev.findIndex((thread) => thread.id === threadId)
+        if (index === -1) {
+          return prev
+        }
+
+        const currentThread = prev[index]
+        const nextThread = updater(currentThread)
+        const shouldMoveToFront = options?.moveToFront === true
+
+        if (!shouldMoveToFront) {
+          if (nextThread === currentThread) {
+            return prev
+          }
+          const nextThreads = [...prev]
+          nextThreads[index] = nextThread
+          return nextThreads
+        }
+
+        if (index === 0 && nextThread === currentThread) {
+          return prev
+        }
+
+        const remainingThreads = prev.filter((thread) => thread.id !== threadId)
+        return [nextThread, ...remainingThreads]
+      })
+    },
+    []
+  )
 
   const setThreadLoading = useCallback((threadId: string, patch: Partial<ThreadLoadingState>) => {
     setLoadingByThread((prev) => {
@@ -1756,22 +1819,19 @@ function App() {
       }
       if (event.event === 'tool_call_started' && event.tool_call?.name) {
         const toolName = event.tool_call.name
-        pendingToolTimestampsRef.current.set(toolName, Date.now())
+        const toolCallId =
+          typeof event.tool_call.id === 'string' && event.tool_call.id.trim()
+            ? event.tool_call.id.trim()
+            : undefined
+        const toolCallKey = toolCallId ?? `tool-started:${threadId}:${Date.now()}:${Math.random()}`
+        pendingToolTimestampsRef.current.set(toolCallKey, Date.now())
         updateThread(threadId, (thread) => {
-          const hasPending = thread.messages.some(
-            (m) => m.role === 'tool' && m.status === 'streaming' && m.toolName === toolName
+          const nextMessages = appendPendingToolMessages(
+            thread.messages,
+            [{ id: toolCallId, name: toolName, key: toolCallKey }],
+            turnId
           )
-          if (hasPending) return thread
-          const pendingMsg: Message = {
-            id: `tool-pending-${Date.now()}-${Math.random()}`,
-            turnId,
-            role: 'tool',
-            content: '',
-            createdAt: Date.now(),
-            status: 'streaming',
-            toolName,
-          }
-          return { ...thread, messages: [...finalizeStreamingAssistants(thread.messages), pendingMsg] }
+          return nextMessages === thread.messages ? thread : { ...thread, messages: nextMessages }
         })
       }
       const getOrCreateAssistantMessage = (messageId: string | null): string => {
@@ -1907,8 +1967,8 @@ function App() {
         if (assistantToolCalls.length > 0) {
           const now = Date.now()
           for (const tc of assistantToolCalls) {
-            if (tc.name && !pendingToolTimestampsRef.current.has(tc.name)) {
-              pendingToolTimestampsRef.current.set(tc.name, now)
+            if (!pendingToolTimestampsRef.current.has(tc.key)) {
+              pendingToolTimestampsRef.current.set(tc.key, now)
             }
           }
           updateThread(threadId, (thread) => {
@@ -1939,6 +1999,7 @@ function App() {
               role: 'tool',
               content,
               createdAt: Date.now(),
+              toolCallId: extracted?.toolCallId,
               toolName: extracted?.name,
               toolPayload: payload,
               toolMedia: extracted?.media ?? [],
@@ -1949,22 +2010,23 @@ function App() {
           .filter((entry): entry is Message => entry !== null)
         if (toolEntries.length > 0) {
           const applyToolResolution = (entry: Message) => {
-            pendingToolTimestampsRef.current.delete(entry.toolName ?? '')
-            pendingToolTimersRef.current.delete(entry.toolName ?? entry.id)
+            const trackingKey = entry.toolCallId ?? entry.toolCallKey ?? entry.id
+            pendingToolTimestampsRef.current.delete(trackingKey)
+            pendingToolTimersRef.current.delete(trackingKey)
             updateThread(threadId, (thread) => ({
               ...thread,
               messages: resolveToolMessage(thread.messages, entry)
             }))
           }
           for (const toolEntry of toolEntries) {
-            const createdAt = pendingToolTimestampsRef.current.get(toolEntry.toolName ?? '')
+            const trackingKey = toolEntry.toolCallId ?? toolEntry.toolCallKey ?? toolEntry.id
+            const createdAt = pendingToolTimestampsRef.current.get(trackingKey)
             const elapsed = createdAt != null ? Date.now() - createdAt : MIN_TOOL_SHIMMER_MS
             if (elapsed < MIN_TOOL_SHIMMER_MS) {
-              const timerKey = toolEntry.toolName ?? toolEntry.id
-              const existing = pendingToolTimersRef.current.get(timerKey)
+              const existing = pendingToolTimersRef.current.get(trackingKey)
               if (existing != null) clearTimeout(existing)
               const timer = setTimeout(() => applyToolResolution(toolEntry), MIN_TOOL_SHIMMER_MS - elapsed)
-              pendingToolTimersRef.current.set(timerKey, timer)
+              pendingToolTimersRef.current.set(trackingKey, timer)
             } else {
               applyToolResolution(toolEntry)
             }
@@ -2088,21 +2150,25 @@ function App() {
 
     setIsSending(true)
     setThreadStreamStatus(threadId, 'streaming')
-    updateThread(threadId, (thread) => {
-      const shouldAutoTitle =
-        !thread.titleEditedManually && (thread.title === 'New chat' || thread.messages.length === 0)
-      const titleUpdate = shouldAutoTitle ? buildThreadTitleUpdate(thread, text.slice(0, 32)) : null
-      return {
-        ...thread,
-        ...(titleUpdate ?? {}),
-        vlmProvider: selectedProvider || thread.vlmProvider,
-        vlmModel: selectedModel || thread.vlmModel,
-        vlmLocked: thread.vlmLocked ?? false,
-        updatedAtMs: now,
-        graphEvents: [],
-        messages: [...thread.messages, userMessage, assistantMessage]
-      }
-    })
+    updateThread(
+      threadId,
+      (thread) => {
+        const shouldAutoTitle =
+          !thread.titleEditedManually && (thread.title === 'New chat' || thread.messages.length === 0)
+        const titleUpdate = shouldAutoTitle ? buildThreadTitleUpdate(thread, text.slice(0, 32)) : null
+        return {
+          ...thread,
+          ...(titleUpdate ?? {}),
+          vlmProvider: selectedProvider || thread.vlmProvider,
+          vlmModel: selectedModel || thread.vlmModel,
+          vlmLocked: thread.vlmLocked ?? false,
+          updatedAtMs: now,
+          graphEvents: [],
+          messages: [...thread.messages, userMessage, assistantMessage]
+        }
+      },
+      { moveToFront: true }
+    )
 
     if (files.length > 0) {
       if (!settings.backendUrl) {
@@ -2193,12 +2259,16 @@ function App() {
 
     setIsSending(true)
     setThreadStreamStatus(threadId, 'streaming')
-    updateThread(threadId, (thread) => ({
-      ...thread,
-      updatedAtMs: Date.now(),
-      graphEvents: [],
-      messages: [...stripAgentMessagesForTurn(thread.messages, turnId), assistantMessage]
-    }))
+    updateThread(
+      threadId,
+      (thread) => ({
+        ...thread,
+        updatedAtMs: Date.now(),
+        graphEvents: [],
+        messages: [...stripAgentMessagesForTurn(thread.messages, turnId), assistantMessage]
+      }),
+      { moveToFront: true }
+    )
 
     let execution
     try {
@@ -2633,12 +2703,25 @@ function App() {
                   gltfUrl={activeThread.gltfUrl ?? activeThread.sceneManifest?.gltf_url ?? null}
                   sceneHierarchy={activeThread.sceneHierarchy ?? []}
                   environment={settings.viewportEnvironment}
+                  environmentLightIntensity={settings.environmentLightIntensity}
+                  environmentBackgroundIntensity={settings.environmentBackgroundIntensity}
                   viewportTheme={settings.viewportTheme}
                   uiTheme={settings.theme}
                   showViewportGrid={settings.showViewportGrid}
                   showHdriBackground={settings.showHdriBackground}
                   onEnvironmentChange={(viewportEnvironment) =>
-                    setSettings((current) => ({ ...current, viewportEnvironment }))
+                    setSettings((current) => ({
+                      ...current,
+                      viewportEnvironment,
+                      showHdriBackground:
+                        viewportEnvironment === 'skylight' ? true : current.showHdriBackground
+                    }))
+                  }
+                  onEnvironmentLightIntensityChange={(environmentLightIntensity) =>
+                    setSettings((current) => ({ ...current, environmentLightIntensity }))
+                  }
+                  onEnvironmentBackgroundIntensityChange={(environmentBackgroundIntensity) =>
+                    setSettings((current) => ({ ...current, environmentBackgroundIntensity }))
                   }
                   onFetchRenders={(includeLocalWork) => void fetchRenders(undefined, includeLocalWork ?? false)}
                   onFetchGltf={() => void fetchGltf()}

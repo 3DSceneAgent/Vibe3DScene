@@ -40,6 +40,7 @@ export type Message = {
   streamId?: string | null
   status?: MessageStatus
   toolCallKey?: string
+  toolCallId?: string
   toolName?: string
   toolPayload?: unknown
   toolMedia?: ToolMedia[]
@@ -84,6 +85,8 @@ export type Settings = {
   autoFetchIntervalSeconds: number
   viewportTheme: ViewportThemeId
   viewportEnvironment: EnvironmentPreset
+  environmentLightIntensity: number
+  environmentBackgroundIntensity: number
   showViewportGrid: boolean
   showHdriBackground: boolean
   uiMode: UiModeId

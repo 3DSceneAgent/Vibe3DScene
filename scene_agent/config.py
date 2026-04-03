@@ -2,10 +2,12 @@
 Configuration management using Pydantic Settings.
 Loads configuration from environment variables with validation.
 """
-from pydantic_settings import BaseSettings, SettingsConfigDict
 import os
 import socket
 from pydantic import AliasChoices, Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_CACHE_ROOT = os.path.expanduser("~/.cache/vibe3dscene")
 
 
 class Settings(BaseSettings):
@@ -166,6 +168,41 @@ class Settings(BaseSettings):
         default=15,
         description="Max seconds to allow a single headless scene/render request"
     )
+    enable_penetration_verify: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "SCENE_AGENT_ENABLE_PENETRATION_VERIFY",
+            "ENABLE_PENETRATION_VERIFY",
+        ),
+        description="Enable internal penetration checking during single-agent verify"
+    )
+    penetration_threshold_m: float = Field(
+        default=0.02,
+        validation_alias=AliasChoices(
+            "SCENE_AGENT_PENETRATION_THRESHOLD_M",
+            "PENETRATION_THRESHOLD_M",
+        ),
+        ge=0.0,
+        description="Minimum penetration depth (meters) before verify reports a geometry failure"
+    )
+    penetration_max_candidate_pairs: int = Field(
+        default=32,
+        validation_alias=AliasChoices(
+            "SCENE_AGENT_PENETRATION_MAX_CANDIDATE_PAIRS",
+            "PENETRATION_MAX_CANDIDATE_PAIRS",
+        ),
+        ge=1,
+        description="Maximum candidate pairs to narrow-phase check during internal penetration verify"
+    )
+    penetration_max_reported_pairs: int = Field(
+        default=8,
+        validation_alias=AliasChoices(
+            "SCENE_AGENT_PENETRATION_MAX_REPORTED_PAIRS",
+            "PENETRATION_MAX_REPORTED_PAIRS",
+        ),
+        ge=1,
+        description="Maximum confirmed penetration pairs to include in verification payloads"
+    )
     api_worker_id: str = Field(
         default_factory=lambda: f"{socket.gethostname()}-{os.getpid()}",
         description="Unique worker ID used for Redis ownership and diagnostics"
@@ -199,7 +236,7 @@ class Settings(BaseSettings):
 
     # Session durability (headless mode)
     session_shared_storage_root: str = Field(
-        default="/tmp/scene_agent_sessions",
+        default=os.path.join(_CACHE_ROOT, "sessions"),
         validation_alias=AliasChoices("SESSION_SHARED_STORAGE_ROOT", "SESSION_BLEND_ROOT"),
         description="Shared root directory for per-session .blend persistence"
     )
@@ -234,7 +271,7 @@ class Settings(BaseSettings):
         description="Maximum size (bytes) per reference image upload"
     )
     reference_image_storage_dir: str = Field(
-        default="/tmp/scene_agent_reference_images",
+        default=os.path.join(_CACHE_ROOT, "reference_images"),
         description="Filesystem directory for short-term reference image storage"
     )
     reference_image_helper_openai_model: str = Field(
@@ -362,6 +399,20 @@ class Settings(BaseSettings):
                 f"Must be one of: {', '.join(sorted(valid_modes))}"
             )
         return v_upper
+
+    @field_validator(
+        "session_shared_storage_root",
+        "reference_image_storage_dir",
+        mode="before",
+    )
+    @classmethod
+    def expand_user_storage_paths(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        text = str(v).strip()
+        if not text:
+            return text
+        return os.path.expanduser(text)
     
     @property
     def blender_mcp_url(self) -> str:

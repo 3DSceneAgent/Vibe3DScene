@@ -1,8 +1,8 @@
-# Architecture and Deployment Overview
+# System Architecture
 
 Last updated: 2026-03-30
 
-This document provides a high-level view of the current Vibe3DScene architecture, deployment topologies, and system boundaries. For the exact runtime graph and node-level control flow, see [Current Agent Workflow](./current-agent-workflow.md).
+This document provides a high-level view of the current Vibe3DScene architecture, deployment topologies, and system boundaries. For the exact runtime graph and node-level control flow, see [Runtime Workflow](./runtime-workflow.md).
 
 ## 1. End-to-End Runtime Layers
 
@@ -203,7 +203,7 @@ For the exact tool/service breakdown, see:
 
 These two architecture documents intentionally serve different purposes:
 
-- [Current Agent Workflow](./current-agent-workflow.md)
+- [Runtime Workflow](./runtime-workflow.md)
   - exact runtime graph
   - node responsibilities
   - todo lifecycle
@@ -227,4 +227,4 @@ At a high level, the project now behaves like a layered scene-agent platform rat
 - Blender and external services execute the actual scene, rendering, retrieval, and generation work
 - Redis and persisted storage provide coordination and recovery
 
-That separation is what enabled the recent additions around `fast_mode`, dual-agent experimentation, externalized tool servers, persisted thread recovery, and the newer frontend/runtime UX.
+That separation is what enables the current combination of direct vs plan execution, experimental dual-agent work, external tool services, persisted thread recovery, and the newer frontend/runtime UX.

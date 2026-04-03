@@ -24,6 +24,7 @@ local owner_url = ARGV[3]
 local ttl_ms = tonumber(ARGV[4])
 local now_ms = ARGV[5]
 local nonce = ARGV[6]
+local record_activity = ARGV[7] == '1'
 
 local function parse_lease(value)
     local first = string.find(value, ':')
@@ -37,38 +38,74 @@ local function parse_lease(value)
     return string.sub(value, 1, first - 1), string.sub(value, first + 1, second - 1)
 end
 
+local function resolve_existing_score()
+    local current_score = redis.call('ZSCORE', KEYS[6], sid)
+    if current_score and current_score ~= '' then
+        return current_score
+    end
+    local last_active_ms = redis.call('HGET', KEYS[3], 'last_active_ms')
+    if last_active_ms and last_active_ms ~= '' then
+        return last_active_ms
+    end
+    local updated_at_ms = redis.call('HGET', KEYS[3], 'updated_at_ms')
+    if updated_at_ms and updated_at_ms ~= '' then
+        return updated_at_ms
+    end
+    return '0'
+end
+
 if not lease then
     local epoch = redis.call('INCR', KEYS[2])
     local token = worker_id .. ':' .. tostring(epoch) .. ':' .. nonce
     redis.call('PSETEX', KEYS[1], ttl_ms, token)
-    redis.call('HSET', KEYS[3],
-        'owner_worker_id', worker_id,
-        'owner_url', owner_url,
-        'lease_epoch', tostring(epoch),
-        'status', 'active',
-        'last_active_ms', now_ms,
-        'updated_at_ms', now_ms
-    )
+    if record_activity then
+        redis.call('HSET', KEYS[3],
+            'owner_worker_id', worker_id,
+            'owner_url', owner_url,
+            'lease_epoch', tostring(epoch),
+            'status', 'active',
+            'last_active_ms', now_ms,
+            'updated_at_ms', now_ms
+        )
+        redis.call('ZADD', KEYS[6], now_ms, sid)
+    else
+        redis.call('HSET', KEYS[3],
+            'owner_worker_id', worker_id,
+            'owner_url', owner_url,
+            'lease_epoch', tostring(epoch),
+            'status', 'active'
+        )
+        redis.call('ZADD', KEYS[6], resolve_existing_score(), sid)
+    end
     redis.call('SADD', KEYS[4], sid)
     redis.call('SADD', KEYS[5], worker_id)
-    redis.call('ZADD', KEYS[6], now_ms, sid)
     return {'owner', token, tostring(epoch), worker_id, owner_url, tostring(ttl_ms)}
 end
 
 local lease_owner, lease_epoch = parse_lease(lease)
 if lease_owner == worker_id then
     redis.call('PSETEX', KEYS[1], ttl_ms, lease)
-    redis.call('HSET', KEYS[3],
-        'owner_worker_id', worker_id,
-        'owner_url', owner_url,
-        'lease_epoch', tostring(lease_epoch),
-        'status', 'active',
-        'last_active_ms', now_ms,
-        'updated_at_ms', now_ms
-    )
+    if record_activity then
+        redis.call('HSET', KEYS[3],
+            'owner_worker_id', worker_id,
+            'owner_url', owner_url,
+            'lease_epoch', tostring(lease_epoch),
+            'status', 'active',
+            'last_active_ms', now_ms,
+            'updated_at_ms', now_ms
+        )
+        redis.call('ZADD', KEYS[6], now_ms, sid)
+    else
+        redis.call('HSET', KEYS[3],
+            'owner_worker_id', worker_id,
+            'owner_url', owner_url,
+            'lease_epoch', tostring(lease_epoch),
+            'status', 'active'
+        )
+        redis.call('ZADD', KEYS[6], resolve_existing_score(), sid)
+    end
     redis.call('SADD', KEYS[4], sid)
     redis.call('SADD', KEYS[5], worker_id)
-    redis.call('ZADD', KEYS[6], now_ms, sid)
     return {'owner', lease, tostring(lease_epoch), worker_id, owner_url, tostring(ttl_ms)}
 end
 
@@ -317,6 +354,7 @@ class RedisSessionRegistry:
         worker_id: str,
         owner_url: str,
         ttl_seconds: int,
+        record_activity: bool = True,
     ) -> dict[str, Any]:
         ttl_ms = max(1, ttl_seconds) * 1000
         now_ms = str(self._now_ms())
@@ -336,6 +374,7 @@ class RedisSessionRegistry:
             str(ttl_ms),
             now_ms,
             nonce,
+            "1" if record_activity else "0",
         )
         rows = list(result) if isinstance(result, (list, tuple)) else []
         mode = str(rows[0]) if rows else "proxy"

@@ -45,6 +45,7 @@ class _GenerateHunyuanArgs(BaseModel):
     input_image_url: str | None = None
     input_image_name: str | None = None
     input_image_id: str | None = None
+    generation_mode: str | None = None
     timeout_seconds: int = 300
     poll_interval_seconds: float = 5.0
 
@@ -171,6 +172,7 @@ def build_image_routing_compare_stub_tools() -> list[StructuredTool]:
         input_image_url: str | None = None,
         input_image_name: str | None = None,
         input_image_id: str | None = None,
+        generation_mode: str | None = None,
         timeout_seconds: int = 300,
         poll_interval_seconds: float = 5.0,
     ) -> str:
@@ -180,12 +182,14 @@ def build_image_routing_compare_stub_tools() -> list[StructuredTool]:
             input_image_url=input_image_url,
             input_image_name=input_image_name,
             input_image_id=input_image_id,
+            generation_mode=generation_mode,
             timeout_seconds=timeout_seconds,
             poll_interval_seconds=poll_interval_seconds,
         )
         payload = {
             "job_id": "job_hunyuan_reference_compare",
             "status": "DONE",
+            "generation_mode": generation_mode or "rapid",
             "result_file_3ds": [
                 {
                     "File3D": [

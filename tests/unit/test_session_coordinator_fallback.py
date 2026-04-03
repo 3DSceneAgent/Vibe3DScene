@@ -15,6 +15,41 @@ def test_session_coordinator_falls_back_to_local_owner(monkeypatch):
     assert coordinator.list_threads() == []
 
 
+def test_session_coordinator_forwards_record_activity_flag():
+    class _RegistryStub:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def claim_or_get_owner(self, **kwargs):
+            self.calls.append(kwargs)
+            return {
+                "mode": "owner",
+                "owner_worker_id": "worker-test",
+                "owner_url": "http://127.0.0.1:8000",
+                "lease_epoch": 7,
+                "lease_token": "lease-token",
+                "lease_ttl_ms": 20000,
+            }
+
+    registry = _RegistryStub()
+    coordinator = _make_coordinator_with_registry(registry)
+    coordinator.worker_id = "worker-test"
+    coordinator.owner_url = "http://127.0.0.1:8000"
+    coordinator.lease_ttl_seconds = 20
+    resolution = coordinator.claim_or_get_owner("thread-readonly", record_activity=False)
+
+    assert resolution.is_owner
+    assert registry.calls == [
+        {
+            "thread_id": "thread-readonly",
+            "worker_id": "worker-test",
+            "owner_url": "http://127.0.0.1:8000",
+            "ttl_seconds": 20,
+            "record_activity": False,
+        }
+    ]
+
+
 def _make_coordinator_with_registry(registry):
     coordinator = object.__new__(coordinator_module.SessionCoordinator)
     coordinator._registry = registry

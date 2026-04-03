@@ -73,7 +73,7 @@ class SessionCoordinator:
         except RedisError:
             return
 
-    def claim_or_get_owner(self, thread_id: str) -> OwnerResolution:
+    def claim_or_get_owner(self, thread_id: str, *, record_activity: bool = True) -> OwnerResolution:
         if self._registry is None:
             return OwnerResolution(
                 thread_id=thread_id,
@@ -90,6 +90,7 @@ class SessionCoordinator:
                 worker_id=self.worker_id,
                 owner_url=self.owner_url,
                 ttl_seconds=self.lease_ttl_seconds,
+                record_activity=record_activity,
             )
         except RedisError:
             return OwnerResolution(

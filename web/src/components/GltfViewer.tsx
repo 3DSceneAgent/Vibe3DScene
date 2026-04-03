@@ -18,7 +18,8 @@ import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial'
 import {
   environmentPresets,
   type EnvironmentPreset,
-  type EnvironmentPresetConfig
+  type EnvironmentPresetConfig,
+  type ProceduralSkyVisualConfig
 } from '../constants/environmentPresets'
 import type { SceneHierarchyNode } from '../state/types'
 
@@ -39,6 +40,8 @@ type ViewportPalette = {
 type GltfViewerProps = {
   gltfUrl: string | null
   environment: EnvironmentPreset
+  environmentLightIntensity?: number
+  environmentBackgroundIntensity?: number
   viewportTheme?: ViewportTheme
   uiTheme?: UiTheme
   showGrid?: boolean
@@ -272,13 +275,37 @@ function visitMaterials(
   visitor(material)
 }
 
-function getProceduralSunPosition(config: ProceduralSkyConfig): THREE.Vector3 {
+function getProceduralSunPosition(config: ProceduralSkyVisualConfig): THREE.Vector3 {
   const phi = THREE.MathUtils.degToRad(90 - config.elevation)
   const theta = THREE.MathUtils.degToRad(config.azimuth)
   return new THREE.Vector3().setFromSphericalCoords(1, phi, theta).normalize()
 }
 
-function applyProceduralSkyUniforms(sky: Sky, config: ProceduralSkyConfig): void {
+function resolveProceduralSkyVisualConfig(
+  config: ProceduralSkyConfig,
+  variant: 'environment' | 'background'
+): ProceduralSkyVisualConfig {
+  if (variant === 'background' && config.background) {
+    return {
+      turbidity: config.background.turbidity ?? config.turbidity,
+      rayleigh: config.background.rayleigh ?? config.rayleigh,
+      mieCoefficient: config.background.mieCoefficient ?? config.mieCoefficient,
+      mieDirectionalG: config.background.mieDirectionalG ?? config.mieDirectionalG,
+      elevation: config.background.elevation ?? config.elevation,
+      azimuth: config.background.azimuth ?? config.azimuth
+    }
+  }
+  return {
+    turbidity: config.turbidity,
+    rayleigh: config.rayleigh,
+    mieCoefficient: config.mieCoefficient,
+    mieDirectionalG: config.mieDirectionalG,
+    elevation: config.elevation,
+    azimuth: config.azimuth
+  }
+}
+
+function applyProceduralSkyUniforms(sky: Sky, config: ProceduralSkyVisualConfig): void {
   const material = sky.material as THREE.ShaderMaterial & {
     uniforms: {
       turbidity: { value: number }
@@ -297,11 +324,33 @@ function applyProceduralSkyUniforms(sky: Sky, config: ProceduralSkyConfig): void
   material.uniforms.sunPosition.value.copy(sunPosition)
 }
 
-function createProceduralSky(config: ProceduralSkyConfig): Sky {
+function createProceduralSky(config: ProceduralSkyVisualConfig): Sky {
   const sky = new Sky()
   sky.scale.setScalar(PROCEDURAL_SKY_RADIUS)
   applyProceduralSkyUniforms(sky, config)
   return sky
+}
+
+function applyProceduralSkyBackgroundIntensity(sky: Sky, intensity: number): void {
+  const material = sky.material as THREE.ShaderMaterial & {
+    uniforms: Record<string, { value: unknown }>
+    userData: { backgroundIntensityPatched?: boolean }
+  }
+
+  if (!material.userData.backgroundIntensityPatched) {
+    material.uniforms.backgroundIntensity = { value: intensity }
+    material.fragmentShader = material.fragmentShader
+      .replace('uniform vec3 up;\n', 'uniform vec3 up;\nuniform float backgroundIntensity;\n')
+      .replace(
+        'gl_FragColor = vec4( retColor, 1.0 );',
+        'gl_FragColor = vec4( retColor * backgroundIntensity, 1.0 );'
+      )
+    material.userData.backgroundIntensityPatched = true
+    material.needsUpdate = true
+    return
+  }
+
+  material.uniforms.backgroundIntensity.value = intensity
 }
 
 function applyTwoSidedRenderingState(
@@ -441,6 +490,8 @@ function replaceWireframeOverlay(
 export function GltfViewer({
   gltfUrl,
   environment,
+  environmentLightIntensity = 1,
+  environmentBackgroundIntensity = 0.78,
   viewportTheme = 'auto',
   uiTheme = 'dark',
   showGrid = true,
@@ -481,8 +532,17 @@ export function GltfViewer({
   const originalMaterialSidesRef = useRef<WeakMap<THREE.Material, number>>(new WeakMap())
   const twoSidedRenderingRef = useRef(twoSidedRendering)
   const [useFallbackLighting, setUseFallbackLighting] = useState(true)
+  const [viewerResetToken, setViewerResetToken] = useState(0)
 
   const preset = useMemo(() => environmentPresets[environment], [environment])
+  const resolvedEnvironmentLightIntensity = useMemo(
+    () => Math.min(1.35, Math.max(0.35, environmentLightIntensity)),
+    [environmentLightIntensity]
+  )
+  const resolvedEnvironmentBackgroundIntensity = useMemo(
+    () => Math.min(1.35, Math.max(0.15, environmentBackgroundIntensity)),
+    [environmentBackgroundIntensity]
+  )
   const resolvedViewportTheme: UiTheme =
     viewportTheme === 'auto' ? uiTheme : viewportTheme
   const viewportPalette = useMemo(
@@ -587,6 +647,17 @@ export function GltfViewer({
     resizeRenderer()
     container.appendChild(renderer.domElement)
 
+    let scheduledContextReset = false
+    const handleContextLost = (event: Event) => {
+      event.preventDefault()
+      if (scheduledContextReset) return
+      scheduledContextReset = true
+      window.setTimeout(() => {
+        setViewerResetToken((current) => current + 1)
+      }, 0)
+    }
+    renderer.domElement.addEventListener('webglcontextlost', handleContextLost)
+
     const resizeObserver = new ResizeObserver(() => {
       resizeRenderer()
     })
@@ -614,7 +685,9 @@ export function GltfViewer({
     return () => {
       window.cancelAnimationFrame(animationFrame)
       resizeObserver.disconnect()
+      renderer.domElement.removeEventListener('webglcontextlost', handleContextLost)
       environmentLoadTokenRef.current += 1
+      loadTokenRef.current += 1
       controls.removeEventListener('change', syncViewState)
       controls.removeEventListener('start', markUserCameraOverride)
       controls.dispose()
@@ -643,12 +716,17 @@ export function GltfViewer({
         renderer.domElement.parentElement.removeChild(renderer.domElement)
       }
       scene.clear()
+      sceneRef.current = null
+      rendererRef.current = null
+      cameraRef.current = null
+      controlsRef.current = null
+      lightRef.current = null
       resizeRendererRef.current = null
       hasLoadedModelRef.current = false
       cameraViewRef.current = null
       hasUserCameraOverrideRef.current = false
     }
-  }, [])
+  }, [viewerResetToken])
 
   useEffect(() => {
     const resize = resizeRendererRef.current
@@ -672,20 +750,21 @@ export function GltfViewer({
     if (!lightRef.current) return
     const { ambient, hemisphere, directional } = lightRef.current
     const proceduralSky = preset.proceduralSky
+    const intensityScale = environment === 'none' ? 1 : resolvedEnvironmentLightIntensity
 
     if (proceduralSky) {
       const sunPosition = getProceduralSunPosition(proceduralSky)
       ambient.color = new THREE.Color('#ffffff')
-      ambient.intensity = useFallbackLighting ? preset.ambient : 0.015
+      ambient.intensity = (useFallbackLighting ? preset.ambient : 0.015) * intensityScale
       hemisphere.color = new THREE.Color(proceduralSky.skyColor)
       hemisphere.groundColor = new THREE.Color(proceduralSky.groundColor)
       hemisphere.intensity = useFallbackLighting
-        ? proceduralSky.hemisphereIntensity
-        : Math.max(0.06, proceduralSky.hemisphereIntensity * 0.2)
+        ? proceduralSky.hemisphereIntensity * intensityScale
+        : Math.max(0.06, proceduralSky.hemisphereIntensity * 0.2 * intensityScale)
       directional.color = new THREE.Color(proceduralSky.sunColor)
       directional.intensity = useFallbackLighting
-        ? proceduralSky.sunIntensity
-        : Math.max(0.18, proceduralSky.sunIntensity * 0.22)
+        ? proceduralSky.sunIntensity * intensityScale
+        : Math.max(0.18, proceduralSky.sunIntensity * 0.22 * intensityScale)
       directional.position.copy(sunPosition).multiplyScalar(60)
     } else if (useFallbackLighting) {
       ambient.color = new THREE.Color(preset.color)
@@ -693,22 +772,25 @@ export function GltfViewer({
       hemisphere.groundColor = new THREE.Color('#111111')
       hemisphere.intensity = 0
       directional.color = new THREE.Color(preset.color)
-      ambient.intensity = preset.ambient
-      directional.intensity = preset.directional
+      ambient.intensity = preset.ambient * intensityScale
+      directional.intensity = preset.directional * intensityScale
     } else {
       ambient.color = new THREE.Color('#ffffff')
       hemisphere.color = new THREE.Color('#ffffff')
       hemisphere.groundColor = new THREE.Color('#111111')
       hemisphere.intensity = 0
       directional.color = new THREE.Color('#ffffff')
-      ambient.intensity = 0.08
-      directional.intensity = 0.2
+      ambient.intensity = 0.08 * intensityScale
+      directional.intensity = 0.2 * intensityScale
     }
 
     if (rendererRef.current) {
-      rendererRef.current.toneMappingExposure = useFallbackLighting ? preset.exposure : 0.82
+      const baseExposure = useFallbackLighting ? preset.exposure : 0.82
+      rendererRef.current.toneMappingExposure = environment === 'none'
+        ? baseExposure
+        : baseExposure * intensityScale
     }
-  }, [preset, useFallbackLighting])
+  }, [environment, preset, resolvedEnvironmentLightIntensity, useFallbackLighting])
 
   useEffect(() => {
     const scene = sceneRef.current
@@ -738,6 +820,7 @@ export function GltfViewer({
 
     const applyViewportBackground = () => {
       scene.background = new THREE.Color(viewportPaletteRef.current.background)
+      scene.backgroundIntensity = 1
     }
 
     const loadToken = environmentLoadTokenRef.current + 1
@@ -749,7 +832,9 @@ export function GltfViewer({
       disposeEnvironmentResources()
 
       const environmentScene = new THREE.Scene()
-      const environmentSky = createProceduralSky(proceduralSky)
+      const environmentSky = createProceduralSky(
+        resolveProceduralSkyVisualConfig(proceduralSky, 'environment')
+      )
       environmentScene.add(environmentSky)
       const renderTarget = pmremGenerator.fromScene(environmentScene, 0, 0.1, 1000)
 
@@ -762,17 +847,21 @@ export function GltfViewer({
       environmentRenderTargetRef.current = renderTarget
       scene.environment = renderTarget.texture
       ;(scene as THREE.Scene & { environmentIntensity?: number }).environmentIntensity = useFallbackLighting
-        ? proceduralSky.environmentIntensity
-        : Math.max(0.2, proceduralSky.environmentIntensity * 0.35)
+        ? proceduralSky.environmentIntensity * resolvedEnvironmentLightIntensity
+        : Math.max(0.2, proceduralSky.environmentIntensity * 0.35 * resolvedEnvironmentLightIntensity)
 
       if (showHdriBackground) {
-        const backgroundSky = createProceduralSky(proceduralSky)
+        const backgroundSky = createProceduralSky(
+          resolveProceduralSkyVisualConfig(proceduralSky, 'background')
+        )
+        applyProceduralSkyBackgroundIntensity(backgroundSky, resolvedEnvironmentBackgroundIntensity)
         backgroundSky.frustumCulled = false
         backgroundSky.renderOrder = -1
         if (cameraRef.current) {
           backgroundSky.position.copy(cameraRef.current.position)
         }
         const backgroundMaterial = backgroundSky.material as THREE.ShaderMaterial
+        backgroundMaterial.depthTest = false
         backgroundMaterial.depthWrite = false
         scene.add(backgroundSky)
         environmentBackdropRef.current = backgroundSky
@@ -791,7 +880,7 @@ export function GltfViewer({
     disposeEnvironmentResources()
     applyViewportBackground()
     ;(scene as THREE.Scene & { environmentIntensity?: number }).environmentIntensity =
-      useFallbackLighting ? 1.0 : 0.35
+      (useFallbackLighting ? 1.0 : 0.35) * resolvedEnvironmentLightIntensity
 
     const loader = new RGBELoader()
     loader.setDataType(THREE.HalfFloatType)
@@ -821,11 +910,12 @@ export function GltfViewer({
         environmentBackgroundTextureRef.current = texture
         scene.environment = renderTarget.texture
         ;(scene as THREE.Scene & { environmentIntensity?: number }).environmentIntensity = useFallbackLighting
-          ? 1.0
-          : 0.35
+          ? resolvedEnvironmentLightIntensity
+          : 0.35 * resolvedEnvironmentLightIntensity
         scene.background = showHdriBackground
           ? texture
           : new THREE.Color(viewportPaletteRef.current.background)
+        scene.backgroundIntensity = showHdriBackground ? resolvedEnvironmentBackgroundIntensity : 1
       },
       undefined,
       (error: unknown) => {
@@ -835,7 +925,13 @@ export function GltfViewer({
         console.warn('Failed to load HDR environment map', error)
       }
     )
-  }, [preset, showHdriBackground, useFallbackLighting])
+  }, [
+    preset,
+    resolvedEnvironmentBackgroundIntensity,
+    resolvedEnvironmentLightIntensity,
+    showHdriBackground,
+    useFallbackLighting
+  ])
 
   useEffect(() => {
     const scene = sceneRef.current
@@ -845,13 +941,17 @@ export function GltfViewer({
       showHdriBackground && environmentBackgroundTextureRef.current
         ? environmentBackgroundTextureRef.current
         : new THREE.Color(viewportPalette.background)
+    scene.backgroundIntensity =
+      showHdriBackground && environmentBackgroundTextureRef.current
+        ? resolvedEnvironmentBackgroundIntensity
+        : 1
 
     replaceViewportGrid(
       scene,
       gridRef,
       showGrid ? buildViewportGrid(modelRef.current, viewportPalette) : null
     )
-  }, [showGrid, showHdriBackground, viewportPalette])
+  }, [resolvedEnvironmentBackgroundIntensity, showGrid, showHdriBackground, viewportPalette])
 
   useEffect(() => {
     const scene = sceneRef.current

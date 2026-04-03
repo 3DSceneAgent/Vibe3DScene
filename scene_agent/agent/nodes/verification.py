@@ -8,8 +8,13 @@ from typing import Any
 from langchain_core.messages import ToolMessage
 
 from scene_agent.agent.state import AgentState
+from scene_agent.config import get_settings
 from scene_agent.memory.reference_image_memory import get_reference_image_memory
-from scene_agent.verification_result import normalize_verification_payload
+from scene_agent.penetration_verification import (
+    default_penetration_check_payload,
+    merge_verification_with_penetration,
+    normalize_penetration_check_payload,
+)
 from scene_agent.vlm.verification import verify_render_with_references
 from scene_agent.utils.verification_helpers import (
     active_todo_context,
@@ -18,6 +23,37 @@ from scene_agent.utils.verification_helpers import (
 )
 
 from .shared import latest_human_message, resolve_verification_assets
+
+
+def _run_penetration_check(state: AgentState) -> dict[str, Any]:
+    settings = get_settings()
+    if not bool(getattr(settings, "enable_penetration_verify", False)):
+        return default_penetration_check_payload(
+            enabled=False,
+            summary="Penetration verification disabled.",
+        )
+
+    thread_id = state.get("thread_id")
+    try:
+        from scene_agent.interfaces.api import send_blender_command_sync
+
+        raw_result = send_blender_command_sync(
+            "check_scene_penetration",
+            {
+                "penetration_threshold_m": settings.penetration_threshold_m,
+                "max_candidate_pairs": settings.penetration_max_candidate_pairs,
+                "max_reported_pairs": settings.penetration_max_reported_pairs,
+            },
+            thread_id=thread_id if isinstance(thread_id, str) and thread_id.strip() else None,
+        )
+    except Exception as exc:
+        return normalize_penetration_check_payload(
+            None,
+            enabled=True,
+            fallback_error=str(exc),
+        )
+
+    return normalize_penetration_check_payload(raw_result, enabled=True)
 
 
 def verify_node(
@@ -77,17 +113,25 @@ def verify_node(
             "edit_suggestions": [],
         }
 
-    verification_result = normalize_verification_payload(verification_payload)
+    penetration_check = _run_penetration_check(state)
+    verification_result, normalized_payload = merge_verification_with_penetration(
+        verification_payload,
+        penetration_check,
+    )
     verification_payload.update(
         {
-            "status": verification_result["status"],
-            "reason": verification_result["reason"],
-            "edit_suggestions": verification_result["edit_suggestions"],
+            "status": normalized_payload["status"],
+            "reason": normalized_payload["reason"],
+            "edit_suggestions": normalized_payload["edit_suggestions"],
             "reference_count": len(reference_paths),
             "reference_ids": reference_ids,
             "render_path": render_path,
             "render_source": render_source,
             "todo_context": todo_context,
+            "penetration_check": penetration_check,
+            "verification_sources": ["vlm", "geometry"]
+            if penetration_check.get("enabled")
+            else ["vlm"],
         }
     )
     guidance_text = build_verification_guidance_message(state, verification_payload)

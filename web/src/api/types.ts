@@ -133,7 +133,7 @@ export type StreamEvent = {
   thinking_delta?: string
   message_id?: string | null
   event?: 'done' | 'graph_node' | 'heartbeat' | 'tool_call_started'
-  tool_call?: { name?: string }
+  tool_call?: { name?: string; id?: string }
   graph_node?: GraphNodeStream
   scene_has_change?: boolean
   seq?: number

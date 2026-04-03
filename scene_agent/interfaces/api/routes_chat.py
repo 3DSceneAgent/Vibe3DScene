@@ -24,7 +24,7 @@ from .shared import (
     build_graph_node_event_payload,
     claim_or_proxy_request,
     extract_message_reasoning_text,
-    extract_message_tool_call_names,
+    extract_message_tool_calls,
     extract_graph_step_events,
     log_event,
     message_has_tool_calls,
@@ -770,7 +770,7 @@ async def _produce_stream_events(
     existing_message_ids: set[str] = set()
     last_assistant_text: str | None = None
     streamed_assistant_message_ids: set[str] = set()
-    announced_tool_call_names: set[str] = set()
+    announced_tool_call_keys: set[str] = set()
     saw_unidentified_assistant_delta = False
     scene_has_change = False
     done_payload: dict[str, Any] | None = None
@@ -1042,15 +1042,28 @@ async def _produce_stream_events(
                         scene_has_change = True
                         session.set_scene_has_change(True)
                     if not is_tool_message and message_has_tool_calls(serialized):
-                        for tool_call_name in extract_message_tool_call_names(serialized):
-                            if tool_call_name in announced_tool_call_names:
+                        for tool_call in extract_message_tool_calls(serialized):
+                            announcement_key = tool_call.get("key")
+                            tool_call_name = tool_call.get("name")
+                            if (
+                                not isinstance(announcement_key, str)
+                                or not announcement_key
+                                or not isinstance(tool_call_name, str)
+                                or not tool_call_name
+                            ):
                                 continue
-                            announced_tool_call_names.add(tool_call_name)
+                            if announcement_key in announced_tool_call_keys:
+                                continue
+                            announced_tool_call_keys.add(announcement_key)
+                            payload: dict[str, Any] = {
+                                "event": "tool_call_started",
+                                "tool_call": {"name": tool_call_name},
+                            }
+                            tool_call_id = tool_call.get("id")
+                            if isinstance(tool_call_id, str) and tool_call_id:
+                                payload["tool_call"]["id"] = tool_call_id
                             session.publish(
-                                {
-                                    "event": "tool_call_started",
-                                    "tool_call": {"name": tool_call_name},
-                                }
+                                payload
                             )
                     if message_type in {"human", "system"}:
                         continue

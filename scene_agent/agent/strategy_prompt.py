@@ -288,6 +288,7 @@ def build_asset_creation_strategy_text(
                 "   - Hunyuan3D",
                 "     - Flow: generate_hunyuan3d_model(text_prompt=... or input_image_url=...)",
                 "     - Built-in polling, best for single custom object generation",
+                "     - Default generation_mode='rapid'; set generation_mode='pro' when you need the higher-quality professional mode and extra controls",
                 "     - When exactly one image is attached to the current request, the runtime can auto-resolve it for image-to-3D",
                 "     - For remembered thread images, use input_image_name=... or input_image_id=...",
                 "     - Hunyuan often returns the model as Type=OBJ with a .zip bundle plus preview GIFs",

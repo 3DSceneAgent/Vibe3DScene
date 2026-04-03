@@ -93,6 +93,8 @@ def _sanitize_verification_payload(payload: Any) -> Any:
         "edit_suggestions",
         "render_source",
         "verification_mode",
+        "verification_sources",
+        "penetration_check",
     )
     sanitized: dict[str, Any] = {}
     for key in allowed_keys:
@@ -104,6 +106,19 @@ def _sanitize_verification_payload(payload: Any) -> Any:
             continue
         if isinstance(value, str):
             sanitized[key] = value[:600] if len(value) > 600 else value
+            continue
+        if key == "verification_sources" and isinstance(value, list):
+            sanitized[key] = [str(item) for item in value[:4]]
+            continue
+        if key == "penetration_check" and isinstance(value, dict):
+            sanitized[key] = {
+                "enabled": bool(value.get("enabled")),
+                "has_penetration": bool(value.get("has_penetration")),
+                "pair_count": value.get("pair_count", 0),
+                "summary": str(value.get("summary", ""))[:600],
+                "degraded": bool(value.get("degraded")),
+                "error": str(value.get("error", ""))[:300],
+            }
             continue
         sanitized[key] = value
     return sanitized

@@ -1,4 +1,5 @@
 import io
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -78,3 +79,35 @@ def test_list_images_limit_returns_latest(tmp_path, monkeypatch):
     limited_assets = client.get("/threads/thread-asset-2/images", params={"limit": 1})
     assert limited_assets.status_code == 200
     assert [item["id"] for item in limited_assets.json()["images"]] == [second_id]
+
+
+def test_missing_historical_image_file_returns_404_and_omits_asset_url(tmp_path, monkeypatch):
+    monkeypatch.setenv("REFERENCE_IMAGE_STORAGE_DIR", str(tmp_path))
+    monkeypatch.setenv("REFERENCE_IMAGE_MAX_COUNT", "3")
+    reload_settings()
+
+    memory = get_reference_image_memory()
+    memory.clear_all()
+
+    client = TestClient(api_module.app)
+    upload_response = client.post(
+        "/threads/thread-missing-image/images",
+        files=[("images", ("dog2.jpg", _make_png_bytes((77, 88, 99)), "image/png"))],
+    )
+    assert upload_response.status_code == 200
+    uploaded = upload_response.json()["images"][0]
+    assert uploaded["asset_url"] == f"/threads/thread-missing-image/images/{uploaded['id']}"
+
+    stored_files = list(Path(tmp_path).glob("thread-missing-image/*"))
+    assert stored_files
+    stored_files[0].unlink()
+
+    list_response = client.get("/threads/thread-missing-image/images")
+    assert list_response.status_code == 200
+    listed = list_response.json()["images"][0]
+    assert listed["id"] == uploaded["id"]
+    assert listed["asset_url"] is None
+
+    download_response = client.get(f"/threads/thread-missing-image/images/{uploaded['id']}")
+    assert download_response.status_code == 404
+    assert download_response.json()["detail"] == "Image asset file is missing."

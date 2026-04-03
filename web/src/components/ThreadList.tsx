@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Thread } from '../state/types'
+import { countConversationMessages } from '../utils/message'
 
 type ThreadContextMenuState = {
   threadId: string
@@ -26,13 +27,31 @@ type ThreadListProps = {
 }
 
 function getThreadLastActivityMs(thread: Thread): number {
-  const createdAt = Number.isFinite(thread.createdAt) ? thread.createdAt : 0
+  const createdAtMs = Number.isFinite(thread.createdAt) ? thread.createdAt : 0
   const updatedAtMs = Number.isFinite(thread.updatedAtMs) ? Number(thread.updatedAtMs) : 0
-  const lastMessageAt = thread.messages.reduce((latest, message) => {
+  const sceneUpdatedAtMs =
+    typeof thread.sceneManifest?.generated_at_ms === 'number' &&
+    Number.isFinite(thread.sceneManifest.generated_at_ms)
+      ? thread.sceneManifest.generated_at_ms
+      : 0
+  const lastMessageAtMs = thread.messages.reduce((latest, message) => {
     const timestamp = Number(message.createdAt)
     return Number.isFinite(timestamp) ? Math.max(latest, timestamp) : latest
-  }, createdAt)
-  return Math.max(createdAt, updatedAtMs, lastMessageAt)
+  }, 0)
+  return Math.max(createdAtMs, updatedAtMs, sceneUpdatedAtMs, lastMessageAtMs)
+}
+
+function formatThreadLastActivity(timestampMs: number): string {
+  if (!Number.isFinite(timestampMs) || timestampMs <= 0) {
+    return 'No activity yet'
+  }
+  return new Date(timestampMs).toLocaleString([], {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  })
 }
 
 function clampMenuPosition(clientX: number, clientY: number, itemCount: number) {
@@ -87,12 +106,17 @@ export function ThreadList({
     onDeleteAll?.()
   }, [confirmDeleteAll, onDeleteAll])
 
-  const sortedThreads = [...threads].sort((a, b) => {
+  const visibleThreads = [...threads].sort((a, b) => {
     const activityDiff = getThreadLastActivityMs(b) - getThreadLastActivityMs(a)
     if (activityDiff !== 0) {
       return activityDiff
     }
-    return (Number.isFinite(b.createdAt) ? b.createdAt : 0) - (Number.isFinite(a.createdAt) ? a.createdAt : 0)
+    const createdDiff =
+      (Number.isFinite(b.createdAt) ? b.createdAt : 0) - (Number.isFinite(a.createdAt) ? a.createdAt : 0)
+    if (createdDiff !== 0) {
+      return createdDiff
+    }
+    return a.id.localeCompare(b.id)
   })
 
   useEffect(() => {
@@ -171,7 +195,7 @@ export function ThreadList({
   )
 
   const menuThread = menuState
-    ? sortedThreads.find((thread) => thread.id === menuState.threadId) ?? null
+    ? visibleThreads.find((thread) => thread.id === menuState.threadId) ?? null
     : null
 
   return (
@@ -198,14 +222,16 @@ export function ThreadList({
       {!collapsed && createHint && <div className="thread-create-hint action">{createHint}</div>}
       {!collapsed && createError && <div className="thread-create-error">{createError}</div>}
       <div className={`thread-items ${collapsed ? 'collapsed' : ''}`}>
-        {sortedThreads.length === 0 && !collapsed && <div className="muted">No conversations yet</div>}
-        {sortedThreads.map((thread) => {
+        {visibleThreads.length === 0 && !collapsed && <div className="muted">No conversations yet</div>}
+        {visibleThreads.map((thread) => {
           const label = thread.title || 'Untitled'
           const shortLabel = label.trim().charAt(0).toUpperCase() || '?'
           const occupyingResources = Boolean(thread.occupyingResources)
           const isEditing = editingThreadId === thread.id
           const isMenuOpen = menuState?.threadId === thread.id
           const runtimeLabel = occupyingResources ? 'Runtime in use' : 'Runtime released'
+          const lastActivityMs = getThreadLastActivityMs(thread)
+          const messageCount = countConversationMessages(thread.messages)
           return (
             <div
               key={thread.id}
@@ -277,7 +303,7 @@ export function ThreadList({
               </div>
               {!collapsed && (
                 <div className="thread-meta">
-                  {thread.messages.length} messages · {new Date(thread.createdAt).toLocaleDateString()}
+                  {messageCount} {messageCount === 1 ? 'message' : 'messages'} · {formatThreadLastActivity(lastActivityMs)}
                 </div>
               )}
               {!collapsed && (
