@@ -161,13 +161,9 @@ function hasThoughtSignature(content: unknown): boolean {
   const maybe = content as {
     thought?: unknown
     thought_signature?: unknown
-    signature?: unknown
-    extras?: { signature?: unknown }
   }
   if (maybe.thought === true) return true
   if (typeof maybe.thought_signature === 'string' && maybe.thought_signature) return true
-  if (typeof maybe.signature === 'string' && maybe.signature) return true
-  if (maybe.extras && typeof maybe.extras.signature === 'string' && maybe.extras.signature) return true
   return false
 }
 
@@ -227,10 +223,13 @@ function normalizeContentItem(content: unknown): string {
   return parseInlineImages(JSON.stringify(content))
 }
 
-function normalizeThinkingItem(content: unknown): string {
-  if (typeof content === 'string') return content
+function normalizeThinkingItem(content: unknown, allowPlainString: boolean = false): string {
+  if (typeof content === 'string') return allowPlainString ? content : ''
   if (Array.isArray(content)) {
-    return content.map((item) => normalizeThinkingItem(item)).filter((item) => item.length > 0).join('')
+    return content
+      .map((item) => normalizeThinkingItem(item, allowPlainString))
+      .filter((item) => item.length > 0)
+      .join('')
   }
   if (!content || typeof content !== 'object') return ''
 
@@ -251,10 +250,11 @@ function normalizeThinkingItem(content: unknown): string {
     if (typeof maybe.reasoning === 'string') return maybe.reasoning
     if (typeof maybe.text === 'string') return maybe.text
     if (typeof maybe.content === 'string') return maybe.content
+    if (maybe.value !== undefined) return normalizeThinkingItem(maybe.value, true)
   }
 
   if (type === 'non_standard' && maybe.value !== undefined) {
-    return normalizeThinkingItem(maybe.value)
+    return normalizeThinkingItem(maybe.value, allowPlainString)
   }
 
   if (maybe.additional_kwargs) {
@@ -262,11 +262,11 @@ function normalizeThinkingItem(content: unknown): string {
       return maybe.additional_kwargs.reasoning_content
     }
     if (maybe.additional_kwargs.reasoning !== undefined) {
-      return normalizeThinkingItem(maybe.additional_kwargs.reasoning)
+      return normalizeThinkingItem(maybe.additional_kwargs.reasoning, true)
     }
   }
 
-  if (maybe.value !== undefined) return normalizeThinkingItem(maybe.value)
+  if (maybe.value !== undefined) return normalizeThinkingItem(maybe.value, allowPlainString)
   return ''
 }
 

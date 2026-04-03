@@ -277,13 +277,17 @@ function historyMessageToUiMessage(message: HistoryMessage): Message {
 }
 
 function applyThreadSummary(current: Thread | undefined, summary: ThreadSummaryInfo): Thread {
+  const summaryUpdatedAtMs =
+    typeof summary.updated_at_ms === 'number' && Number.isFinite(summary.updated_at_ms)
+      ? summary.updated_at_ms
+      : 0
   if (!current) {
     return {
       id: summary.thread_id,
       title: summary.title || 'New chat',
       titleEditedManually: false,
-      createdAt: summary.updated_at_ms || Date.now(),
-      updatedAtMs: summary.updated_at_ms || Date.now(),
+      createdAt: summaryUpdatedAtMs,
+      updatedAtMs: summaryUpdatedAtMs || undefined,
       messages: [],
       todos: [],
       renders: [],
@@ -296,24 +300,28 @@ function applyThreadSummary(current: Thread | undefined, summary: ThreadSummaryI
       images: [],
       graphEvents: [],
       occupyingResources: summary.has_runtime,
-      lastRuntimeActiveMs: summary.updated_at_ms || 0
+      lastRuntimeActiveMs: summaryUpdatedAtMs || 0
     }
   }
   return {
     ...current,
     title: current.titleEditedManually ? current.title : summary.title || current.title,
-    updatedAtMs: summary.updated_at_ms || current.updatedAtMs,
+    updatedAtMs: summaryUpdatedAtMs || current.updatedAtMs,
     sceneRevision: summary.scene_revision ?? current.sceneRevision ?? null,
     occupyingResources: summary.has_runtime,
-    lastRuntimeActiveMs: summary.updated_at_ms || current.lastRuntimeActiveMs || 0
+    lastRuntimeActiveMs: summaryUpdatedAtMs || current.lastRuntimeActiveMs || 0
   }
 }
 
 function applyThreadHistory(current: Thread, history: ThreadHistoryInfo): Thread {
+  const historyUpdatedAtMs =
+    typeof history.updated_at_ms === 'number' && Number.isFinite(history.updated_at_ms)
+      ? history.updated_at_ms
+      : 0
   return {
     ...current,
     title: current.titleEditedManually ? current.title : history.title || current.title,
-    updatedAtMs: history.updated_at_ms,
+    updatedAtMs: historyUpdatedAtMs || current.updatedAtMs,
     messages: history.messages.map(historyMessageToUiMessage),
     todos: history.todos ?? current.todos,
     sceneRevision: history.scene_revision ?? current.sceneRevision ?? null
@@ -608,6 +616,15 @@ function App() {
     () => threads.find((thread) => thread.id === activeThreadId) ?? null,
     [threads, activeThreadId]
   )
+  const activeThreadStreamStatus = activeThread
+    ? (
+        streamStatusByThread[activeThread.id] ??
+        ((currentStreamRef.current?.threadId === activeThread.id && (isStreaming || isSending))
+          ? 'streaming'
+          : 'complete')
+      )
+    : 'complete'
+  const activeThreadIsStreaming = activeThreadStreamStatus === 'streaming'
   const activeThreadLoading = useMemo(
     () => (activeThread ? loadingByThread[activeThread.id] ?? createThreadLoadingState() : createThreadLoadingState()),
     [activeThread, loadingByThread]
@@ -1877,6 +1894,28 @@ function App() {
         }))
       }
 
+      const getAssistantMessageForStream = (streamId: string | null): Message | null => {
+        if (!streamId) {
+          return null
+        }
+        const mappedMessageId = messageIdMapRef.current.get(streamId)
+        const thread = threadsRef.current.find((item) => item.id === threadId)
+        if (!thread) {
+          return null
+        }
+        if (mappedMessageId) {
+          const mappedMessage = thread.messages.find((message) => message.id === mappedMessageId)
+          if (mappedMessage) {
+            return mappedMessage
+          }
+        }
+        return (
+          thread.messages.find(
+            (message) => message.role === 'assistant' && message.streamId === streamId
+          ) ?? null
+        )
+      }
+
       const updateSceneChange = (nextValue: boolean, isFinal: boolean) => {
         const current = sceneChangeRef.current[threadId] ?? false
         const next = isFinal ? nextValue : nextValue || current
@@ -2038,30 +2077,45 @@ function App() {
         )
         if (candidates.length === 0) return
         let selected: (typeof candidates)[number] | null = null
+        let selectedRaw = ''
+        let selectedProviderThinking = ''
+        let selectedParsed: { text: string; thinking?: string } = { text: '', thinking: undefined }
+        let selectedStreamId: string | null = null
         for (let i = candidates.length - 1; i >= 0; i -= 1) {
           const candidate = candidates[i]
           const candidateId =
             typeof candidate === 'object' && candidate !== null && 'id' in candidate
               ? (candidate as { id?: string | null }).id ?? null
               : null
-          if (candidateId && knownStreamIdsRef.current.has(candidateId)) {
+          const raw = extractMessageContent(candidate)
+          const providerThinking = extractMessageThinking(candidate)
+          if (!raw && !providerThinking) {
             continue
           }
+          const parsed = raw ? parseThinking(raw) : { text: '', thinking: undefined }
+          if (candidateId && knownStreamIdsRef.current.has(candidateId)) {
+            const existingMessage = getAssistantMessageForStream(candidateId)
+            const nextThinking = providerThinking || parsed.thinking || ''
+            if (
+              existingMessage &&
+              existingMessage.content === parsed.text &&
+              (existingMessage.thinking ?? '') === nextThinking
+            ) {
+              continue
+            }
+          }
           selected = candidate
+          selectedRaw = raw
+          selectedProviderThinking = providerThinking
+          selectedParsed = parsed
+          selectedStreamId = candidateId
           break
         }
         if (!selected) return
-        const raw = extractMessageContent(selected)
-        const providerThinking = extractMessageThinking(selected)
-        if (!raw && !providerThinking) return
-        const parsed = raw ? parseThinking(raw) : { text: '', thinking: undefined }
-        const streamId =
-          typeof selected === 'object' && selected !== null && 'id' in selected
-            ? (selected as { id?: string | null }).id ?? null
-            : null
-        if (streamId && knownStreamIdsRef.current.has(streamId)) {
-          return
-        }
+        const raw = selectedRaw
+        const providerThinking = selectedProviderThinking
+        const parsed = selectedParsed
+        const streamId = selectedStreamId
         if (!receivedDeltaRef.current && previousAssistantContentRef.current === parsed.text) {
           return
         }
@@ -2241,7 +2295,7 @@ function App() {
   }
 
   const handleRetryTurn = async (turnId: string) => {
-    if (!activeThread || isStreaming) {
+    if (!activeThread || activeThreadIsStreaming) {
       return
     }
     const threadId = activeThread.id
@@ -2662,14 +2716,11 @@ function App() {
               <section className="workspace-chat">
                 <ChatTab
                   thread={activeThread}
-                  isStreaming={isStreaming || isSending}
-                  streamStatus={
-                    streamStatusByThread[activeThread.id] ??
-                    (isStreaming && currentStreamRef.current?.threadId === activeThread.id ? 'streaming' : 'complete')
-                  }
+                  isStreaming={activeThreadIsStreaming}
+                  streamStatus={activeThreadStreamStatus}
                   onSend={handleSend}
                   onRetryTurn={(turnId) => void handleRetryTurn(turnId)}
-                  onStop={isStreaming ? handleStop : undefined}
+                  onStop={activeThreadIsStreaming ? handleStop : undefined}
                   backendUrl={settings.backendUrl}
                   examplePrompts={examplePrompts}
                   promptHistory={promptHistory}

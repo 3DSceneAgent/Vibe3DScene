@@ -27,7 +27,13 @@ class _CoordinatorStub:
     def release_port(self, *, host: str, kind: str, port: int | None) -> None:
         self.release_calls.append((host, kind, port))
 
-    def update_session_runtime_fields(self, thread_id: str, fields: dict[str, object]) -> None:
+    def update_session_runtime_fields(
+        self,
+        thread_id: str,
+        fields: dict[str, object],
+        *,
+        bump_updated_at: bool = True,
+    ) -> None:
         self.runtime_updates.append((thread_id, fields))
 
     def delete_session_metadata(self, thread_id: str) -> None:
@@ -438,8 +444,14 @@ def test_ensure_frontend_client_can_manage_thread_rejects_foreign_client(monkeyp
         def get_session_meta(self, thread_id: str) -> dict[str, str] | None:
             return self.meta_by_thread.get(thread_id)
 
-        def update_session_runtime_fields(self, thread_id: str, fields: dict[str, object]) -> None:
-            _ = thread_id, fields
+        def update_session_runtime_fields(
+            self,
+            thread_id: str,
+            fields: dict[str, object],
+            *,
+            bump_updated_at: bool = True,
+        ) -> None:
+            _ = thread_id, fields, bump_updated_at
 
     coordinator = _Coordinator()
     monkeypatch.setattr(api_shared, "get_session_coordinator", lambda: coordinator)
@@ -457,12 +469,20 @@ def test_ensure_frontend_client_can_manage_thread_binds_legacy_default(monkeypat
         def __init__(self) -> None:
             self.meta_by_thread = {"thread-legacy": {}}
             self.runtime_updates: list[tuple[str, dict[str, object]]] = []
+            self.bump_flags: list[bool] = []
 
         def get_session_meta(self, thread_id: str) -> dict[str, str] | None:
             return self.meta_by_thread.get(thread_id)
 
-        def update_session_runtime_fields(self, thread_id: str, fields: dict[str, object]) -> None:
+        def update_session_runtime_fields(
+            self,
+            thread_id: str,
+            fields: dict[str, object],
+            *,
+            bump_updated_at: bool = True,
+        ) -> None:
             self.runtime_updates.append((thread_id, fields))
+            self.bump_flags.append(bump_updated_at)
             meta = self.meta_by_thread.setdefault(thread_id, {})
             for key, value in fields.items():
                 if value is None:
@@ -478,6 +498,7 @@ def test_ensure_frontend_client_can_manage_thread_binds_legacy_default(monkeypat
     api_module.ensure_frontend_client_can_manage_thread("thread-legacy", "client-new")
 
     assert coordinator.runtime_updates
+    assert coordinator.bump_flags == [False]
     assert coordinator.meta_by_thread["thread-legacy"]["frontend_client_id"] == "client-new"
     with api_module._thread_client_lock:
         assert api_module._thread_frontend_clients["thread-legacy"] == "client-new"
@@ -492,7 +513,13 @@ def test_rename_thread_title_rejects_foreign_client(monkeypatch):
         def get_session_meta(self, thread_id: str) -> dict[str, str] | None:
             return self.meta_by_thread.get(thread_id)
 
-        def update_session_runtime_fields(self, thread_id: str, fields: dict[str, object]) -> None:
+        def update_session_runtime_fields(
+            self,
+            thread_id: str,
+            fields: dict[str, object],
+            *,
+            bump_updated_at: bool = True,
+        ) -> None:
             self.runtime_updates.append((thread_id, fields))
 
     async def fake_claim_or_proxy_request(*, request, thread_id):  # type: ignore[no-untyped-def]
@@ -523,12 +550,20 @@ def test_rename_thread_title_binds_legacy_default_and_updates_meta(monkeypatch):
         def __init__(self) -> None:
             self.meta_by_thread = {"thread-legacy": {}}
             self.runtime_updates: list[tuple[str, dict[str, object]]] = []
+            self.bump_flags: list[bool] = []
 
         def get_session_meta(self, thread_id: str) -> dict[str, str] | None:
             return self.meta_by_thread.get(thread_id)
 
-        def update_session_runtime_fields(self, thread_id: str, fields: dict[str, object]) -> None:
+        def update_session_runtime_fields(
+            self,
+            thread_id: str,
+            fields: dict[str, object],
+            *,
+            bump_updated_at: bool = True,
+        ) -> None:
             self.runtime_updates.append((thread_id, fields))
+            self.bump_flags.append(bump_updated_at)
             meta = self.meta_by_thread.setdefault(thread_id, {})
             for key, value in fields.items():
                 if value is None:
@@ -558,6 +593,7 @@ def test_rename_thread_title_binds_legacy_default_and_updates_meta(monkeypatch):
     assert response.json() == {"thread_id": "thread-legacy", "title": "Renamed thread"}
     assert coordinator.meta_by_thread["thread-legacy"]["frontend_client_id"] == "client-new"
     assert coordinator.meta_by_thread["thread-legacy"]["title"] == "Renamed thread"
+    assert coordinator.bump_flags == [False, True]
     with api_module._thread_client_lock:
         assert api_module._thread_frontend_clients["thread-legacy"] == "client-new"
 
@@ -572,6 +608,7 @@ def test_collect_headless_runtime_entries_adopts_legacy_default_frontend_owner(m
                 }
             }
             self.runtime_updates: list[tuple[str, dict[str, object]]] = []
+            self.bump_flags: list[bool] = []
 
         def list_threads(self, limit: int = 2000) -> list[str]:
             _ = limit
@@ -580,8 +617,15 @@ def test_collect_headless_runtime_entries_adopts_legacy_default_frontend_owner(m
         def get_session_meta(self, thread_id: str) -> dict[str, str] | None:
             return self.meta_by_thread.get(thread_id)
 
-        def update_session_runtime_fields(self, thread_id: str, fields: dict[str, object]) -> None:
+        def update_session_runtime_fields(
+            self,
+            thread_id: str,
+            fields: dict[str, object],
+            *,
+            bump_updated_at: bool = True,
+        ) -> None:
             self.runtime_updates.append((thread_id, fields))
+            self.bump_flags.append(bump_updated_at)
             meta = self.meta_by_thread.setdefault(thread_id, {})
             for key, value in fields.items():
                 if value is None:
@@ -607,6 +651,7 @@ def test_collect_headless_runtime_entries_adopts_legacy_default_frontend_owner(m
     assert entries[0]["thread_id"] == "thread-legacy"
     assert entries[0]["frontend_client_id"] == "client-z"
     assert coordinator.meta_by_thread["thread-legacy"]["frontend_client_id"] == "client-z"
+    assert coordinator.bump_flags == [False]
 
 
 def test_collect_headless_runtime_entries_prefers_local_cleared_ports(monkeypatch):

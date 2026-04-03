@@ -129,6 +129,28 @@ async def fake_get_duplicate_assistant_agent(_thread_id=None):
     return DuplicateAssistantFromUpdatesAgent()
 
 
+class RefinedAssistantFromUpdatesAgent:
+    async def astream(self, *_args, **_kwargs):
+        yield (
+            "messages",
+            [{"type": "ai", "id": "assistant-refined", "content": "The"}],
+        )
+        yield (
+            "updates",
+            {
+                "finalize": {
+                    "messages": [
+                        {"type": "ai", "id": "assistant-refined", "content": "The result is 5."}
+                    ],
+                },
+            },
+        )
+
+
+async def fake_get_refined_assistant_agent(_thread_id=None):
+    return RefinedAssistantFromUpdatesAgent()
+
+
 class ToolCallAssistantFallbackAgent:
     async def astream(self, *_args, **_kwargs):
         yield (
@@ -505,6 +527,27 @@ def test_chat_stream_skips_non_tool_update_messages_after_message_stream(monkeyp
         if "messages" in payload and payload["messages"][0].get("type") == "ai"
     ]
     assert not assistant_messages
+
+
+def test_chat_stream_keeps_richer_update_message_after_same_id_delta(monkeypatch):
+    monkeypatch.setattr(api_module, "get_agent", fake_get_refined_assistant_agent)
+    client = TestClient(api_module.app)
+
+    with client.stream("POST", "/chat/stream", json={"message": "hi", "thread_id": "t-refined-assistant"}) as response:
+        assert response.status_code == 200
+        payloads = collect_sse_payloads(response.iter_lines())
+
+    deltas = [payload["delta"] for payload in payloads if "delta" in payload]
+    assert deltas == ["The"]
+
+    assistant_messages = [
+        payload
+        for payload in payloads
+        if "messages" in payload and payload["messages"][0].get("type") == "ai"
+    ]
+    assert len(assistant_messages) == 1
+    assert assistant_messages[0]["messages"][0].get("id") == "assistant-refined"
+    assert assistant_messages[0]["messages"][0].get("content") == "The result is 5."
 
 
 def test_chat_stream_emits_update_assistant_message_when_message_stream_only_carried_tool_calls(monkeypatch):

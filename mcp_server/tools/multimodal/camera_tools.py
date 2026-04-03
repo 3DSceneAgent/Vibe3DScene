@@ -594,14 +594,15 @@ def observe_scene_global(ctx: Context) -> CallToolResult:
             lines.append(f"- scene_bbox.dimensions: {dimensions}")
 
     grid_url = _build_scene_grid_image(image_entries, thread_id=thread_id)
+    primary_label = "Grid overview"
+    primary_alt = _SCENE_GRID_CAMERA_NAME
+    primary_url = grid_url
+    if not isinstance(primary_url, str) or not primary_url:
+        primary_label = "Fallback view"
+        primary_alt, primary_url = image_entries[0]
+
     lines.append("")
-    if isinstance(grid_url, str) and grid_url:
-        # Keep the grid image first so downstream markdown extraction uses it.
-        lines.append(f"Grid overview: ![{_SCENE_GRID_CAMERA_NAME}]({grid_url})")
-        lines.append("")
-    lines.append("Captured views:")
-    for camera_name, image_url in image_entries:
-        lines.append(f"- {camera_name}: ![{camera_name}]({image_url})")
+    lines.append(f"{primary_label}: ![{primary_alt}]({primary_url})")
 
     return CallToolResult(
         content=[{"type": "text", "text": "\n".join(lines)}],

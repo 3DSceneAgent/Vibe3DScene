@@ -172,6 +172,7 @@ def _bind_frontend_client_to_thread(thread_id: str, client_id: str) -> None:
     coordinator.update_session_runtime_fields(
         thread_id,
         {"frontend_client_id": normalized},
+        bump_updated_at=False,
     )
 
 
@@ -1092,15 +1093,9 @@ def _looks_like_image_block(item: Dict[str, Any]) -> bool:
 def _content_block_has_thought_signature(item: Dict[str, Any]) -> bool:
     if item.get("thought") is True:
         return True
-    for key in ("thought_signature", "signature"):
-        value = item.get(key)
-        if isinstance(value, str) and value:
-            return True
-    extras = item.get("extras")
-    if isinstance(extras, dict):
-        signature = extras.get("signature")
-        if isinstance(signature, str) and signature:
-            return True
+    value = item.get("thought_signature")
+    if isinstance(value, str) and value:
+        return True
     return False
 
 
@@ -1224,15 +1219,18 @@ def _extract_tool_call_id(tool_call: Any) -> str | None:
     return None
 
 
-def _extract_reasoning_from_value(value: Any) -> str:
+def _extract_reasoning_from_value(value: Any, *, allow_plain_string: bool = False) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
-        return value
+        return value if allow_plain_string else ""
     if isinstance(value, list):
         parts: list[str] = []
         for item in value:
-            reasoning_text = _extract_reasoning_from_value(item)
+            reasoning_text = _extract_reasoning_from_value(
+                item,
+                allow_plain_string=allow_plain_string,
+            )
             if reasoning_text:
                 parts.append(reasoning_text)
         return "".join(parts)
@@ -1246,7 +1244,7 @@ def _extract_reasoning_from_value(value: Any) -> str:
             if isinstance(reasoning, str):
                 return reasoning
             summary = value.get("summary")
-            summary_text = _extract_reasoning_from_value(summary)
+            summary_text = _extract_reasoning_from_value(summary, allow_plain_string=True)
             if summary_text:
                 return summary_text
         thinking = value.get("thinking")
@@ -1259,20 +1257,28 @@ def _extract_reasoning_from_value(value: Any) -> str:
         if isinstance(content, str):
             return content
         value_field = value.get("value")
-        return _extract_reasoning_from_value(value_field)
+        return _extract_reasoning_from_value(value_field, allow_plain_string=True)
 
     nested_value = value.get("value")
     if item_type == "non_standard" and nested_value is not None:
-        return _extract_reasoning_from_value(nested_value)
+        return _extract_reasoning_from_value(
+            nested_value,
+            allow_plain_string=allow_plain_string,
+        )
 
-    if isinstance(nested_value, (dict, list, str)):
-        nested_text = _extract_reasoning_from_value(nested_value)
+    if isinstance(nested_value, (dict, list)) or (
+        allow_plain_string and isinstance(nested_value, str)
+    ):
+        nested_text = _extract_reasoning_from_value(
+            nested_value,
+            allow_plain_string=allow_plain_string,
+        )
         if nested_text:
             return nested_text
 
     summary = value.get("summary")
     if isinstance(summary, list):
-        summary_text = _extract_reasoning_from_value(summary)
+        summary_text = _extract_reasoning_from_value(summary, allow_plain_string=True)
         if summary_text:
             return summary_text
 
@@ -1286,7 +1292,7 @@ def extract_message_reasoning_text(serialized: Dict[str, Any]) -> str:
         if isinstance(reasoning_content, str) and reasoning_content != "":
             return reasoning_content
         reasoning = additional_kwargs.get("reasoning")
-        reasoning_text = _extract_reasoning_from_value(reasoning)
+        reasoning_text = _extract_reasoning_from_value(reasoning, allow_plain_string=True)
         if reasoning_text:
             return reasoning_text
 
@@ -2215,6 +2221,13 @@ def _collect_media_urls(value: Any, results: list[HistoryToolMediaResponse] | No
 
 
 def _coerce_message_timestamp_ms(serialized: dict[str, Any], fallback_ms: int) -> int:
+    created_at_ms = _extract_message_timestamp_ms(serialized)
+    if created_at_ms is not None:
+        return created_at_ms
+    return fallback_ms
+
+
+def _extract_message_timestamp_ms(serialized: dict[str, Any]) -> int | None:
     additional_kwargs = serialized.get("additional_kwargs")
     if isinstance(additional_kwargs, dict):
         raw_created_at_ms = additional_kwargs.get("created_at_ms")
@@ -2224,7 +2237,7 @@ def _coerce_message_timestamp_ms(serialized: dict[str, Any], fallback_ms: int) -
                 return created_at_ms
         except (TypeError, ValueError):
             pass
-    return fallback_ms
+    return None
 
 
 def _extract_attached_image_ids(serialized: dict[str, Any]) -> list[str]:
@@ -2256,14 +2269,25 @@ def build_thread_history_payload(thread_id: str) -> ThreadHistoryResponse:
     channel_values = _load_thread_checkpoint_channel_values(thread_id)
     raw_messages = channel_values.get("messages")
     messages = list(raw_messages) if isinstance(raw_messages, list) else []
-    updated_at_ms = _load_thread_checkpoint_timestamp_ms(thread_id)
-    if updated_at_ms <= 0:
-        meta = get_session_coordinator().get_session_meta(thread_id) or {}
-        updated_at_ms = (
-            _safe_int_optional(meta.get("last_active_ms"))
-            or _safe_int_optional(meta.get("updated_at_ms"))
-            or int(time.time() * 1000)
+    meta = get_session_coordinator().get_session_meta(thread_id) or {}
+    checkpoint_updated_at_ms = _load_thread_checkpoint_timestamp_ms(thread_id)
+    meta_updated_at_ms = (
+        _safe_int_optional(meta.get("last_active_ms"))
+        or _safe_int_optional(meta.get("updated_at_ms"))
+        or 0
+    )
+    explicit_message_updated_at_ms = 0
+    for raw_message in messages:
+        serialized = serialize_message(raw_message)
+        explicit_message_updated_at_ms = max(
+            explicit_message_updated_at_ms,
+            _extract_message_timestamp_ms(serialized) or 0,
         )
+    updated_at_ms = max(
+        int(checkpoint_updated_at_ms or 0),
+        int(meta_updated_at_ms or 0),
+        int(explicit_message_updated_at_ms or 0),
+    )
 
     assets_by_id = {
         image.id: serialize_image_asset(image)

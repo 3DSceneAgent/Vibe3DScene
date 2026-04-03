@@ -154,6 +154,45 @@ def test_build_thread_history_payload_omits_asset_url_for_missing_files(monkeypa
     assert payload.messages[0].attached_images[0].asset_url is None
 
 
+def test_build_thread_history_payload_uses_message_timestamp_when_checkpoint_time_is_missing(monkeypatch):
+    thread_id = "thread-history-message-ts"
+
+    class _Checkpointer:
+        @staticmethod
+        def get_tuple(_config):
+            return SimpleNamespace(
+                checkpoint={
+                    "channel_values": {
+                        "messages": [
+                            HumanMessage(
+                                content="Open the shutters",
+                                id="turn-1",
+                                additional_kwargs={"created_at_ms": 1770000000123},
+                            ),
+                        ],
+                    },
+                }
+            )
+
+    class _ImageMemory:
+        @staticmethod
+        def list_assets(_thread_id):
+            return []
+
+    class _Coordinator:
+        @staticmethod
+        def get_session_meta(_thread_id):
+            return {}
+
+    monkeypatch.setattr(api_shared, "get_graph_checkpointer", lambda: _Checkpointer())
+    monkeypatch.setattr(api_shared, "get_image_asset_memory", lambda: _ImageMemory())
+    monkeypatch.setattr(api_shared, "get_session_coordinator", lambda: _Coordinator())
+
+    payload = api_shared.build_thread_history_payload(thread_id)
+
+    assert payload.updated_at_ms == 1770000000123
+
+
 def test_load_thread_scene_artifact_manifest_reads_persisted_artifacts(tmp_path, monkeypatch):
     thread_id = "thread-artifacts"
     storage_dir = tmp_path / thread_id

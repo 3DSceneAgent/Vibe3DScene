@@ -222,6 +222,23 @@ class TestUpdateMemoryNodeRenderExtraction:
         assert result.get("last_render_path") == "https://example.com/renders/scene_ne.jpg"
         assert result.get("last_render_source") == "scene_observe"
 
+    def test_global_observe_prefers_first_markdown_image_for_visual_context(self):
+        md = (
+            "Grid overview: ![SceneGlobalGrid](https://example.com/renders/scene_grid.jpg)\n\n"
+            "Captured views:\n"
+            "- SceneCamera_NE: ![SceneCamera_NE](https://example.com/renders/scene_ne.jpg)"
+        )
+        tool_msg = ToolMessage(name="observe_scene_global", content=md, tool_call_id="t1")
+        state = self._make_state([tool_msg])
+
+        result = update_memory_node(state)
+
+        assert result.get("last_render_path") == "https://example.com/renders/scene_grid.jpg"
+        messages = result.get("messages", [])
+        assert len(messages) == 1
+        image_content = messages[0].content[1]
+        assert image_content["image_url"]["url"] == "https://example.com/renders/scene_grid.jpg"
+
     def test_fast_mode_tracks_mutation_batch(self):
         tool_msg = ToolMessage(name="execute_blender_code", content="ok", tool_call_id="t1")
         state = self._make_state([tool_msg], fast_mode=True, request_tool_batches=1)

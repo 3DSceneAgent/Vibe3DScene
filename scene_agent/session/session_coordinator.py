@@ -185,11 +185,21 @@ class SessionCoordinator:
         except RedisError:
             return
 
-    def update_session_runtime_fields(self, thread_id: str, fields: dict[str, object]) -> None:
+    def update_session_runtime_fields(
+        self,
+        thread_id: str,
+        fields: dict[str, object],
+        *,
+        bump_updated_at: bool = True,
+    ) -> None:
         if self._registry is None:
             return
         try:
-            self._registry.update_session_runtime_fields(thread_id, fields)
+            self._registry.update_session_runtime_fields(
+                thread_id,
+                fields,
+                bump_updated_at=bump_updated_at,
+            )
         except RedisError:
             return
 

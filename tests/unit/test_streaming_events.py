@@ -123,3 +123,22 @@ def test_extract_message_reasoning_text_from_gemini_thinking_block() -> None:
     )
     data = serialize_message(message)
     assert extract_message_reasoning_text(data) == "Compare layout before calling the tool."
+
+
+def test_assistant_message_display_text_keeps_signed_visible_text_block() -> None:
+    message = AIMessage(
+        content=[
+            {"type": "thinking", "thinking": "Compare layout before calling the tool.", "signature": "abc"},
+            {"type": "text", "text": "Visible final summary.", "extras": {"signature": "abc"}},
+        ],
+    )
+    data = serialize_message(message)
+    assert assistant_message_display_text(data) == "Visible final summary."
+    assert extract_message_reasoning_text(data) == "Compare layout before calling the tool."
+
+
+def test_extract_message_reasoning_text_ignores_plain_string_content() -> None:
+    message = AIMessage(content="Visible assistant response")
+    data = serialize_message(message)
+    assert assistant_message_display_text(data) == "Visible assistant response"
+    assert extract_message_reasoning_text(data) == ""

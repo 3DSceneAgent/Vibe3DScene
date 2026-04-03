@@ -770,6 +770,7 @@ async def _produce_stream_events(
     existing_message_ids: set[str] = set()
     last_assistant_text: str | None = None
     streamed_assistant_message_ids: set[str] = set()
+    streamed_assistant_snapshots: dict[str, tuple[str, str]] = {}
     announced_tool_call_keys: set[str] = set()
     saw_unidentified_assistant_delta = False
     scene_has_change = False
@@ -1000,7 +1001,10 @@ async def _produce_stream_events(
                         and node_message_id
                         and node_message_id in streamed_assistant_message_ids
                     ):
-                        continue
+                        previous_snapshot = streamed_assistant_snapshots.get(node_message_id)
+                        current_snapshot = (content_text, reasoning_text)
+                        if previous_snapshot == current_snapshot:
+                            continue
                     if (
                         (not isinstance(node_message_id, str) or not node_message_id)
                         and saw_unidentified_assistant_delta
@@ -1101,6 +1105,7 @@ async def _produce_stream_events(
                         session.note_assistant_chunk()
                         if isinstance(message_id, str) and message_id:
                             streamed_assistant_message_ids.add(message_id)
+                            streamed_assistant_snapshots[message_id] = (display_text, reasoning_text)
                         else:
                             saw_unidentified_assistant_delta = True
                         event_payload = {"delta": delta, "message_id": message_id}

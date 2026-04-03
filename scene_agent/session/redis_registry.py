@@ -486,11 +486,18 @@ class RedisSessionRegistry:
         self._client.sadd(self.worker_sessions_key(worker_id), thread_id)
         self._client.sadd(self.workers_key(), worker_id)
 
-    def update_session_runtime_fields(self, thread_id: str, fields: dict[str, Any]) -> None:
+    def update_session_runtime_fields(
+        self,
+        thread_id: str,
+        fields: dict[str, Any],
+        *,
+        bump_updated_at: bool = True,
+    ) -> None:
         if not fields:
             return
         payload = {str(k): str(v) for k, v in fields.items() if v is not None}
-        payload["updated_at_ms"] = str(self._now_ms())
+        if bump_updated_at:
+            payload["updated_at_ms"] = str(self._now_ms())
         if payload:
             self._client.hset(self.session_meta_key(thread_id), mapping=payload)
 

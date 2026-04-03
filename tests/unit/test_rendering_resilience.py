@@ -54,7 +54,7 @@ def test_blender_connection_preserves_command_error(monkeypatch):
         connection.send_command("render_from_objects", {"object_names": ["x"]})
 
 
-def test_observe_scene_global_returns_multi_view_markdown(monkeypatch):
+def test_observe_scene_global_returns_single_grid_markdown(monkeypatch):
     monkeypatch.setattr(
         camera_tools,
         "update_scene_cameras",
@@ -74,6 +74,11 @@ def test_observe_scene_global_returns_multi_view_markdown(monkeypatch):
             "image_urls": ["https://example.test/ne.png", "https://example.test/nw.png"],
         },
     )
+    monkeypatch.setattr(
+        camera_tools,
+        "_build_scene_grid_image",
+        lambda image_entries, *, thread_id: "https://example.test/scene_grid.jpg",
+    )
 
     ctx = SimpleNamespace(request_context={"thread_id": "thread-global-observe"})
     result = camera_tools.observe_scene_global(ctx=ctx)
@@ -81,9 +86,12 @@ def test_observe_scene_global_returns_multi_view_markdown(monkeypatch):
     assert result.isError is False
     assert result.content
     payload = str(result.content[0])
-    assert "SceneCamera_NE" in payload
-    assert "https://example.test/ne.png" in payload
+    assert "Grid overview" in payload
+    assert "https://example.test/scene_grid.jpg" in payload
     assert "scene_bbox.center" in payload
+    assert "Captured views:" not in payload
+    assert "https://example.test/ne.png" not in payload
+    assert "https://example.test/nw.png" not in payload
 
 
 def test_observe_scene_global_builds_grid_for_local_render_urls(monkeypatch):
@@ -123,13 +131,46 @@ def test_observe_scene_global_builds_grid_for_local_render_urls(monkeypatch):
         payload = str(result.content[0])
         assert "SceneGlobalGrid" in payload
         assert "/renders/SceneGlobalGrid_grid.jpg" in payload
-        assert "Captured views:" in payload
+        assert "Captured views:" not in payload
     finally:
         for filename in filenames:
             try:
                 (camera_tools.RENDERS_DIR / filename).unlink()
             except OSError:
                 pass
+
+
+def test_observe_scene_global_falls_back_to_single_view_when_grid_missing(monkeypatch):
+    monkeypatch.setattr(
+        camera_tools,
+        "update_scene_cameras",
+        lambda **kwargs: {
+            "success": True,
+            "scene_bbox": {"center": [0.0, 0.0, 0.5], "dimensions": [2.0, 2.0, 1.0]},
+            "cameras": [
+                {
+                    "camera_name": "SceneCamera_NE",
+                    "image_url": "https://example.test/ne.png",
+                },
+                {
+                    "camera_name": "SceneCamera_NW",
+                    "image_url": "https://example.test/nw.png",
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(camera_tools, "_build_scene_grid_image", lambda image_entries, *, thread_id: None)
+
+    ctx = SimpleNamespace(request_context={"thread_id": "thread-global-fallback"})
+    result = camera_tools.observe_scene_global(ctx=ctx)
+
+    assert result.isError is False
+    assert result.content
+    payload = str(result.content[0])
+    assert "Fallback view" in payload
+    assert "https://example.test/ne.png" in payload
+    assert "https://example.test/nw.png" not in payload
+    assert "Captured views:" not in payload
 
 
 def test_observe_scene_global_gracefully_reports_failure(monkeypatch):

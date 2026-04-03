@@ -29,16 +29,7 @@ type ThreadListProps = {
 function getThreadLastActivityMs(thread: Thread): number {
   const createdAtMs = Number.isFinite(thread.createdAt) ? thread.createdAt : 0
   const updatedAtMs = Number.isFinite(thread.updatedAtMs) ? Number(thread.updatedAtMs) : 0
-  const sceneUpdatedAtMs =
-    typeof thread.sceneManifest?.generated_at_ms === 'number' &&
-    Number.isFinite(thread.sceneManifest.generated_at_ms)
-      ? thread.sceneManifest.generated_at_ms
-      : 0
-  const lastMessageAtMs = thread.messages.reduce((latest, message) => {
-    const timestamp = Number(message.createdAt)
-    return Number.isFinite(timestamp) ? Math.max(latest, timestamp) : latest
-  }, 0)
-  return Math.max(createdAtMs, updatedAtMs, sceneUpdatedAtMs, lastMessageAtMs)
+  return Math.max(createdAtMs, updatedAtMs)
 }
 
 function formatThreadLastActivity(timestampMs: number): string {
