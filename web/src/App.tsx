@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ApiRequestError,
+  getThreadStreamSession,
   retryChatStream,
+  resumeChatStream,
   streamChat,
   getTodos,
   getSceneRenders,
@@ -44,12 +46,14 @@ import { SceneTab } from './components/SceneTab'
 import { SettingsPanel } from './components/SettingsPanel'
 import { ThreadList } from './components/ThreadList'
 import {
+  loadActiveThreadId,
   loadPromptHistory,
   loadSettings,
   loadThreads,
   loadSettingsAsync,
   loadThreadsAsync,
   recordPromptHistory,
+  saveActiveThreadId,
   savePromptHistory,
   saveSettings,
   saveThreads
@@ -190,6 +194,33 @@ function normalizeThreadTitle(title: string, maxLength: number = 120): string {
   return normalized
 }
 
+function getThreadLastActivityMs(thread: Thread): number {
+  const createdAtMs = Number.isFinite(thread.createdAt) ? thread.createdAt : 0
+  const updatedAtMs = Number.isFinite(thread.updatedAtMs) ? Number(thread.updatedAtMs) : 0
+  return Math.max(createdAtMs, updatedAtMs)
+}
+
+function compareThreadsByActivity(left: Thread, right: Thread): number {
+  const activityDiff = getThreadLastActivityMs(right) - getThreadLastActivityMs(left)
+  if (activityDiff !== 0) {
+    return activityDiff
+  }
+  const createdDiff =
+    (Number.isFinite(right.createdAt) ? right.createdAt : 0) -
+    (Number.isFinite(left.createdAt) ? left.createdAt : 0)
+  if (createdDiff !== 0) {
+    return createdDiff
+  }
+  return left.id.localeCompare(right.id)
+}
+
+function getDefaultActiveThreadId(threads: Thread[]): string | null {
+  if (threads.length === 0) {
+    return null
+  }
+  return [...threads].sort(compareThreadsByActivity)[0]?.id ?? null
+}
+
 function buildThreadTitleUpdate(
   thread: Thread,
   nextTitle: string,
@@ -318,11 +349,16 @@ function applyThreadHistory(current: Thread, history: ThreadHistoryInfo): Thread
     typeof history.updated_at_ms === 'number' && Number.isFinite(history.updated_at_ms)
       ? history.updated_at_ms
       : 0
+  const historyMessages = history.messages.map(historyMessageToUiMessage)
+  const historyMessageIds = new Set(historyMessages.map((message) => message.id))
+  const pendingStreamingMessages = current.messages.filter(
+    (message) => message.status === 'streaming' && !historyMessageIds.has(message.id)
+  )
   return {
     ...current,
     title: current.titleEditedManually ? current.title : history.title || current.title,
     updatedAtMs: historyUpdatedAtMs || current.updatedAtMs,
-    messages: history.messages.map(historyMessageToUiMessage),
+    messages: [...historyMessages, ...pendingStreamingMessages],
     todos: history.todos ?? current.todos,
     sceneRevision: history.scene_revision ?? current.sceneRevision ?? null
   }
@@ -455,6 +491,26 @@ function getLastAssistantContent(messages: Message[]): string | null {
     ?.content ?? null
 }
 
+function getLastUserTurnId(messages: Message[]): string | null {
+  const userMessage = messages
+    .slice()
+    .reverse()
+    .find((message) => message.role === 'user')
+  if (!userMessage) {
+    return null
+  }
+  return userMessage.turnId ?? userMessage.id
+}
+
+function findStreamingAssistantMessage(messages: Message[]): Message | null {
+  return (
+    messages
+      .slice()
+      .reverse()
+      .find((message) => message.role === 'assistant' && message.status === 'streaming') ?? null
+  )
+}
+
 function appendPendingToolMessages(
   messages: Message[],
   toolCalls: AssistantToolCall[],
@@ -558,7 +614,7 @@ function App() {
   const MIN_TOOL_SHIMMER_MS = 400
   const MAX_EXAMPLE_PROMPTS = 10
   const [threads, setThreads] = useState<Thread[]>(() => loadThreads())
-  const [activeThreadId, setActiveThreadId] = useState<string | null>(null)
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(() => loadActiveThreadId())
   const [settings, setSettings] = useState(() => loadSettings())
   const [isStreaming, setIsStreaming] = useState(false)
   const [isSending, setIsSending] = useState(false)
@@ -611,19 +667,28 @@ function App() {
   const loadingRef = useRef<Record<string, ThreadLoadingState>>({})
   const autoFetchLastRunRef = useRef<Record<string, number>>({})
   const runtimeOccupancyRef = useRef<Record<string, boolean>>({})
+  const resumingThreadIdRef = useRef<string | null>(null)
 
   const activeThread = useMemo(
     () => threads.find((thread) => thread.id === activeThreadId) ?? null,
     [threads, activeThreadId]
   )
-  const activeThreadStreamStatus = activeThread
-    ? (
-        streamStatusByThread[activeThread.id] ??
-        ((currentStreamRef.current?.threadId === activeThread.id && (isStreaming || isSending))
-          ? 'streaming'
-          : 'complete')
-      )
-    : 'complete'
+  const activeThreadStreamStatus = useMemo(() => {
+    if (!activeThread) {
+      return 'complete' as const
+    }
+    if (streamStatusByThread[activeThread.id] === 'streaming') {
+      return 'streaming' as const
+    }
+    if (
+      activeThread.streamSession ||
+      activeThread.messages.some((message) => message.status === 'streaming') ||
+      (currentStreamRef.current?.threadId === activeThread.id && (isStreaming || isSending))
+    ) {
+      return 'streaming' as const
+    }
+    return streamStatusByThread[activeThread.id] ?? ('complete' as const)
+  }, [activeThread, isSending, isStreaming, streamStatusByThread])
   const activeThreadIsStreaming = activeThreadStreamStatus === 'streaming'
   const activeThreadLoading = useMemo(
     () => (activeThread ? loadingByThread[activeThread.id] ?? createThreadLoadingState() : createThreadLoadingState()),
@@ -696,6 +761,40 @@ function App() {
     setStreamStatusByThread((prev) => ({ ...prev, [threadId]: status }))
   }, [])
 
+  const setThreadStreamSession = useCallback(
+    (
+      threadId: string,
+      streamSession: Thread['streamSession']
+    ) => {
+      updateThread(threadId, (thread) => {
+        const current = thread.streamSession
+        const normalizedNext =
+          streamSession &&
+          (streamSession.streamRequestId ||
+            Number.isFinite(streamSession.lastEventId) ||
+            Number.isFinite(streamSession.updatedAtMs))
+            ? {
+                streamRequestId: streamSession.streamRequestId ?? null,
+                lastEventId: Math.max(0, Number(streamSession.lastEventId) || 0),
+                updatedAtMs: Math.max(0, Number(streamSession.updatedAtMs) || 0)
+              }
+            : null
+        if (
+          (current?.streamRequestId ?? null) === (normalizedNext?.streamRequestId ?? null) &&
+          (current?.lastEventId ?? 0) === (normalizedNext?.lastEventId ?? 0) &&
+          (current?.updatedAtMs ?? 0) === (normalizedNext?.updatedAtMs ?? 0)
+        ) {
+          return thread
+        }
+        return {
+          ...thread,
+          streamSession: normalizedNext
+        }
+      })
+    },
+    [updateThread]
+  )
+
   const applyHeadlessCapacity = useCallback((capacity: HeadlessSessionCapacityInfo) => {
     const occupancyByThread = new Map(
       capacity.occupying_threads.map((entry) => [entry.thread_id, entry] as const)
@@ -757,7 +856,7 @@ function App() {
         if (current && nextThreads.some((thread) => thread.id === current)) {
           return current
         }
-        return nextThreads[0]?.id ?? null
+        return getDefaultActiveThreadId(nextThreads)
       })
       return threadList
     },
@@ -818,14 +917,12 @@ function App() {
           loadSettingsAsync()
         ])
         if (mounted) {
-          if (loadedThreads.length > 0) {
-            setThreads(loadedThreads)
-            setActiveThreadId((current) =>
-              current && loadedThreads.some((thread) => thread.id === current)
-                ? current
-                : loadedThreads[0]?.id ?? null
-            )
-          }
+          setThreads(loadedThreads)
+          setActiveThreadId((current) =>
+            current && loadedThreads.some((thread) => thread.id === current)
+              ? current
+              : getDefaultActiveThreadId(loadedThreads)
+          )
           setSettings(loadedSettings)
         }
       } finally {
@@ -858,6 +955,10 @@ function App() {
       }
     }
   }, [threads, isStorageHydrated])
+
+  useEffect(() => {
+    saveActiveThreadId(activeThreadId)
+  }, [activeThreadId])
 
   useEffect(() => {
     document.documentElement.dataset.theme = settings.theme
@@ -1315,7 +1416,7 @@ function App() {
       if (current !== threadId) {
         return current
       }
-      return nextThreads[0]?.id ?? null
+      return getDefaultActiveThreadId(nextThreads)
     })
     if (settings.backendUrl) {
       try {
@@ -1532,7 +1633,9 @@ function App() {
       const { threadId, runId } = currentStreamRef.current
       updateThread(threadId, (thread) => {
         const messages = finalizeStreamingMessages(thread.messages)
-        return messages === thread.messages ? thread : { ...thread, messages }
+        return messages === thread.messages
+          ? { ...thread, streamSession: null }
+          : { ...thread, messages, streamSession: null }
       })
       setThreadStreamStatus(threadId, 'complete')
       if (streamRunIdRef.current === runId) {
@@ -1574,6 +1677,7 @@ function App() {
       if (!hasPlaceholder) {
         return {
           ...thread,
+          streamSession: null,
           messages: [
             ...thread.messages,
             {
@@ -1589,6 +1693,7 @@ function App() {
       }
       return {
         ...thread,
+        streamSession: null,
         messages: thread.messages.map((item) =>
           item.id === assistantId
             ? {
@@ -1747,7 +1852,11 @@ function App() {
     turnId: string
     assistantId: string
     baselineMessages: Message[]
-    startStream: (handleEvent: (event: StreamEvent) => void, signal: AbortSignal) => Promise<void>
+    startStream: (
+      handleEvent: (event: StreamEvent) => void,
+      signal: AbortSignal,
+      handleSessionStateChange: (state: { streamRequestId: string | null; lastEventId: number }) => void
+    ) => Promise<void>
   }) {
     if (streamAbortRef.current) {
       streamAbortRef.current.abort()
@@ -1789,6 +1898,17 @@ function App() {
     messageIdMapRef.current.clear()
     messageIdMapRef.current.set('initial', assistantId)
     let streamErrorAppended = false
+    let sawTerminalStreamEvent = false
+    const handleSessionStateChange = (state: { streamRequestId: string | null; lastEventId: number }) => {
+      if (streamRunIdRef.current !== runId) {
+        return
+      }
+      setThreadStreamSession(threadId, {
+        streamRequestId: state.streamRequestId,
+        lastEventId: state.lastEventId,
+        updatedAtMs: Date.now()
+      })
+    }
 
     const appendStreamErrorMessage = (error: unknown) => {
       if (streamErrorAppended) {
@@ -1822,6 +1942,7 @@ function App() {
         return
       }
       if (event.event === 'done') {
+        sawTerminalStreamEvent = true
         setThreadStreamStatus(threadId, 'complete')
       }
       if (event.event === 'graph_node' && event.graph_node) {
@@ -1864,14 +1985,27 @@ function App() {
         if (initialId) {
           messageIdMapRef.current.set(messageId, initialId)
           messageIdMapRef.current.delete('initial')
-          updateThread(threadId, (thread) => ({
-            ...thread,
-            messages: thread.messages.map((message) =>
-              message.id === initialId && !message.streamId
-                ? { ...message, streamId: messageId }
-                : message
-            )
-          }))
+          updateThread(threadId, (thread) => {
+            const hasInitialMessage = thread.messages.some((message) => message.id === initialId)
+            if (hasInitialMessage) {
+              return {
+                ...thread,
+                messages: thread.messages.map((message) =>
+                  message.id === initialId && !message.streamId
+                    ? { ...message, streamId: messageId }
+                    : message
+                )
+              }
+            }
+            const placeholder = {
+              ...createAssistantPlaceholder(initialId, Date.now(), turnId),
+              streamId: messageId
+            }
+            return {
+              ...thread,
+              messages: [...thread.messages, placeholder]
+            }
+          })
           return initialId
         }
 
@@ -1928,6 +2062,7 @@ function App() {
       }
 
       if (event.error) {
+        sawTerminalStreamEvent = true
         appendStreamErrorMessage(event.error)
         setThreadStreamStatus(threadId, 'complete')
         return
@@ -2137,7 +2272,7 @@ function App() {
 
     let streamPromise: Promise<void>
     try {
-      streamPromise = startStream(handleStreamEvent, abortController.signal)
+      streamPromise = startStream(handleStreamEvent, abortController.signal, handleSessionStateChange)
     } catch (error) {
       appendStreamErrorMessage(error)
       setThreadStreamStatus(threadId, 'complete')
@@ -2146,9 +2281,28 @@ function App() {
       return
     }
     streamPromise
-      .catch((error) => {
+      .catch(async (error) => {
         if (streamRunIdRef.current !== runId) {
           return
+        }
+        if (error instanceof ApiRequestError && error.status === 409) {
+          const detail = error.detail
+          const streamRequestId =
+            detail && typeof detail === 'object' && 'stream_request_id' in detail
+              ? (detail as { stream_request_id?: string | null }).stream_request_id
+              : null
+          if (typeof streamRequestId === 'string' && streamRequestId.trim().length > 0) {
+            updateThread(threadId, (thread) => ({
+              ...thread,
+              messages: baselineMessages,
+              streamSession: null
+            }))
+            await resumeThreadStream(threadId, {
+              streamRequestId: streamRequestId.trim(),
+              lastEventId: threadsRef.current.find((thread) => thread.id === threadId)?.streamSession?.lastEventId ?? 0
+            })
+            return
+          }
         }
         appendStreamErrorMessage(error)
         setThreadStreamStatus(threadId, 'complete')
@@ -2157,14 +2311,16 @@ function App() {
         if (streamRunIdRef.current !== runId) {
           return
         }
-        updateThread(threadId, (thread) => ({
-          ...thread,
-          messages: thread.messages.map((message) =>
-            message.status === 'streaming'
-              ? { ...message, thinkingActive: false, status: 'final' }
-              : message
-          )
-        }))
+        if (sawTerminalStreamEvent) {
+          updateThread(threadId, (thread) => ({
+            ...thread,
+            messages: thread.messages.map((message) =>
+              message.status === 'streaming'
+                ? { ...message, thinkingActive: false, status: 'final' }
+                : message
+            )
+          }))
+        }
         setThreadStreamStatus(threadId, 'complete')
         setIsStreaming(false)
         setIsSending(false)
@@ -2175,14 +2331,214 @@ function App() {
           currentStreamRef.current = null
         }
         messageIdMapRef.current.clear()
+        if (sawTerminalStreamEvent) {
+          setThreadStreamSession(threadId, null)
+        }
       })
   }
+
+  const clearThreadStreamSessionState = useCallback(
+    (threadId: string, options?: { finalizeMessages?: boolean }) => {
+      setThreadStreamStatus(threadId, 'complete')
+      setThreadStreamSession(threadId, null)
+      if (!options?.finalizeMessages) {
+        return
+      }
+      updateThread(threadId, (thread) => {
+        const messages = finalizeStreamingMessages(thread.messages)
+        return messages === thread.messages ? thread : { ...thread, messages }
+      })
+    },
+    [setThreadStreamSession, setThreadStreamStatus, updateThread]
+  )
+
+  const resumeThreadStream = useCallback(
+    async (
+      threadId: string,
+      options?: {
+        streamRequestId?: string | null
+        lastEventId?: number
+      }
+    ): Promise<boolean> => {
+      if (!settings.backendUrl || backendStatus !== 'online') {
+        return false
+      }
+      if (currentStreamRef.current?.threadId === threadId) {
+        return true
+      }
+
+      const initialThread = threadsRef.current.find((thread) => thread.id === threadId)
+      if (!initialThread) {
+        return false
+      }
+
+      let streamRequestId =
+        (typeof options?.streamRequestId === 'string' && options.streamRequestId.trim().length > 0
+          ? options.streamRequestId.trim()
+          : null) ??
+        (typeof initialThread.streamSession?.streamRequestId === 'string' &&
+        initialThread.streamSession.streamRequestId.trim().length > 0
+          ? initialThread.streamSession.streamRequestId.trim()
+          : null)
+      const lastEventId = Math.max(
+        0,
+        Number(options?.lastEventId ?? initialThread.streamSession?.lastEventId ?? 0) || 0
+      )
+
+      if (!streamRequestId) {
+        const sessionInfo = await getThreadStreamSession(settings.backendUrl, threadId)
+        if (!sessionInfo.resumable || !sessionInfo.stream_request_id) {
+          clearThreadStreamSessionState(threadId, { finalizeMessages: true })
+          return false
+        }
+        streamRequestId = sessionInfo.stream_request_id
+      }
+
+      const thread = threadsRef.current.find((entry) => entry.id === threadId)
+      if (!thread) {
+        return false
+      }
+
+      const existingAssistant = findStreamingAssistantMessage(thread.messages)
+      const turnId = existingAssistant?.turnId ?? getLastUserTurnId(thread.messages) ?? `resume-${Date.now()}`
+      const assistantId = existingAssistant?.id ?? `msg-${Date.now()}-${Math.random()}-assistant-resume`
+      const placeholder =
+        existingAssistant ?? createAssistantPlaceholder(assistantId, Date.now(), turnId)
+      const baselineMessages = existingAssistant ? thread.messages : [...thread.messages, placeholder]
+
+      if (!existingAssistant) {
+        updateThread(threadId, (current) => ({
+          ...current,
+          messages: [...current.messages, placeholder]
+        }))
+      }
+
+      setThreadStreamStatus(threadId, 'streaming')
+      setThreadStreamSession(threadId, {
+        streamRequestId,
+        lastEventId,
+        updatedAtMs: Date.now()
+      })
+      setIsSending(false)
+
+      startThreadStreamRun({
+        threadId,
+        turnId,
+        assistantId,
+        baselineMessages,
+        startStream: (handleEvent, signal, handleSessionStateChange) =>
+          resumeChatStream({
+            baseUrl: settings.backendUrl,
+            threadId,
+            streamRequestId,
+            lastEventId,
+            signal,
+            onEvent: handleEvent,
+            onSessionStateChange: handleSessionStateChange
+          })
+      })
+      return true
+    },
+    [
+      backendStatus,
+      clearThreadStreamSessionState,
+      setThreadStreamSession,
+      setThreadStreamStatus,
+      settings.backendUrl,
+      startThreadStreamRun,
+      updateThread
+    ]
+  )
+
+  useEffect(() => {
+    let cancelled = false
+    const threadId = activeThread?.id
+    if (!isStorageHydrated || !threadId || !settings.backendUrl || backendStatus !== 'online') {
+      return () => {
+        cancelled = true
+      }
+    }
+    if (currentStreamRef.current?.threadId === threadId || resumingThreadIdRef.current === threadId) {
+      return () => {
+        cancelled = true
+      }
+    }
+
+    resumingThreadIdRef.current = threadId
+    const restore = async () => {
+      try {
+        const sessionInfo = await getThreadStreamSession(settings.backendUrl, threadId)
+        if (cancelled) {
+          return
+        }
+        const thread = threadsRef.current.find((entry) => entry.id === threadId)
+        const hasLocalStreamingState = Boolean(thread?.streamSession) || Boolean(
+          thread?.messages.some((message) => message.status === 'streaming')
+        )
+        if (sessionInfo.stream_request_id && (sessionInfo.active || hasLocalStreamingState)) {
+          await resumeThreadStream(threadId, {
+            streamRequestId: sessionInfo.stream_request_id,
+            lastEventId: thread?.streamSession?.lastEventId ?? 0
+          })
+          return
+        }
+        if (thread?.streamSession || thread?.messages.some((message) => message.status === 'streaming')) {
+          clearThreadStreamSessionState(threadId, { finalizeMessages: true })
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.warn(`Failed to restore active stream session for ${threadId}`, error)
+        }
+      } finally {
+        if (resumingThreadIdRef.current === threadId) {
+          resumingThreadIdRef.current = null
+        }
+      }
+    }
+
+    void restore()
+    return () => {
+      cancelled = true
+      if (resumingThreadIdRef.current === threadId) {
+        resumingThreadIdRef.current = null
+      }
+    }
+  }, [
+    activeThread?.id,
+    backendStatus,
+    clearThreadStreamSessionState,
+    isStorageHydrated,
+    resumeThreadStream,
+    settings.backendUrl
+  ])
 
   const handleSend = async (text: string, pendingImages: PendingImageAttachment[] = []) => {
     if (!activeThread) {
       return false
     }
+    if (activeThreadIsStreaming) {
+      return false
+    }
     const threadId = activeThread.id
+    if (settings.backendUrl && backendStatus === 'online') {
+      try {
+        const sessionInfo = await getThreadStreamSession(settings.backendUrl, threadId)
+        if (
+          sessionInfo.stream_request_id &&
+          (sessionInfo.active ||
+            Boolean(activeThread.streamSession) ||
+            activeThread.messages.some((message) => message.status === 'streaming'))
+        ) {
+          await resumeThreadStream(threadId, {
+            streamRequestId: sessionInfo.stream_request_id,
+            lastEventId: activeThread.streamSession?.lastEventId ?? 0
+          })
+          return false
+        }
+      } catch (error) {
+        console.warn(`Failed to probe active stream session for ${threadId}`, error)
+      }
+    }
     const files = pendingImages.map((image) => image.file)
     const { selectedProvider, selectedModel } = resolveThreadSelection(activeThread)
     let attachedImageIds: string[] | undefined
@@ -2204,6 +2560,11 @@ function App() {
 
     setIsSending(true)
     setThreadStreamStatus(threadId, 'streaming')
+    setThreadStreamSession(threadId, {
+      streamRequestId: null,
+      lastEventId: 0,
+      updatedAtMs: now
+    })
     updateThread(
       threadId,
       (thread) => {
@@ -2275,7 +2636,7 @@ function App() {
       turnId,
       assistantId,
       baselineMessages,
-      startStream: (handleEvent, signal) =>
+      startStream: (handleEvent, signal, handleSessionStateChange) =>
         streamChat({
           baseUrl: settings.backendUrl,
           message: text,
@@ -2287,7 +2648,8 @@ function App() {
           vlmProvider: execution.selectedProvider,
           vlmModel: execution.selectedModel,
           signal,
-          onEvent: handleEvent
+          onEvent: handleEvent,
+          onSessionStateChange: handleSessionStateChange
         })
     })
     setPromptHistory((current) => recordPromptHistory(current, text))
@@ -2313,6 +2675,11 @@ function App() {
 
     setIsSending(true)
     setThreadStreamStatus(threadId, 'streaming')
+    setThreadStreamSession(threadId, {
+      streamRequestId: null,
+      lastEventId: 0,
+      updatedAtMs: Date.now()
+    })
     updateThread(
       threadId,
       (thread) => ({
@@ -2339,7 +2706,7 @@ function App() {
       turnId,
       assistantId,
       baselineMessages,
-      startStream: (handleEvent, signal) =>
+      startStream: (handleEvent, signal, handleSessionStateChange) =>
         retryChatStream({
           baseUrl: settings.backendUrl,
           threadId,
@@ -2349,7 +2716,8 @@ function App() {
           vlmProvider: execution.selectedProvider,
           vlmModel: execution.selectedModel,
           signal,
-          onEvent: handleEvent
+          onEvent: handleEvent,
+          onSessionStateChange: handleSessionStateChange
         })
     })
   }

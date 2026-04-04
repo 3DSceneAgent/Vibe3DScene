@@ -123,6 +123,17 @@ export type StreamProgress = {
   done?: boolean
 }
 
+export type ThreadStreamSessionInfo = {
+  thread_id: string
+  active: boolean
+  resumable: boolean
+  stream_request_id?: string | null
+  latest_seq?: number
+  done?: boolean
+  updated_at_ms?: number | null
+  progress?: StreamProgress
+}
+
 export type StreamEvent = {
   messages?: unknown[]
   todos?: TodoItem[]

@@ -10,6 +10,7 @@ import type {
   SceneArtifactManifestInfo,
   SceneInfo,
   StreamEvent,
+  ThreadStreamSessionInfo,
   ThreadHistoryInfo,
   ThreadListInfo,
   ThreadSummaryInfo,
@@ -157,6 +158,7 @@ type StreamChatArgs = {
   vlmProvider?: string
   vlmModel?: string
   onEvent: (event: StreamEvent) => void
+  onSessionStateChange?: (state: { streamRequestId: string | null; lastEventId: number }) => void
   signal?: AbortSignal
 }
 
@@ -169,6 +171,17 @@ type RetryStreamChatArgs = {
   vlmProvider?: string
   vlmModel?: string
   onEvent: (event: StreamEvent) => void
+  onSessionStateChange?: (state: { streamRequestId: string | null; lastEventId: number }) => void
+  signal?: AbortSignal
+}
+
+type ResumeStreamChatArgs = {
+  baseUrl: string
+  threadId: string
+  streamRequestId: string
+  lastEventId?: number
+  onEvent: (event: StreamEvent) => void
+  onSessionStateChange?: (state: { streamRequestId: string | null; lastEventId: number }) => void
   signal?: AbortSignal
 }
 
@@ -348,18 +361,45 @@ async function streamJsonSse({
   url,
   payload,
   onEvent,
+  onSessionStateChange,
+  initialStreamRequestId,
+  initialLastEventId,
   signal
 }: {
   url: string
   payload: Record<string, unknown>
   onEvent: (event: StreamEvent) => void
+  onSessionStateChange?: (state: { streamRequestId: string | null; lastEventId: number }) => void
+  initialStreamRequestId?: string | null
+  initialLastEventId?: number
   signal?: AbortSignal
 }) {
   let sawTerminalEvent = false
-  let resumeStreamId: string | null = null
-  let lastEventId: string | null = null
+  let resumeStreamId: string | null = initialStreamRequestId ?? null
+  let lastEventId: string | null =
+    typeof initialLastEventId === 'number' && Number.isFinite(initialLastEventId) && initialLastEventId > 0
+      ? String(Math.floor(initialLastEventId))
+      : null
   let resumeAttempts = 0
   const maxResumeAttempts = 2
+  let lastPublishedStreamId: string | null = resumeStreamId
+  let lastPublishedEventId = lastEventId ? Math.max(0, Number(lastEventId) || 0) : 0
+
+  const publishSessionState = () => {
+    if (!onSessionStateChange) {
+      return
+    }
+    const normalizedLastEventId = lastEventId ? Math.max(0, Number(lastEventId) || 0) : 0
+    if (resumeStreamId === lastPublishedStreamId && normalizedLastEventId === lastPublishedEventId) {
+      return
+    }
+    lastPublishedStreamId = resumeStreamId
+    lastPublishedEventId = normalizedLastEventId
+    onSessionStateChange({
+      streamRequestId: resumeStreamId,
+      lastEventId: normalizedLastEventId
+    })
+  }
 
   while (!sawTerminalEvent && !signal?.aborted) {
     const requestHeaders: Record<string, string> = {
@@ -389,6 +429,7 @@ async function streamJsonSse({
     const serverStreamId = response.headers.get(STREAM_REQUEST_HEADER)
     if (serverStreamId) {
       resumeStreamId = serverStreamId
+      publishSessionState()
     }
 
     const reader = response.body.getReader()
@@ -403,14 +444,17 @@ async function streamJsonSse({
       }
       if (parsedChunk.eventId) {
         lastEventId = parsedChunk.eventId
+        publishSessionState()
       }
       try {
         const parsed = JSON.parse(parsedChunk.data) as StreamEvent
         if (!parsedChunk.eventId && typeof parsed.seq === 'number') {
           lastEventId = String(parsed.seq)
+          publishSessionState()
         }
         if (parsed.stream_request_id && !resumeStreamId) {
           resumeStreamId = parsed.stream_request_id
+          publishSessionState()
         }
         if (parsed.event === 'done' || parsed.error) {
           sawTerminalEvent = true
@@ -480,6 +524,7 @@ export async function streamChat({
   vlmProvider,
   vlmModel,
   onEvent,
+  onSessionStateChange,
   signal
 }: StreamChatArgs) {
   const payload: Record<string, unknown> = { message, thread_id: threadId }
@@ -505,6 +550,7 @@ export async function streamChat({
     url: `${baseUrl}/chat/stream`,
     payload,
     onEvent,
+    onSessionStateChange,
     signal
   })
 }
@@ -518,6 +564,7 @@ export async function retryChatStream({
   vlmProvider,
   vlmModel,
   onEvent,
+  onSessionStateChange,
   signal
 }: RetryStreamChatArgs) {
   const payload: Record<string, unknown> = {
@@ -540,6 +587,30 @@ export async function retryChatStream({
     url: `${baseUrl}/chat/retry/stream`,
     payload,
     onEvent,
+    onSessionStateChange,
+    signal
+  })
+}
+
+export async function resumeChatStream({
+  baseUrl,
+  threadId,
+  streamRequestId,
+  lastEventId,
+  onEvent,
+  onSessionStateChange,
+  signal
+}: ResumeStreamChatArgs) {
+  await streamJsonSse({
+    url: `${baseUrl}/chat/stream`,
+    payload: {
+      message: '',
+      thread_id: threadId
+    },
+    onEvent,
+    onSessionStateChange,
+    initialStreamRequestId: streamRequestId,
+    initialLastEventId: lastEventId,
     signal
   })
 }
@@ -715,6 +786,28 @@ export async function getThreadHistory(
     scene_revision: typeof data.scene_revision === 'number' ? data.scene_revision : undefined,
     messages: parseHistoryMessages(data.messages),
     todos: Array.isArray(data.todos) ? (data.todos as TodoItem[]) : []
+  }
+}
+
+export async function getThreadStreamSession(
+  baseUrl: string,
+  threadId: string,
+  signal?: AbortSignal
+): Promise<ThreadStreamSessionInfo> {
+  const response = await apiFetch(`${baseUrl}/threads/${threadId}/stream-session`, { signal })
+  if (!response.ok) {
+    throw await buildHttpError(response, `Failed to load thread stream session (${response.status})`)
+  }
+  const data = (await response.json()) as Partial<ThreadStreamSessionInfo>
+  return {
+    thread_id: typeof data.thread_id === 'string' ? data.thread_id : threadId,
+    active: Boolean(data.active),
+    resumable: Boolean(data.resumable),
+    stream_request_id: typeof data.stream_request_id === 'string' ? data.stream_request_id : null,
+    latest_seq: typeof data.latest_seq === 'number' ? data.latest_seq : 0,
+    done: Boolean(data.done),
+    updated_at_ms: typeof data.updated_at_ms === 'number' ? data.updated_at_ms : null,
+    progress: data.progress
   }
 }
 

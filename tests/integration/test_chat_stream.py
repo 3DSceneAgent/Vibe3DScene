@@ -410,6 +410,17 @@ async def fake_get_resumable_agent(_thread_id=None):
     return ResumableAgent()
 
 
+class ActiveSessionAgent:
+    async def astream(self, *_args, **_kwargs):
+        yield ("messages", [{"type": "ai", "content": "hello"}])
+        await asyncio.sleep(1.0)
+        yield ("messages", [{"type": "ai", "content": " world"}])
+
+
+async def fake_get_active_session_agent(_thread_id=None):
+    return ActiveSessionAgent()
+
+
 class OwnershipLossAgent:
     async def astream(self, *_args, **_kwargs):
         await asyncio.sleep(0.5)
@@ -775,6 +786,67 @@ def test_chat_stream_can_resume_with_last_event_id(monkeypatch):
     done_payload = find_payload(payloads, "event")
     assert done_payload is not None
     assert done_payload["event"] == "done"
+
+
+def test_thread_stream_session_route_reports_active_resumable_stream(monkeypatch):
+    client = TestClient(api_module.app)
+    original_sessions = dict(routes_chat._ACTIVE_STREAM_SESSIONS)
+
+    try:
+        routes_chat._ACTIVE_STREAM_SESSIONS.clear()
+        session = routes_chat._ActiveStreamSession(
+            stream_request_id="t-session-route:stream-1",
+            thread_id="t-session-route",
+            request_id="request-1",
+        )
+        session.publish({"delta": "hello"})
+        routes_chat._ACTIVE_STREAM_SESSIONS[session.stream_request_id] = session
+
+        session_response = client.get("/threads/t-session-route/stream-session")
+        assert session_response.status_code == 200
+        payload = session_response.json()
+        assert payload["thread_id"] == "t-session-route"
+        assert payload["active"] is True
+        assert payload["resumable"] is True
+        assert payload["done"] is False
+        assert payload["stream_request_id"] == session.stream_request_id
+        assert isinstance(payload["latest_seq"], int)
+        assert isinstance(payload["progress"], dict)
+    finally:
+        routes_chat._ACTIVE_STREAM_SESSIONS.clear()
+        routes_chat._ACTIVE_STREAM_SESSIONS.update(original_sessions)
+        client.close()
+
+
+def test_chat_stream_conflicts_when_thread_already_has_active_stream(monkeypatch):
+    client = TestClient(api_module.app)
+    original_sessions = dict(routes_chat._ACTIVE_STREAM_SESSIONS)
+
+    try:
+        routes_chat._ACTIVE_STREAM_SESSIONS.clear()
+        session = routes_chat._ActiveStreamSession(
+            stream_request_id="t-stream-conflict:stream-1",
+            thread_id="t-stream-conflict",
+            request_id="request-1",
+        )
+        session.publish({"delta": "hello"})
+        routes_chat._ACTIVE_STREAM_SESSIONS[session.stream_request_id] = session
+
+        conflict_response = client.post(
+            "/chat/stream",
+            json={"message": "new request", "thread_id": "t-stream-conflict"},
+        )
+
+        assert conflict_response.status_code == 409
+        payload = conflict_response.json()["detail"]
+        assert payload["reason"] == "stream_session_active"
+        assert payload["active"] is True
+        assert payload["resumable"] is True
+        assert payload["stream_request_id"] == session.stream_request_id
+    finally:
+        routes_chat._ACTIVE_STREAM_SESSIONS.clear()
+        routes_chat._ACTIVE_STREAM_SESSIONS.update(original_sessions)
+        client.close()
 
 
 def test_chat_stream_resume_does_not_restart_heartbeat_tasks(monkeypatch):

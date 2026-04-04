@@ -48,6 +48,12 @@ export type Message = {
   collapsed?: boolean
 }
 
+export type ThreadStreamSession = {
+  streamRequestId: string | null
+  lastEventId: number
+  updatedAtMs: number
+}
+
 export type Thread = {
   id: string
   title: string
@@ -72,6 +78,7 @@ export type Thread = {
   graphEvents?: GraphNodeStream[]
   occupyingResources?: boolean
   lastRuntimeActiveMs?: number
+  streamSession?: ThreadStreamSession | null
 }
 
 export type ThemeId = 'dark' | 'light'

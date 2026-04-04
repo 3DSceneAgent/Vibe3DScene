@@ -4,6 +4,43 @@ import time
 from scene_agent.interfaces.api import routes_chat
 
 
+def test_build_thread_stream_session_response_handles_missing_session() -> None:
+    payload = routes_chat._build_thread_stream_session_response("thread-missing", None)
+
+    assert payload.thread_id == "thread-missing"
+    assert payload.active is False
+    assert payload.resumable is False
+    assert payload.stream_request_id is None
+    assert payload.latest_seq == 0
+
+
+def test_create_stream_session_for_thread_rejects_second_active_session() -> None:
+    original_sessions = dict(routes_chat._ACTIVE_STREAM_SESSIONS)
+    try:
+        routes_chat._ACTIVE_STREAM_SESSIONS.clear()
+        first_session, first_conflict = routes_chat._create_stream_session_for_thread(
+            thread_id="thread-conflict",
+            request_id="request-1",
+        )
+        assert first_session is not None
+        assert first_conflict is None
+
+        second_session, second_conflict = routes_chat._create_stream_session_for_thread(
+            thread_id="thread-conflict",
+            request_id="request-2",
+        )
+
+        assert second_session is None
+        assert second_conflict is first_session
+        payload = routes_chat._build_thread_stream_session_response("thread-conflict", second_conflict)
+        assert payload.active is True
+        assert payload.resumable is True
+        assert payload.stream_request_id == first_session.stream_request_id
+    finally:
+        routes_chat._ACTIVE_STREAM_SESSIONS.clear()
+        routes_chat._ACTIVE_STREAM_SESSIONS.update(original_sessions)
+
+
 def test_coerce_last_event_id_handles_invalid_values() -> None:
     assert routes_chat._coerce_last_event_id(None) == 0
     assert routes_chat._coerce_last_event_id("") == 0

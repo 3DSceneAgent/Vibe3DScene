@@ -14,6 +14,7 @@ import {
 const THREADS_KEY = 'sceneAgentThreads'
 const SETTINGS_KEY = 'sceneAgentSettings'
 const PROMPT_HISTORY_KEY = 'sceneAgentPromptHistory'
+const ACTIVE_THREAD_KEY = 'sceneAgentActiveThreadId'
 const MAX_MESSAGES_PER_THREAD = 100
 const MAX_STORED_MESSAGE_CHARS = 24000
 const MAX_PROMPT_HISTORY = 30
@@ -111,6 +112,20 @@ function sanitizeThreads(threads: Thread[]): Thread[] {
       sceneHierarchy: [],
       sceneHasChange: false,
       graphEvents: [],
+      streamSession:
+        persistedThread.streamSession &&
+        (persistedThread.streamSession.streamRequestId ||
+          Number.isFinite(persistedThread.streamSession.lastEventId))
+          ? {
+              streamRequestId:
+                typeof persistedThread.streamSession.streamRequestId === 'string' &&
+                persistedThread.streamSession.streamRequestId.trim().length > 0
+                  ? persistedThread.streamSession.streamRequestId
+                  : null,
+              lastEventId: Math.max(0, Number(persistedThread.streamSession.lastEventId) || 0),
+              updatedAtMs: Math.max(0, Number(persistedThread.streamSession.updatedAtMs) || 0)
+            }
+          : null,
       images: threadImages.map((image) => {
         const sanitizedImage = { ...image }
         delete sanitizedImage.previewUrl
@@ -132,7 +147,20 @@ function loadThreadsFromLocalStorage(): Thread[] {
       const images = thread.images ?? referenceImages ?? []
       return {
         ...rest,
-        images
+        images,
+        streamSession:
+          thread.streamSession &&
+          (typeof thread.streamSession.streamRequestId === 'string' || typeof thread.streamSession.lastEventId === 'number')
+            ? {
+                streamRequestId:
+                  typeof thread.streamSession.streamRequestId === 'string' &&
+                  thread.streamSession.streamRequestId.trim().length > 0
+                    ? thread.streamSession.streamRequestId
+                    : null,
+                lastEventId: Math.max(0, Number(thread.streamSession.lastEventId) || 0),
+                updatedAtMs: Math.max(0, Number(thread.streamSession.updatedAtMs) || 0)
+              }
+            : null
       }
     })
   } catch {
@@ -256,6 +284,32 @@ export function saveThreads(threads: Thread[]) {
     })
   } else {
     saveThreadsToLocalStorage(threads)
+  }
+}
+
+export function loadActiveThreadId(): string | null {
+  try {
+    const raw = localStorage.getItem(ACTIVE_THREAD_KEY)
+    if (typeof raw !== 'string') return null
+    const normalized = raw.trim()
+    return normalized || null
+  } catch {
+    return null
+  }
+}
+
+export function saveActiveThreadId(threadId: string | null | undefined): boolean {
+  try {
+    const normalized = typeof threadId === 'string' ? threadId.trim() : ''
+    if (normalized) {
+      localStorage.setItem(ACTIVE_THREAD_KEY, normalized)
+    } else {
+      localStorage.removeItem(ACTIVE_THREAD_KEY)
+    }
+    return true
+  } catch (error) {
+    console.error('Failed to save active thread to localStorage:', error)
+    return false
   }
 }
 

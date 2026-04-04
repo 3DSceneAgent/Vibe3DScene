@@ -18,11 +18,12 @@ from scene_agent.blender.session_manager import SessionResourceError, get_sessio
 from scene_agent.config import get_settings
 from scene_agent.session import get_session_coordinator
 
-from .models import ChatRequest, ChatResponse, RetryChatRequest
+from .models import ChatRequest, ChatResponse, RetryChatRequest, ThreadStreamSessionResponse
 from .shared import (
     assistant_message_display_text,
     build_graph_node_event_payload,
     claim_or_proxy_request,
+    ensure_frontend_client_can_manage_thread,
     extract_message_reasoning_text,
     extract_message_tool_calls,
     extract_graph_step_events,
@@ -37,6 +38,7 @@ from .shared import (
     sanitize_message_for_stream,
     serialize_message,
     set_owner_headers,
+    resolve_frontend_client_id,
     resolve_thread_storage_dir,
     send_blender_command_sync,
 )
@@ -556,17 +558,38 @@ class _ActiveStreamSession:
             progress["done"] = self.done
             return progress
 
+    def summary_snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            progress = dict(self.progress)
+            progress["request_id"] = self.request_id
+            progress["stream_request_id"] = self.stream_request_id
+            progress["latest_seq"] = self.next_seq - 1
+            progress["scene_has_change"] = self.scene_has_change
+            progress["done"] = self.done
+            return {
+                "thread_id": self.thread_id,
+                "stream_request_id": self.stream_request_id,
+                "latest_seq": self.next_seq - 1,
+                "done": self.done,
+                "updated_at_ms": int(self.updated_at * 1000),
+                "progress": progress,
+            }
+
+
+def _prune_expired_stream_sessions_locked(current_time: float) -> None:
+    expired_ids = [
+        stream_id
+        for stream_id, session in _ACTIVE_STREAM_SESSIONS.items()
+        if session.retain_until is not None and session.retain_until <= current_time
+    ]
+    for stream_id in expired_ids:
+        _ACTIVE_STREAM_SESSIONS.pop(stream_id, None)
+
 
 def _prune_expired_stream_sessions(now: float | None = None) -> None:
     current_time = time.time() if now is None else now
     with _ACTIVE_STREAM_SESSIONS_LOCK:
-        expired_ids = [
-            stream_id
-            for stream_id, session in _ACTIVE_STREAM_SESSIONS.items()
-            if session.retain_until is not None and session.retain_until <= current_time
-        ]
-        for stream_id in expired_ids:
-            _ACTIVE_STREAM_SESSIONS.pop(stream_id, None)
+        _prune_expired_stream_sessions_locked(current_time)
 
 
 def _register_stream_session(session: _ActiveStreamSession) -> None:
@@ -579,6 +602,81 @@ def _get_stream_session(stream_request_id: str) -> _ActiveStreamSession | None:
     _prune_expired_stream_sessions()
     with _ACTIVE_STREAM_SESSIONS_LOCK:
         return _ACTIVE_STREAM_SESSIONS.get(stream_request_id)
+
+
+def _find_thread_stream_session(
+    thread_id: str,
+    *,
+    include_done: bool = True,
+) -> _ActiveStreamSession | None:
+    _prune_expired_stream_sessions()
+    with _ACTIVE_STREAM_SESSIONS_LOCK:
+        candidates = [
+            session
+            for session in _ACTIVE_STREAM_SESSIONS.values()
+            if session.thread_id == thread_id and (include_done or not session.is_done())
+        ]
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda session: (
+            1 if session.is_done() else 0,
+            -float(session.summary_snapshot().get("updated_at_ms", 0)),
+        )
+    )
+    return candidates[0]
+
+
+def _create_stream_session_for_thread(
+    *,
+    thread_id: str,
+    request_id: str,
+    lease_token: str | None = None,
+    lease_epoch: int | None = None,
+) -> tuple[_ActiveStreamSession | None, _ActiveStreamSession | None]:
+    now = time.time()
+    with _ACTIVE_STREAM_SESSIONS_LOCK:
+        _prune_expired_stream_sessions_locked(now)
+        for session in _ACTIVE_STREAM_SESSIONS.values():
+            if session.thread_id != thread_id or session.is_done():
+                continue
+            return None, session
+        session = _ActiveStreamSession(
+            stream_request_id=f"{thread_id}:{uuid.uuid4().hex}",
+            thread_id=thread_id,
+            request_id=request_id,
+            lease_token=lease_token,
+            lease_epoch=lease_epoch,
+        )
+        _ACTIVE_STREAM_SESSIONS[session.stream_request_id] = session
+        return session, None
+
+
+def _build_thread_stream_session_response(
+    thread_id: str,
+    session: _ActiveStreamSession | None,
+) -> ThreadStreamSessionResponse:
+    if session is None:
+        return ThreadStreamSessionResponse(
+            thread_id=thread_id,
+            active=False,
+            resumable=False,
+        )
+    summary = session.summary_snapshot()
+    return ThreadStreamSessionResponse(
+        thread_id=thread_id,
+        active=not bool(summary.get("done")),
+        resumable=True,
+        stream_request_id=(
+            str(summary.get("stream_request_id"))
+            if isinstance(summary.get("stream_request_id"), str) and summary.get("stream_request_id")
+            else None
+        ),
+        latest_seq=int(summary.get("latest_seq") or 0),
+        done=bool(summary.get("done")),
+        updated_at_ms=int(summary.get("updated_at_ms") or 0) or None,
+        progress=summary.get("progress") if isinstance(summary.get("progress"), dict) else {},
+    )
 
 
 async def _expire_stream_session_later(stream_request_id: str) -> None:
@@ -1280,14 +1378,25 @@ async def _build_chat_stream_response(
                 detail="Stream session not found or expired. Start a new stream request.",
             )
     else:
-        session = _ActiveStreamSession(
-            stream_request_id=f"{request.thread_id}:{uuid.uuid4().hex}",
+        session, conflicting_session = _create_stream_session_for_thread(
             thread_id=request.thread_id,
             request_id=f"{request.thread_id}:{int(time.time() * 1000)}",
             lease_token=getattr(resolution, "lease_token", None),
             lease_epoch=getattr(resolution, "lease_epoch", None),
         )
-        _register_stream_session(session)
+        if session is None:
+            conflicting_payload = _build_thread_stream_session_response(
+                request.thread_id,
+                conflicting_session,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "A stream is already active for this thread. Resume it before sending a new message.",
+                    "reason": "stream_session_active",
+                    **conflicting_payload.model_dump(),
+                },
+            )
         session.producer_task = asyncio.create_task(
             _produce_stream_events(
                 session=session,
@@ -1382,6 +1491,14 @@ async def chat_stream(request: ChatRequest, request_http: Request):
         request_http=request_http,
         resolution=resolution,
     )
+
+
+@router.get("/threads/{thread_id}/stream-session", response_model=ThreadStreamSessionResponse)
+async def get_thread_stream_session(thread_id: str, request: Request):
+    request_client_id = resolve_frontend_client_id(request)
+    ensure_frontend_client_can_manage_thread(thread_id, request_client_id)
+    session = _find_thread_stream_session(thread_id, include_done=True)
+    return _build_thread_stream_session_response(thread_id, session)
 
 
 @router.post("/chat/retry/stream")

@@ -1613,6 +1613,17 @@ class ThreadHistoryResponse(BaseModel):
     todos: list[Dict[str, Any]] = Field(default_factory=list)
 
 
+class ThreadStreamSessionResponse(BaseModel):
+    thread_id: str
+    active: bool
+    resumable: bool
+    stream_request_id: str | None = None
+    latest_seq: int = 0
+    done: bool = False
+    updated_at_ms: int | None = None
+    progress: dict[str, Any] = Field(default_factory=dict)
+
+
 class SceneArtifactRenderResponse(BaseModel):
     camera_name: str
     image_url: str
