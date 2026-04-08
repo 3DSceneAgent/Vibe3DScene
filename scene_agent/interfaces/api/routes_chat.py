@@ -18,7 +18,14 @@ from scene_agent.blender.session_manager import SessionResourceError, get_sessio
 from scene_agent.config import get_settings
 from scene_agent.session import get_session_coordinator
 
-from .models import ChatRequest, ChatResponse, RetryChatRequest, ThreadStreamSessionResponse
+from .models import (
+    ChatRequest,
+    ChatResponse,
+    RetryChatRequest,
+    ThreadStreamSessionResponse,
+    ThreadStreamSessionStopRequest,
+    ThreadStreamSessionStopResponse,
+)
 from .shared import (
     assistant_message_display_text,
     build_graph_node_event_payload,
@@ -451,15 +458,27 @@ class _ActiveStreamSession:
     lease_heartbeat_task: asyncio.Task | None = None
     stop_requested: bool = False
     termination_reason: str | None = None
+    llm_input_tokens_exact: bool = True
+    llm_output_tokens_exact: bool = True
+    llm_total_tokens_exact: bool = True
+    image_input_tokens_exact: bool = True
+    peak_context_exact: bool = True
     progress: dict[str, Any] = field(
         default_factory=lambda: {
             "task_mode": "unknown",
             "graph_steps": 0,
             "last_node": None,
             "tool_events": 0,
+            "tool_calls_started": 0,
             "assistant_chunks": 0,
             "todo_total": 0,
             "todo_completed": 0,
+            "llm_input_tokens": 0,
+            "llm_output_tokens": 0,
+            "llm_total_tokens": 0,
+            "image_input_tokens": 0,
+            "peak_context_used_tokens": None,
+            "peak_context_limit_tokens": None,
         }
     )
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -532,6 +551,10 @@ class _ActiveStreamSession:
         with self.lock:
             self.progress["tool_events"] = int(self.progress["tool_events"]) + 1
 
+    def note_tool_call_started(self) -> None:
+        with self.lock:
+            self.progress["tool_calls_started"] = int(self.progress["tool_calls_started"]) + 1
+
     def note_assistant_chunk(self) -> None:
         with self.lock:
             self.progress["assistant_chunks"] = int(self.progress["assistant_chunks"]) + 1
@@ -547,6 +570,58 @@ class _ActiveStreamSession:
         with self.lock:
             self.progress["todo_total"] = total
             self.progress["todo_completed"] = completed
+
+    def note_llm_call_record(self, record: dict[str, Any]) -> None:
+        def _coerce_int(value: Any) -> int | None:
+            try:
+                if value is None or value == "":
+                    return None
+                return max(0, int(value))
+            except (TypeError, ValueError):
+                return None
+
+        with self.lock:
+            input_tokens = _coerce_int(record.get("input_tokens"))
+            if input_tokens is None:
+                self.llm_input_tokens_exact = False
+                self.progress["llm_input_tokens"] = None
+                self.peak_context_exact = False
+                self.progress["peak_context_used_tokens"] = None
+                self.progress["peak_context_limit_tokens"] = None
+            elif self.llm_input_tokens_exact:
+                current_input = self.progress.get("llm_input_tokens")
+                self.progress["llm_input_tokens"] = int(current_input or 0) + input_tokens
+                if self.peak_context_exact:
+                    current_peak = self.progress.get("peak_context_used_tokens")
+                    current_peak_value = _coerce_int(current_peak)
+                    if current_peak_value is None or input_tokens > current_peak_value:
+                        self.progress["peak_context_used_tokens"] = input_tokens
+                        self.progress["peak_context_limit_tokens"] = _coerce_int(record.get("context_limit_tokens"))
+
+            output_tokens = _coerce_int(record.get("output_tokens"))
+            if output_tokens is None:
+                self.llm_output_tokens_exact = False
+                self.progress["llm_output_tokens"] = None
+            elif self.llm_output_tokens_exact:
+                current_output = self.progress.get("llm_output_tokens")
+                self.progress["llm_output_tokens"] = int(current_output or 0) + output_tokens
+
+            total_tokens = _coerce_int(record.get("total_tokens"))
+            if total_tokens is None:
+                self.llm_total_tokens_exact = False
+                self.progress["llm_total_tokens"] = None
+            elif self.llm_total_tokens_exact:
+                current_total = self.progress.get("llm_total_tokens")
+                self.progress["llm_total_tokens"] = int(current_total or 0) + total_tokens
+
+            has_image_inputs = record.get("has_image_inputs") is True
+            image_input_tokens = _coerce_int(record.get("image_input_tokens"))
+            if has_image_inputs and image_input_tokens is None:
+                self.image_input_tokens_exact = False
+                self.progress["image_input_tokens"] = None
+            elif image_input_tokens is not None and self.image_input_tokens_exact:
+                current_image = self.progress.get("image_input_tokens")
+                self.progress["image_input_tokens"] = int(current_image or 0) + image_input_tokens
 
     def progress_snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -663,17 +738,18 @@ def _build_thread_stream_session_response(
             resumable=False,
         )
     summary = session.summary_snapshot()
+    done = bool(summary.get("done"))
     return ThreadStreamSessionResponse(
         thread_id=thread_id,
-        active=not bool(summary.get("done")),
-        resumable=True,
+        active=not done,
+        resumable=not done,
         stream_request_id=(
             str(summary.get("stream_request_id"))
             if isinstance(summary.get("stream_request_id"), str) and summary.get("stream_request_id")
             else None
         ),
         latest_seq=int(summary.get("latest_seq") or 0),
-        done=bool(summary.get("done")),
+        done=done,
         updated_at_ms=int(summary.get("updated_at_ms") or 0) or None,
         progress=summary.get("progress") if isinstance(summary.get("progress"), dict) else {},
     )
@@ -791,6 +867,12 @@ def _build_heartbeat_payload(session: _ActiveStreamSession) -> dict[str, Any]:
     }
 
 
+def _attach_progress(session: _ActiveStreamSession, payload: dict[str, Any]) -> dict[str, Any]:
+    next_payload = dict(payload)
+    next_payload["progress"] = session.progress_snapshot()
+    return next_payload
+
+
 async def _run_stream_runtime_heartbeat(
     *,
     session: _ActiveStreamSession,
@@ -871,6 +953,7 @@ async def _produce_stream_events(
     streamed_assistant_snapshots: dict[str, tuple[str, str]] = {}
     announced_tool_call_keys: set[str] = set()
     saw_unidentified_assistant_delta = False
+    last_unidentified_assistant_snapshot: tuple[str, str] | None = None
     scene_has_change = False
     done_payload: dict[str, Any] | None = None
     next_event_task: asyncio.Task | None = None
@@ -1064,12 +1147,18 @@ async def _produce_stream_events(
                         step_index=graph_step_index,
                         update=node_update,
                     )
-                    session.publish(graph_event_payload)
+                    llm_call_records_payload = node_update.get("llm_call_records")
+                    if isinstance(llm_call_records_payload, list):
+                        for record in llm_call_records_payload:
+                            if isinstance(record, dict):
+                                session.note_llm_call_record(record)
+
+                    session.publish(_attach_progress(session, graph_event_payload))
 
                     todos_payload = node_update.get("todos")
                     if isinstance(todos_payload, list) and len(todos_payload) > 0:
                         session.note_todos(todos_payload)
-                        session.publish({"todos": todos_payload})
+                        session.publish(_attach_progress(session, {"todos": todos_payload}))
 
                     node_messages = node_update.get("messages")
                     node_messages_list: list[Any] = []
@@ -1094,20 +1183,21 @@ async def _produce_stream_events(
                     if not content_text and not reasoning_text:
                         continue
                     node_message_id = serialized_node_message.get("id")
+                    current_snapshot = (content_text, reasoning_text)
                     if (
                         isinstance(node_message_id, str)
                         and node_message_id
                         and node_message_id in streamed_assistant_message_ids
                     ):
                         previous_snapshot = streamed_assistant_snapshots.get(node_message_id)
-                        current_snapshot = (content_text, reasoning_text)
                         if previous_snapshot == current_snapshot:
                             continue
                     if (
                         (not isinstance(node_message_id, str) or not node_message_id)
                         and saw_unidentified_assistant_delta
                     ):
-                        continue
+                        if last_unidentified_assistant_snapshot == current_snapshot:
+                            continue
                     filtered_update_non_tool_messages.append(node_message)
             if is_message_stream:
                 messages = stream_payload if mode == "messages" else [mode]
@@ -1164,9 +1254,8 @@ async def _produce_stream_events(
                             tool_call_id = tool_call.get("id")
                             if isinstance(tool_call_id, str) and tool_call_id:
                                 payload["tool_call"]["id"] = tool_call_id
-                            session.publish(
-                                payload
-                            )
+                            session.note_tool_call_started()
+                            session.publish(_attach_progress(session, payload))
                     if message_type in {"human", "system"}:
                         continue
                     if message_type == "tool":
@@ -1175,7 +1264,7 @@ async def _produce_stream_events(
                             "messages": [serialized_stream],
                             "scene_has_change": scene_has_change,
                         }
-                        session.publish(tool_event_payload)
+                        session.publish(_attach_progress(session, tool_event_payload))
                         continue
                     message_id = serialized_stream.get("id")
                     if isinstance(message_id, str) and message_id in existing_message_ids:
@@ -1183,10 +1272,13 @@ async def _produce_stream_events(
                     if is_message_stream and reasoning_text:
                         session.note_assistant_chunk()
                         session.publish(
-                            {
-                                "thinking_delta": reasoning_text,
-                                "message_id": message_id,
-                            }
+                            _attach_progress(
+                                session,
+                                {
+                                    "thinking_delta": reasoning_text,
+                                    "message_id": message_id,
+                                },
+                            )
                         )
                     delta = display_text
                     if not delta and not (reasoning_text and not is_message_stream):
@@ -1206,30 +1298,37 @@ async def _produce_stream_events(
                             streamed_assistant_snapshots[message_id] = (display_text, reasoning_text)
                         else:
                             saw_unidentified_assistant_delta = True
+                            last_unidentified_assistant_snapshot = (display_text, reasoning_text)
                         event_payload = {"delta": delta, "message_id": message_id}
-                        session.publish(event_payload)
+                        session.publish(_attach_progress(session, event_payload))
                     else:
                         session.note_assistant_chunk()
+                        if not message_id:
+                            saw_unidentified_assistant_delta = True
+                            last_unidentified_assistant_snapshot = (display_text, reasoning_text)
                         message_event_payload = {"messages": [serialized_stream]}
-                        session.publish(message_event_payload)
+                        session.publish(_attach_progress(session, message_event_payload))
 
-        done_payload = {"event": "done", "scene_has_change": scene_has_change}
+        done_payload = _attach_progress(session, {"event": "done", "scene_has_change": scene_has_change})
         coordinator.touch_activity(request.thread_id, lease_epoch=session.lease_epoch)
     except HTTPException as e:
         detail = e.detail if isinstance(e.detail, str) else json.dumps(e.detail, ensure_ascii=False)
-        session.publish({"error": detail, "status_code": e.status_code})
-        done_payload = {"event": "done", "scene_has_change": scene_has_change}
+        session.publish(_attach_progress(session, {"error": detail, "status_code": e.status_code}))
+        done_payload = _attach_progress(session, {"event": "done", "scene_has_change": scene_has_change})
     except SessionResourceError as e:
         session.publish(
-            {
-                "error": e.error,
-                "reason": e.reason,
-                "limits": e.limits,
-                "in_use": e.in_use,
-                "status_code": 503,
-            }
+            _attach_progress(
+                session,
+                {
+                    "error": e.error,
+                    "reason": e.reason,
+                    "limits": e.limits,
+                    "in_use": e.in_use,
+                    "status_code": 503,
+                },
+            )
         )
-        done_payload = {"event": "done", "scene_has_change": scene_has_change}
+        done_payload = _attach_progress(session, {"event": "done", "scene_has_change": scene_has_change})
     except Exception as e:
         logging.getLogger("scene_agent").exception(
             "stream_failed_traceback request_id=%s thread_id=%s stream_request_id=%s",
@@ -1250,8 +1349,8 @@ async def _produce_stream_events(
                 "recent_stream_events": list(recent_stream_events),
             },
         )
-        session.publish({"error": str(e)})
-        done_payload = {"event": "done", "scene_has_change": scene_has_change}
+        session.publish(_attach_progress(session, {"error": str(e)}))
+        done_payload = _attach_progress(session, {"event": "done", "scene_has_change": scene_has_change})
     finally:
         if next_event_task is not None and not next_event_task.done():
             next_event_task.cancel()
@@ -1499,6 +1598,62 @@ async def get_thread_stream_session(thread_id: str, request: Request):
     ensure_frontend_client_can_manage_thread(thread_id, request_client_id)
     session = _find_thread_stream_session(thread_id, include_done=True)
     return _build_thread_stream_session_response(thread_id, session)
+
+
+@router.post("/threads/{thread_id}/stream-session/stop", response_model=ThreadStreamSessionStopResponse)
+async def stop_thread_stream_session(
+    thread_id: str,
+    payload: ThreadStreamSessionStopRequest,
+    request: Request,
+):
+    request_client_id = resolve_frontend_client_id(request)
+    ensure_frontend_client_can_manage_thread(thread_id, request_client_id)
+    session = _find_thread_stream_session(thread_id, include_done=True)
+    requested_stream_id = (
+        payload.stream_request_id.strip()
+        if isinstance(payload.stream_request_id, str) and payload.stream_request_id.strip()
+        else None
+    )
+    if session is None:
+        return ThreadStreamSessionStopResponse(
+            thread_id=thread_id,
+            stream_request_id=requested_stream_id,
+            accepted=False,
+            already_requested=False,
+            done=True,
+        )
+
+    if (
+        requested_stream_id
+        and requested_stream_id != session.stream_request_id
+        and not session.is_done()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "Active stream session does not match requested stream_request_id.",
+                "thread_id": thread_id,
+                "stream_request_id": session.stream_request_id,
+            },
+        )
+
+    if session.is_done():
+        return ThreadStreamSessionStopResponse(
+            thread_id=thread_id,
+            stream_request_id=session.stream_request_id,
+            accepted=False,
+            already_requested=session.should_stop(),
+            done=True,
+        )
+
+    first_request = session.request_stop(reason="user_stop")
+    return ThreadStreamSessionStopResponse(
+        thread_id=thread_id,
+        stream_request_id=session.stream_request_id,
+        accepted=True,
+        already_requested=not first_request,
+        done=session.is_done(),
+    )
 
 
 @router.post("/chat/retry/stream")

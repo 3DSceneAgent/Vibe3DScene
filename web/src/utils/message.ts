@@ -155,6 +155,7 @@ const REASONING_LIKE_CONTENT_TYPES = new Set([
   'reasoning_content',
   'summary_text'
 ])
+const VISIBLE_TEXT_CONTENT_TYPES = new Set(['text', 'output_text', 'text_delta'])
 
 function hasThoughtSignature(content: unknown): boolean {
   if (!content || typeof content !== 'object') return false
@@ -165,6 +166,23 @@ function hasThoughtSignature(content: unknown): boolean {
   if (maybe.thought === true) return true
   if (typeof maybe.thought_signature === 'string' && maybe.thought_signature) return true
   return false
+}
+
+function isExplicitReasoningContent(
+  content: unknown,
+  type: string,
+  maybe: { thought?: unknown; text?: unknown; content?: unknown }
+): boolean {
+  if (REASONING_LIKE_CONTENT_TYPES.has(type)) return true
+  if (maybe.thought === true) return true
+  if (!hasThoughtSignature(content)) return false
+  if (
+    VISIBLE_TEXT_CONTENT_TYPES.has(type) &&
+    (typeof maybe.text === 'string' || typeof maybe.content === 'string')
+  ) {
+    return false
+  }
+  return true
 }
 
 function normalizeContentItem(content: unknown): string {
@@ -182,13 +200,14 @@ function normalizeContentItem(content: unknown): string {
     base64?: string
     url?: string
     image_url?: { url?: string }
+    thought?: unknown
   }
 
   const type = typeof maybe.type === 'string' ? maybe.type.toLowerCase() : ''
   if (TOOL_LIKE_CONTENT_TYPES.has(type)) {
     return ''
   }
-  if (REASONING_LIKE_CONTENT_TYPES.has(type) || hasThoughtSignature(content)) {
+  if (isExplicitReasoningContent(content, type, maybe)) {
     return ''
   }
 
@@ -242,10 +261,11 @@ function normalizeThinkingItem(content: unknown, allowPlainString: boolean = fal
     value?: unknown
     extras?: { signature?: unknown }
     additional_kwargs?: { reasoning_content?: unknown; reasoning?: unknown }
+    thought?: unknown
   }
 
   const type = typeof maybe.type === 'string' ? maybe.type.toLowerCase() : ''
-  if (REASONING_LIKE_CONTENT_TYPES.has(type) || hasThoughtSignature(content)) {
+  if (isExplicitReasoningContent(content, type, maybe)) {
     if (typeof maybe.thinking === 'string') return maybe.thinking
     if (typeof maybe.reasoning === 'string') return maybe.reasoning
     if (typeof maybe.text === 'string') return maybe.text

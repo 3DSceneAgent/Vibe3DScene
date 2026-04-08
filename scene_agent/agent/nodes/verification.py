@@ -22,7 +22,7 @@ from scene_agent.utils.verification_helpers import (
     build_verification_scene_context,
 )
 
-from .shared import latest_human_message, resolve_verification_assets
+from .shared import latest_human_message, latest_human_turn_id, resolve_verification_assets
 
 
 def _run_penetration_check(state: AgentState) -> dict[str, Any]:
@@ -95,7 +95,7 @@ def verify_node(
     ]
 
     try:
-        verification_payload = verify_render_with_references(
+        verification_result_with_metrics = verify_render_with_references(
             render_path=render_path,
             reference_paths=reference_paths,
             user_request=latest_human_message(state),
@@ -105,13 +105,25 @@ def verify_node(
             provider_name=provider_name,
             api_key=api_key,
             model=model,
+            thread_id=str(state.get("thread_id") or "default"),
+            turn_id=latest_human_turn_id(state),
+            return_metrics=True,
         )
+        if (
+            isinstance(verification_result_with_metrics, tuple)
+            and len(verification_result_with_metrics) == 2
+        ):
+            verification_payload, llm_call_records = verification_result_with_metrics
+        else:
+            verification_payload = verification_result_with_metrics
+            llm_call_records = []
     except Exception as exc:
         verification_payload = {
             "status": "working",
             "reason": f"Verification failed due to render/VLM error: {exc}",
             "edit_suggestions": [],
         }
+        llm_call_records = []
 
     penetration_check = _run_penetration_check(state)
     verification_result, normalized_payload = merge_verification_with_penetration(
@@ -141,7 +153,7 @@ def verify_node(
     verification_tool_call_id = (
         "verification_" + hashlib.sha1(str(render_path).encode("utf-8")).hexdigest()[:12]
     )
-    return {
+    result = {
         "messages": [
             ToolMessage(
                 name="verification",
@@ -152,6 +164,9 @@ def verify_node(
         "last_verified_path": render_path,
         "verification_result": verification_result,
     }
+    if llm_call_records:
+        result["llm_call_records"] = llm_call_records
+    return result
 
 
 __all__ = [

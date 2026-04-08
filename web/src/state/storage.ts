@@ -74,6 +74,31 @@ function sanitizeMessageContent(content: string): string {
   return next
 }
 
+function normalizePersistedMessages(messages: Thread['messages'] | undefined): Thread['messages'] {
+  if (!Array.isArray(messages)) {
+    return []
+  }
+  return messages.map((message) => {
+    const nextStatus = message.status === 'streaming' ? 'final' : message.status
+    return {
+      ...message,
+      status: nextStatus,
+      thinkingActive: false
+    }
+  })
+}
+
+function normalizeLoadedThread(thread: Thread & { referenceImages?: Thread['images'] }): Thread {
+  const { referenceImages, ...rest } = thread
+  const images = thread.images ?? referenceImages ?? []
+  return {
+    ...rest,
+    messages: normalizePersistedMessages(thread.messages),
+    images,
+    streamSession: null
+  }
+}
+
 function sanitizeThreads(threads: Thread[]): Thread[] {
   return threads.map((thread) => {
     const persistedThread: Thread = { ...thread }
@@ -84,6 +109,7 @@ function sanitizeThreads(threads: Thread[]): Thread[] {
     // Limit messages per thread to avoid storage overflow
     const messages = persistedThread.messages.slice(-MAX_MESSAGES_PER_THREAD).map((message) => {
       const nextMessage = { ...message }
+      const nextStatus = nextMessage.status === 'streaming' ? 'final' : nextMessage.status
       delete nextMessage.raw
       delete nextMessage.toolPayload
       if (nextMessage.toolMedia) {
@@ -100,7 +126,9 @@ function sanitizeThreads(threads: Thread[]): Thread[] {
       }
       return {
         ...nextMessage,
-        content: sanitizeMessageContent(nextMessage.content)
+        content: sanitizeMessageContent(nextMessage.content),
+        status: nextStatus,
+        thinkingActive: false
       }
     })
     
@@ -112,20 +140,7 @@ function sanitizeThreads(threads: Thread[]): Thread[] {
       sceneHierarchy: [],
       sceneHasChange: false,
       graphEvents: [],
-      streamSession:
-        persistedThread.streamSession &&
-        (persistedThread.streamSession.streamRequestId ||
-          Number.isFinite(persistedThread.streamSession.lastEventId))
-          ? {
-              streamRequestId:
-                typeof persistedThread.streamSession.streamRequestId === 'string' &&
-                persistedThread.streamSession.streamRequestId.trim().length > 0
-                  ? persistedThread.streamSession.streamRequestId
-                  : null,
-              lastEventId: Math.max(0, Number(persistedThread.streamSession.lastEventId) || 0),
-              updatedAtMs: Math.max(0, Number(persistedThread.streamSession.updatedAtMs) || 0)
-            }
-          : null,
+      streamSession: null,
       images: threadImages.map((image) => {
         const sanitizedImage = { ...image }
         delete sanitizedImage.previewUrl
@@ -141,28 +156,7 @@ function loadThreadsFromLocalStorage(): Thread[] {
     if (!raw) return []
     const parsed = JSON.parse(raw) as Array<Thread & { referenceImages?: Thread['images'] }>
     if (!Array.isArray(parsed)) return []
-    return parsed.map((thread) => {
-      const threadAny = thread as Thread & { referenceImages?: Thread['images'] }
-      const { referenceImages, ...rest } = threadAny
-      const images = thread.images ?? referenceImages ?? []
-      return {
-        ...rest,
-        images,
-        streamSession:
-          thread.streamSession &&
-          (typeof thread.streamSession.streamRequestId === 'string' || typeof thread.streamSession.lastEventId === 'number')
-            ? {
-                streamRequestId:
-                  typeof thread.streamSession.streamRequestId === 'string' &&
-                  thread.streamSession.streamRequestId.trim().length > 0
-                    ? thread.streamSession.streamRequestId
-                    : null,
-                lastEventId: Math.max(0, Number(thread.streamSession.lastEventId) || 0),
-                updatedAtMs: Math.max(0, Number(thread.streamSession.updatedAtMs) || 0)
-              }
-            : null
-      }
-    })
+    return parsed.map((thread) => normalizeLoadedThread(thread))
   } catch {
     return []
   }
@@ -251,7 +245,7 @@ export async function loadThreadsAsync(): Promise<Thread[]> {
     try {
       const threads = await loadThreadsFromIndexedDB()
       if (threads.length > 0) {
-        return threads
+        return threads.map((thread) => normalizeLoadedThread(thread))
       }
       // Try to migrate from localStorage if IndexedDB is empty
       const localThreads = loadThreadsFromLocalStorage()

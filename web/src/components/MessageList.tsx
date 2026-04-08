@@ -5,6 +5,37 @@ import { MarkdownMessage } from './MarkdownMessage'
 import { parseTodos } from '../utils/message'
 import { resolveMediaUrl } from '../utils/url'
 
+const VIBE3D_SCENE_ICON_URL = '/vibe3dscene_icon.png'
+
+function AgentChatAvatar() {
+  return (
+    <div
+      className="chat-avatar chat-avatar-agent"
+      role="img"
+      aria-label="Vibe3DScene Agent"
+    >
+      <img src={VIBE3D_SCENE_ICON_URL} alt="" decoding="async" />
+    </div>
+  )
+}
+
+function UserChatAvatar() {
+  return (
+    <div
+      className="chat-avatar chat-avatar-user"
+      role="img"
+      aria-label="You"
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path
+          fill="currentColor"
+          d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"
+        />
+      </svg>
+    </div>
+  )
+}
+
 type MessageListProps = {
   messages: Message[]
   backendUrl: string
@@ -62,7 +93,24 @@ function groupMessagesIntoConversationTurns(messages: Message[]): ConversationTu
   return turns
 }
 
-export function MessageList({ messages, backendUrl, streamStatus, onRetryTurn }: MessageListProps) {
+function hasVisibleTurnOutput(messages: Message[]): boolean {
+  return messages.some((message) => {
+    if (message.role === 'assistant') {
+      return message.status === 'error' || message.content.trim().length > 0
+    }
+    if (message.role === 'tool') {
+      return message.status !== 'streaming'
+    }
+    return false
+  })
+}
+
+export function MessageList({
+  messages,
+  backendUrl,
+  streamStatus,
+  onRetryTurn
+}: MessageListProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const shouldStickToBottomRef = useRef(true)
   const scrollRafRef = useRef<number | null>(null)
@@ -158,27 +206,30 @@ const UserMessageItem = memo(
 
     return (
       <div className="message-row user">
-        <div className="message-bubble user">
-          {attachedImages.length > 0 && (
-            <div className="message-attachments" aria-label="Attached images">
-              {attachedImages.map((image) => (
-                <div className="message-attachment" key={image.id}>
-                  {image.previewUrl || image.asset_url ? (
-                    <img
-                      src={image.previewUrl || resolveMediaUrl(image.asset_url || undefined, backendUrl)}
-                      alt={image.filename}
-                    />
-                  ) : (
-                    <div className="message-attachment-placeholder">{image.filename}</div>
-                  )}
-                </div>
-              ))}
+        <div className="message-stack user">
+          <div className="message-bubble user">
+            {attachedImages.length > 0 && (
+              <div className="message-attachments" aria-label="Attached images">
+                {attachedImages.map((image) => (
+                  <div className="message-attachment" key={image.id}>
+                    {image.previewUrl || image.asset_url ? (
+                      <img
+                        src={image.previewUrl || resolveMediaUrl(image.asset_url || undefined, backendUrl)}
+                        alt={image.filename}
+                      />
+                    ) : (
+                      <div className="message-attachment-placeholder">{image.filename}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="message-content">
+              <MarkdownMessage content={message.content || ' '} backendUrl={backendUrl} />
             </div>
-          )}
-          <div className="message-content">
-            <MarkdownMessage content={message.content || ' '} backendUrl={backendUrl} />
           </div>
         </div>
+        <UserChatAvatar />
       </div>
     )
   },
@@ -203,36 +254,54 @@ const AssistantTurn = memo(
       (message) => message.role === 'tool' && message.status === 'streaming'
     )
     const hasError = messages.some((message) => message.status === 'error')
+    const isTurnComplete = !isActiveTurn
+    const hasVisibleOutput = hasVisibleTurnOutput(messages)
     const showThinkingFooter = isActiveTurn && !hasPendingTool && !hasError
-    const canRetry = Boolean(retryTurnId && onRetryTurn && (!isActiveTurn || hasError))
+    const canRetry = Boolean(retryTurnId && onRetryTurn && isTurnComplete && hasVisibleOutput)
 
     return (
-      <div className="assistant-turn">
-        {messages.map((message) => (
-          <AssistantTurnItem key={message.id} message={message} backendUrl={backendUrl} />
-        ))}
-        {showThinkingFooter && <TurnThinkingFooter />}
-        {canRetry && retryTurnId && onRetryTurn && (
-          <div className="assistant-turn-actions">
-            <button
-              type="button"
-              className="assistant-turn-retry-btn"
-              aria-label="重试"
-              data-label="重试"
-              title="重试"
-              onClick={() => onRetryTurn(retryTurnId)}
-            >
-              <svg
-                className="assistant-turn-retry-icon"
-                viewBox="0 0 24 24"
-                aria-hidden="true"
-              >
-                <path d="M20 6v5h-5" />
-                <path d="M20 11a8 8 0 1 0 2.1 5.4" />
-              </svg>
-            </button>
+      <div className="assistant-message-row">
+        <AgentChatAvatar />
+        <div className="assistant-message-stack">
+          <div className="assistant-turn">
+            {messages.map((message) => (
+              <AssistantTurnItem key={message.id} message={message} backendUrl={backendUrl} />
+            ))}
+            {(showThinkingFooter || canRetry) && (
+              <div className="assistant-turn-footer">
+                {showThinkingFooter ? (
+                  <TurnThinkingFooter inline />
+                ) : (
+                  <span className="assistant-turn-footer-spacer" aria-hidden="true" />
+                )}
+                {canRetry && (
+                  <div className="assistant-turn-actions">
+                    {retryTurnId && onRetryTurn ? (
+                      <button
+                        type="button"
+                        className="assistant-turn-retry-btn"
+                        aria-label="重试"
+                        data-label="重试"
+                        title="重试"
+                        onClick={() => onRetryTurn(retryTurnId)}
+                      >
+                        <svg
+                          className="assistant-turn-retry-icon"
+                          viewBox="0 0 24 24"
+                          overflow="visible"
+                          aria-hidden="true"
+                        >
+                          <path d="M20 6v5h-5" />
+                          <path d="M20 11a8 8 0 1 0 2.1 5.4" />
+                        </svg>
+                      </button>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
-        )}
+        </div>
       </div>
     )
   },
@@ -290,7 +359,11 @@ function ThinkingBlock({ thinking, isThinking = false }: { thinking: string; isT
   )
 }
 
-function TurnThinkingFooter() {
+function TurnThinkingFooter({ inline = false }: { inline?: boolean }) {
+  if (inline) {
+    return <span className="turn-thinking-label sweep-active">Thinking</span>
+  }
+
   return (
     <div className="turn-thinking-footer" role="status" aria-live="polite">
       <span className="turn-thinking-label sweep-active">Thinking</span>

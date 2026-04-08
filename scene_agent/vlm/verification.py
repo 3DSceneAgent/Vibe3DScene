@@ -15,6 +15,7 @@ from scene_agent.verification_result import (
     VerificationResult,
     normalize_verification_payload,
 )
+from scene_agent.vlm.metrics import invoke_structured_with_metrics, invoke_with_metrics
 from scene_agent.vlm import get_vlm_provider
 
 
@@ -121,7 +122,10 @@ def verify_render_with_references(
     provider_name: str | None = None,
     api_key: str | None = None,
     model: str | None = None,
-) -> dict[str, Any]:
+    thread_id: str | None = None,
+    turn_id: str | None = None,
+    return_metrics: bool = False,
+) -> dict[str, Any] | tuple[dict[str, Any], list[dict[str, Any]]]:
     settings = get_settings()
     selected_provider = (provider_name or settings.vlm_provider).lower()
     selected_model = model or settings.get_vlm_default_model(selected_provider)
@@ -210,12 +214,28 @@ def verify_render_with_references(
         SystemMessage(content="Structured visual verification for 3D scene workflow."),
         HumanMessage(content=content),
     ]
+    llm_call_records: list[dict[str, Any]] = []
 
     # Primary path: provider-supported structured output.
     structured_output_error: Exception | None = None
     try:
-        structured_model = invoke_model.with_structured_output(VerificationResult)
-        structured_raw = structured_model.invoke(messages)
+        if return_metrics:
+            structured_raw, llm_call_record = invoke_structured_with_metrics(
+                invoke_model,
+                VerificationResult,
+                messages,
+                thread_id=thread_id or "default",
+                turn_id=turn_id,
+                node_name="verification",
+                call_role="verification",
+                provider_name=selected_provider,
+                model_name=selected_model,
+            )
+            if isinstance(llm_call_record, dict):
+                llm_call_records.append(llm_call_record)
+        else:
+            structured_model = invoke_model.with_structured_output(VerificationResult)
+            structured_raw = structured_model.invoke(messages)
         structured = (
             structured_raw
             if isinstance(structured_raw, VerificationResult)
@@ -225,6 +245,8 @@ def verify_render_with_references(
         normalized["verification_mode"] = "reference_comparison" if has_references else "text_only"
         normalized["render_source"] = render_source
         normalized["structured_output_fallback"] = False
+        if return_metrics:
+            return normalized, llm_call_records
         return normalized
     except Exception as exc:
         structured_output_error = exc
@@ -243,7 +265,21 @@ def verify_render_with_references(
     )
 
     # Fallback path: raw output + JSON extraction.
-    response = invoke_model.invoke(messages)
+    if return_metrics:
+        response, llm_call_record = invoke_with_metrics(
+            invoke_model,
+            messages,
+            thread_id=thread_id or "default",
+            turn_id=turn_id,
+            node_name="verification",
+            call_role="verification_fallback",
+            provider_name=selected_provider,
+            model_name=selected_model,
+        )
+        if isinstance(llm_call_record, dict):
+            llm_call_records.append(llm_call_record)
+    else:
+        response = invoke_model.invoke(messages)
     response_text = _content_to_text(getattr(response, "content", response))
     parsed = _extract_json(response_text) or {}
     normalized = normalize_verification_payload(
@@ -253,4 +289,6 @@ def verify_render_with_references(
     normalized["verification_mode"] = "reference_comparison" if has_references else "text_only"
     normalized["render_source"] = render_source
     normalized["structured_output_fallback"] = True
+    if return_metrics:
+        return normalized, llm_call_records
     return normalized

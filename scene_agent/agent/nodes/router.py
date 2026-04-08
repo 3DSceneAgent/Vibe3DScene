@@ -16,6 +16,7 @@ from scene_agent.agent.workflow_profiles import (
 )
 from scene_agent.config import get_settings
 from scene_agent.utils.todo_helpers import coerce_non_negative_int
+from scene_agent.vlm.metrics import invoke_structured_with_metrics
 
 from .constants_workflow import (
     DEFAULT_MAX_PLAN_REPLANS,
@@ -25,7 +26,7 @@ from .constants_workflow import (
     ROLE_GENERAL,
     TOPOLOGY_DUAL,
 )
-from .shared import latest_human_message, unfinished_todo_count
+from .shared import latest_human_message, latest_human_turn_id, unfinished_todo_count
 
 FAST_MODE_PLAN_TERMINATION_REASON = (
     "Planner-managed todo was terminated because fast mode is enabled for this request."
@@ -190,6 +191,7 @@ def router_node(
         latest_user_request = latest_human_message(state)
         decision: RouterDecision | None = None
         router_fallback_reason = "router_model_unavailable_default_plan_mode"
+        llm_call_records: list[dict[str, Any]] = []
         if router_model is not None:
             prompt = (
                 "You are a lightweight workflow router for a 3D scene editing agent.\n"
@@ -212,18 +214,21 @@ def router_node(
                         tags=["nostream"],
                         run_name="router_internal",
                     )
-                if hasattr(llm, "with_structured_output"):
-                    llm = llm.with_structured_output(RouterDecision)
-                decision_raw = llm.invoke(
+                decision_raw, llm_call_record = invoke_structured_with_metrics(
+                    llm,
+                    RouterDecision,
                     [
                         SystemMessage(content=prompt),
                         HumanMessage(content=router_input),
-                    ]
+                    ],
+                    thread_id=str(state.get("thread_id") or "default"),
+                    turn_id=latest_human_turn_id(state),
+                    node_name="router",
+                    call_role="router",
                 )
-                if isinstance(decision_raw, RouterDecision):
-                    decision = decision_raw
-                else:
-                    decision = RouterDecision.model_validate(decision_raw)
+                if isinstance(llm_call_record, dict):
+                    llm_call_records.append(llm_call_record)
+                decision = decision_raw if isinstance(decision_raw, RouterDecision) else RouterDecision.model_validate(decision_raw)
             except Exception:
                 decision = None
                 router_fallback_reason = "router_model_error_default_plan_mode"
@@ -243,7 +248,7 @@ def router_node(
     if state.get("fast_mode") is True:
         transition_reason = "router_fast_mode_direct_mode"
 
-    return {
+    result = {
         "task_mode": task_mode,
         "task_intent": task_intent,
         "routed_to_plan": bool(decision.needs_plan),
@@ -251,6 +256,9 @@ def router_node(
         "transition_reason": transition_reason,
         "active_role": next_role,
     }
+    if "llm_call_records" in locals() and llm_call_records:
+        result["llm_call_records"] = llm_call_records
+    return result
 
 
 __all__ = ["RouterDecision", "initialize_request_node", "router_node"]

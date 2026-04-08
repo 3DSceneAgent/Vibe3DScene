@@ -1,6 +1,6 @@
 # Runtime Workflow
 
-Last updated: 2026-03-30
+Last updated: 2026-04-04
 
 This document describes the current runtime graph implemented in the main branch. It is intentionally implementation-facing and focuses on the exact request flow, state contracts, and node responsibilities.
 
@@ -154,6 +154,29 @@ Key properties:
 - `verify` writes the canonical `verification_result`
 - `evaluator` owns transition control, not the agent itself
 
+### `verify` in single-agent mode
+
+`verify` now combines two evidence sources when enabled:
+
+- VLM-based visual verification against the latest render and any active reference images
+- an optional internal geometry penetration check run directly against the Blender thread runtime
+
+Important boundaries:
+
+- the geometry check is controlled by `SCENE_AGENT_ENABLE_PENETRATION_VERIFY`
+- it is **not** exposed as an agent-callable MCP tool
+- it is invoked internally through the same per-thread Blender command channel used by other runtime-managed observation steps
+- `fast_mode` still skips the normal `scene_observe -> verify` cycle entirely
+
+When penetration verification is enabled, `verify` issues the internal Blender command `check_scene_penetration` and stores the result inside the `verification` payload under `penetration_check`.
+
+Current behavior:
+
+- broad phase uses scene object AABBs to rank candidate pairs
+- narrow phase uses Blender mesh BVH overlap checks to confirm actual intersections
+- `SCENE_AGENT_PENETRATION_THRESHOLD_M` defaults to `0.02`, so only more obvious intersections should downgrade the merged result to `working`
+- geometry findings are merged into the single-agent verify output rather than replacing the VLM judgment entirely
+
 ## 4. Dual-Agent Execution Path
 
 Dual-agent is available but still experimental. It is primarily intended for planning-heavy requests and remains under active development.
@@ -264,6 +287,13 @@ Reader:
 - `evaluator_node`
 
 This removes older behavior where downstream control flow had to infer progress from message history or node-specific payloads.
+
+The canonical state contract intentionally remains small. More detailed single-agent verification payloads can include extra fields such as:
+
+- `penetration_check`
+- `verification_sources`
+
+Those richer fields are attached to the `ToolMessage(name="verification")` payload for observability and debugging, while the evaluator continues to read only the canonical `verification_result` state.
 
 ## 7. Evaluator Responsibilities and Todo Lifecycle
 

@@ -44,6 +44,25 @@ class ReferenceImageCatalogEntry(TypedDict):
     use_count: int
 
 
+class LLMCallRecord(TypedDict):
+    """Append-only telemetry record for a single internal LLM/VLM invocation."""
+
+    call_id: str
+    thread_id: str
+    turn_id: str | None
+    node_name: str
+    call_role: str
+    provider: str | None
+    model: str | None
+    input_tokens: int | None
+    output_tokens: int | None
+    total_tokens: int | None
+    image_input_tokens: int | None
+    has_image_inputs: bool
+    context_limit_tokens: int | None
+    created_at_ms: int
+
+
 TaskMode = Literal["direct_mode", "plan_mode"]
 WorkflowTopology = Literal["single_agent", "dual_agent"]
 MemoryProfile = Literal["thread_shared_only", "shared_plus_role_private"]
@@ -92,6 +111,23 @@ def merge_unique_strings(existing: list[str], new: list[str]) -> list[str]:
                 continue
             seen.add(value)
             merged.append(value)
+    return merged
+
+
+def append_llm_call_records(
+    existing: list[LLMCallRecord],
+    new: list[LLMCallRecord],
+) -> list[LLMCallRecord]:
+    """Append telemetry records in arrival order."""
+
+    merged: list[LLMCallRecord] = []
+    for source in (existing, new):
+        if not isinstance(source, list):
+            continue
+        for item in source:
+            if not isinstance(item, dict):
+                continue
+            merged.append(dict(item))  # type: ignore[arg-type]
     return merged
 
 
@@ -163,6 +199,7 @@ class AgentState(TypedDict):
         context_summary: Latest projected historical summary for prompt compaction
         context_summary_message_count: Number of omitted messages summarized in context_summary
         context_compaction_count: Number of prompt compactions performed
+        llm_call_records: Append-only telemetry records for internal LLM/VLM invocations
         finalize_guard_gate: Latest checkpoint-finalize gate decision payload
         finalize_guard: Latest finalize guard snapshot payload
         last_finalize_guard_round: Tool round index when the finalize guard last captured state
@@ -233,6 +270,7 @@ class AgentState(TypedDict):
     context_summary: NotRequired[str]
     context_summary_message_count: NotRequired[int]
     context_compaction_count: NotRequired[int]
+    llm_call_records: NotRequired[Annotated[list[LLMCallRecord], append_llm_call_records]]
 
     # State collections
     scene_objects: NotRequired[Annotated[dict[str, Any], replace_mapping]]

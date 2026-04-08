@@ -193,6 +193,106 @@ def test_build_thread_history_payload_uses_message_timestamp_when_checkpoint_tim
     assert payload.updated_at_ms == 1770000000123
 
 
+def test_build_thread_history_payload_aggregates_telemetry_metrics(monkeypatch):
+    thread_id = "thread-history-metrics"
+
+    class _Checkpointer:
+        @staticmethod
+        def get_tuple(_config):
+            return SimpleNamespace(
+                checkpoint={
+                    "id": "1770000000123.0001",
+                    "channel_values": {
+                        "messages": [
+                            HumanMessage(
+                                content="Build a chair",
+                                id="turn-1",
+                                additional_kwargs={"created_at_ms": 1770000000001},
+                            ),
+                            {
+                                "type": "ai",
+                                "id": "assistant-1",
+                                "content": "",
+                                "tool_calls": [
+                                    {
+                                        "name": "get_scene_info",
+                                        "args": {},
+                                        "id": "tool-1",
+                                        "type": "tool_call",
+                                    }
+                                ],
+                            },
+                            HumanMessage(
+                                content="Now add a lamp",
+                                id="turn-2",
+                                additional_kwargs={"created_at_ms": 1770000001001},
+                            ),
+                        ],
+                        "llm_call_records": [
+                            {
+                                "call_id": "call-1",
+                                "thread_id": thread_id,
+                                "turn_id": "turn-1",
+                                "node_name": "router",
+                                "call_role": "router",
+                                "provider": "gemini",
+                                "model": "gemini-2.5-flash",
+                                "input_tokens": 120,
+                                "output_tokens": 20,
+                                "total_tokens": 140,
+                                "image_input_tokens": 40,
+                                "has_image_inputs": True,
+                                "context_limit_tokens": 1048576,
+                                "created_at_ms": 1770000000100,
+                            },
+                            {
+                                "call_id": "call-2",
+                                "thread_id": thread_id,
+                                "turn_id": "turn-1",
+                                "node_name": "agent",
+                                "call_role": "general",
+                                "provider": "gemini",
+                                "model": "gemini-2.5-flash",
+                                "input_tokens": 80,
+                                "output_tokens": 10,
+                                "total_tokens": 90,
+                                "image_input_tokens": 0,
+                                "has_image_inputs": False,
+                                "context_limit_tokens": 1048576,
+                                "created_at_ms": 1770000000200,
+                            },
+                        ],
+                    },
+                }
+            )
+
+    class _ImageMemory:
+        @staticmethod
+        def list_assets(_thread_id):
+            return []
+
+    class _Coordinator:
+        @staticmethod
+        def get_session_meta(_thread_id):
+            return {"title": "Metrics thread"}
+
+    monkeypatch.setattr(api_shared, "get_graph_checkpointer", lambda: _Checkpointer())
+    monkeypatch.setattr(api_shared, "get_image_asset_memory", lambda: _ImageMemory())
+    monkeypatch.setattr(api_shared, "get_session_coordinator", lambda: _Coordinator())
+
+    payload = api_shared.build_thread_history_payload(thread_id)
+
+    assert payload.thread_metrics.input_tokens == 200
+    assert payload.thread_metrics.output_tokens == 30
+    assert payload.thread_metrics.total_tokens == 230
+    assert payload.thread_metrics.image_input_tokens == 40
+    assert payload.thread_metrics.tool_call_count == 1
+    assert payload.thread_metrics.peak_context_used_tokens == 120
+    assert payload.thread_metrics.peak_context_limit_tokens == 1048576
+    assert payload.turn_metrics_by_turn_id["turn-1"].input_tokens == 200
+    assert payload.turn_metrics_by_turn_id["turn-1"].tool_call_count == 1
+
+
 def test_load_thread_scene_artifact_manifest_reads_persisted_artifacts(tmp_path, monkeypatch):
     thread_id = "thread-artifacts"
     storage_dir = tmp_path / thread_id

@@ -670,7 +670,14 @@ def _build_scene_grid_image(
         cell_width = max(image.width for image in opened_images)
         cell_height = max(image.height for image in opened_images)
         image_count = len(opened_images)
-        columns = 2 if image_count <= 4 else 3
+        if image_count == 2:
+            columns = 2
+        elif image_count == 3:
+            columns = 3
+        elif image_count == 4:
+            columns = 2
+        else:
+            columns = 3 if image_count > 4 else 2
         rows = math.ceil(image_count / columns)
         canvas = PILImage.new("RGB", (cell_width * columns, cell_height * rows), color=(24, 24, 24))
 

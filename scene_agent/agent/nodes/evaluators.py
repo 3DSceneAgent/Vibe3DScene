@@ -20,6 +20,7 @@ from scene_agent.utils.todo_helpers import coerce_non_negative_int
 from scene_agent.utils.verification_helpers import (
     replan_budget_remaining,
 )
+from scene_agent.vlm.metrics import invoke_structured_with_metrics
 from scene_agent.verification_result import (
     VerificationResult,
     coerce_verification_result,
@@ -38,6 +39,7 @@ from .shared import (
     ai_message_has_tool_calls,
     coerce_workflow_topology,
     effective_todo_snapshot,
+    latest_human_turn_id,
     unfinished_todo_count,
 )
 
@@ -273,6 +275,7 @@ def verifier_feedback_node(
         content_text = message_content_to_text(latest_ai.content).strip()
 
     parsed_result: VerificationResult | None = None
+    llm_call_records: list[dict[str, Any]] = []
     if parser_model is not None and content_text:
         prompt = (
             "Extract a structured verification result from verifier text.\n"
@@ -287,14 +290,20 @@ def verifier_feedback_node(
                     tags=["nostream"],
                     run_name="verifier_feedback_internal",
                 )
-            if hasattr(llm, "with_structured_output"):
-                llm = llm.with_structured_output(VerificationResult)
-            parsed_raw = llm.invoke(
+            parsed_raw, llm_call_record = invoke_structured_with_metrics(
+                llm,
+                VerificationResult,
                 [
                     SystemMessage(content=prompt),
                     SystemMessage(content=parser_input),
-                ]
+                ],
+                thread_id=str(state.get("thread_id") or "default"),
+                turn_id=latest_human_turn_id(state),
+                node_name="verifier_feedback",
+                call_role="verifier_feedback_parser",
             )
+            if isinstance(llm_call_record, dict):
+                llm_call_records.append(llm_call_record)
             parsed_result = coerce_verification_result(parsed_raw)
         except Exception:
             parsed_result = None
@@ -321,6 +330,8 @@ def verifier_feedback_node(
         "reason": parsed_result.reason,
         "edit_suggestions": list(parsed_result.edit_suggestions),
     }
+    if llm_call_records:
+        base_update["llm_call_records"] = llm_call_records
     return base_update
 
 

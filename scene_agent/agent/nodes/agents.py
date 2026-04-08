@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -12,12 +14,14 @@ from scene_agent.agent.state import AgentState
 from scene_agent.agent.todo_state import apply_todo_actions, project_latest_todos
 from scene_agent.utils.agent_messages import find_last_ai_message, message_content_to_text
 from scene_agent.utils.todo_helpers import coerce_non_negative_int
+from scene_agent.vlm.metrics import invoke_structured_with_metrics, invoke_with_metrics
 
 from .constants_workflow import MODE_PLAN, ROLE_BUILDER, ROLE_GENERAL, ROLE_VERIFIER
 from .shared import (
     ai_message_has_tool_calls,
     invoke_role_agent,
     latest_human_message,
+    latest_human_turn_id,
     resolve_verification_assets,
     unfinished_todo_count,
 )
@@ -30,6 +34,129 @@ class PlannedTodo(BaseModel):
 
 class PlanOutput(BaseModel):
     todos: list[PlannedTodo] = Field(default_factory=list)
+
+
+_FENCED_BLOCK_RE = re.compile(r"^\s*```(?:[a-zA-Z0-9_-]+)?\s*(.*?)\s*```\s*$", re.DOTALL)
+_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|(?:\d+|[A-Za-z])[\.\)])\s+(.*\S)\s*$")
+_INLINE_NUMBERED_LIST_RE = re.compile(
+    r"(?:^|\s)(?:\d+|[A-Za-z])[\.\)]\s+(.*?)(?=(?:\s+(?:\d+|[A-Za-z])[\.\)]\s+)|$)",
+    re.DOTALL,
+)
+
+
+def _normalize_freeform_text(value: str) -> str:
+    return " ".join(value.strip().split())
+
+
+def _coerce_planned_todo(raw: Any) -> PlannedTodo | None:
+    if isinstance(raw, PlannedTodo):
+        return raw
+    if isinstance(raw, str):
+        normalized = _normalize_freeform_text(raw)
+        if not normalized:
+            return None
+        return PlannedTodo(title=normalized[:180], description=normalized[:500])
+    if not isinstance(raw, dict):
+        return None
+
+    raw_title = raw.get("title")
+    raw_description = raw.get("description")
+    title = _normalize_freeform_text(raw_title) if isinstance(raw_title, str) else ""
+    description = _normalize_freeform_text(raw_description) if isinstance(raw_description, str) else ""
+    if not title and not description:
+        return None
+    if not title:
+        title = description[:180]
+    if not description:
+        description = title
+    return PlannedTodo(title=title[:180], description=description[:500])
+
+
+def _coerce_planned_todos_payload(raw: Any) -> list[PlannedTodo]:
+    if isinstance(raw, PlanOutput):
+        return list(raw.todos)
+    if isinstance(raw, dict):
+        if "todos" in raw:
+            return _coerce_planned_todos_payload(raw.get("todos"))
+        todo = _coerce_planned_todo(raw)
+        return [todo] if todo is not None else []
+    if not isinstance(raw, list):
+        return []
+
+    todos: list[PlannedTodo] = []
+    for item in raw:
+        todo = _coerce_planned_todo(item)
+        if todo is not None:
+            todos.append(todo)
+    return todos
+
+
+def _strip_markdown_fence(raw_text: str) -> str:
+    match = _FENCED_BLOCK_RE.fullmatch(raw_text)
+    if match:
+        return match.group(1).strip()
+    return raw_text.strip()
+
+
+def _planned_todos_from_list_text(raw_text: str) -> list[PlannedTodo]:
+    items: list[str] = []
+    current_parts: list[str] = []
+    for raw_line in raw_text.splitlines():
+        line = _normalize_freeform_text(raw_line)
+        if not line:
+            continue
+        match = _LIST_ITEM_RE.match(line)
+        if match:
+            if current_parts:
+                items.append(" ".join(current_parts))
+            current_parts = [match.group(1).strip()]
+            continue
+        if current_parts:
+            current_parts.append(line)
+    if current_parts:
+        items.append(" ".join(current_parts))
+    if items:
+        return [PlannedTodo(title=item[:180], description=item[:500]) for item in items if item]
+
+    collapsed = _normalize_freeform_text(raw_text)
+    inline_matches = [
+        _normalize_freeform_text(match.group(1))
+        for match in _INLINE_NUMBERED_LIST_RE.finditer(collapsed)
+        if _normalize_freeform_text(match.group(1))
+    ]
+    if len(inline_matches) >= 2:
+        return [
+            PlannedTodo(title=item[:180], description=item[:500])
+            for item in inline_matches
+        ]
+    return []
+
+
+def _recover_planned_todos_from_text(raw_text: str) -> list[PlannedTodo]:
+    sanitized = _strip_markdown_fence(raw_text)
+    if not sanitized:
+        return []
+
+    try:
+        parsed = json.loads(sanitized)
+    except json.JSONDecodeError:
+        parsed = None
+    if parsed is not None:
+        recovered = _coerce_planned_todos_payload(parsed)
+        if recovered:
+            return recovered
+
+    return _planned_todos_from_list_text(sanitized)
+
+
+def _extract_planned_todos_from_model_output(decision_raw: Any, raw_text: str) -> list[PlannedTodo]:
+    recovered = _coerce_planned_todos_payload(decision_raw)
+    if recovered:
+        return recovered
+
+    if raw_text:
+        return _recover_planned_todos_from_text(raw_text)
+    return []
 
 
 def _normalize_planned_todos(raw_todos: list[PlannedTodo], fallback_text: str) -> list[PlannedTodo]:
@@ -81,6 +208,9 @@ def plan_node(
     latest_request = latest_human_message(state)
     planned_todos: list[PlannedTodo] = []
     fallback_todo_text = latest_request
+    llm_call_records: list[dict[str, Any]] = []
+    thread_id = str(state.get("thread_id") or "default")
+    turn_id = latest_human_turn_id(state)
     if planner_model is not None:
         reference_entries = resolve_verification_assets(state)
         scene_objects = state.get("scene_objects")
@@ -130,16 +260,19 @@ def plan_node(
                     tags=["nostream"],
                     run_name="plan_node_internal",
                 )
-            if hasattr(llm, "with_structured_output"):
-                llm = llm.with_structured_output(PlanOutput)
-            decision_raw = llm.invoke(planner_messages)
+            decision_raw, llm_call_record = invoke_structured_with_metrics(
+                llm,
+                PlanOutput,
+                planner_messages,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                node_name="plan",
+                call_role="planner",
+            )
+            if isinstance(llm_call_record, dict):
+                llm_call_records.append(llm_call_record)
             raw_text = message_content_to_text(getattr(decision_raw, "content", decision_raw)).strip()
-            if raw_text and not isinstance(decision_raw, (dict, PlanOutput)):
-                fallback_todo_text = raw_text
-            if isinstance(decision_raw, PlanOutput):
-                planned_todos = decision_raw.todos
-            else:
-                planned_todos = PlanOutput.model_validate(decision_raw).todos
+            planned_todos = _extract_planned_todos_from_model_output(decision_raw, raw_text)
         except Exception:
             try:
                 raw_llm = planner_model
@@ -148,13 +281,20 @@ def plan_node(
                         tags=["nostream"],
                         run_name="plan_node_fallback_internal",
                     )
-                raw_response = raw_llm.invoke(planner_messages)
+                raw_response, llm_call_record = invoke_with_metrics(
+                    raw_llm,
+                    planner_messages,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    node_name="plan",
+                    call_role="planner_fallback",
+                )
+                if isinstance(llm_call_record, dict):
+                    llm_call_records.append(llm_call_record)
                 raw_text = message_content_to_text(getattr(raw_response, "content", raw_response)).strip()
-                if raw_text and not isinstance(raw_response, dict):
-                    fallback_todo_text = raw_text
+                planned_todos = _extract_planned_todos_from_model_output(raw_response, raw_text)
             except Exception:
                 pass
-            planned_todos = []
 
     normalized_todos = _normalize_planned_todos(planned_todos, fallback_todo_text)
     actions: list[dict[str, Any]] = []
@@ -184,7 +324,7 @@ def plan_node(
         role=role,
         previous_active_todo_id=previous_active_todo_id,
     )
-    return {
+    result = {
         "task_mode": MODE_PLAN,
         "routed_to_plan": True,
         "todo_versions": todo_versions,
@@ -192,6 +332,9 @@ def plan_node(
         "active_todo_id": next_active_todo_id,
         "current_todo_stall_count": 0,
     }
+    if llm_call_records:
+        result["llm_call_records"] = llm_call_records
+    return result
 
 
 def agent_node(

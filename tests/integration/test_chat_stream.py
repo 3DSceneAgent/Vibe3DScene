@@ -53,6 +53,18 @@ class UpdatesAgent:
                     "todo_check": {"status": "continue", "reason": "pending_todos"},
                     "fast_mode": True,
                 },
+                "agent": {
+                    "llm_call_records": [
+                        {
+                            "input_tokens": 11,
+                            "output_tokens": 4,
+                            "total_tokens": 15,
+                            "image_input_tokens": 0,
+                            "has_image_inputs": False,
+                            "context_limit_tokens": 1048576,
+                        }
+                    ],
+                },
             },
         )
 
@@ -149,6 +161,28 @@ class RefinedAssistantFromUpdatesAgent:
 
 async def fake_get_refined_assistant_agent(_thread_id=None):
     return RefinedAssistantFromUpdatesAgent()
+
+
+class UnidentifiedRefinedAssistantFromUpdatesAgent:
+    async def astream(self, *_args, **_kwargs):
+        yield (
+            "messages",
+            [{"type": "ai", "content": "The"}],
+        )
+        yield (
+            "updates",
+            {
+                "finalize": {
+                    "messages": [
+                        {"type": "ai", "content": "The result is 5."}
+                    ],
+                },
+            },
+        )
+
+
+async def fake_get_unidentified_refined_assistant_agent(_thread_id=None):
+    return UnidentifiedRefinedAssistantFromUpdatesAgent()
 
 
 class ToolCallAssistantFallbackAgent:
@@ -475,12 +509,24 @@ def test_chat_stream_emits_graph_node_events_and_update_messages(monkeypatch):
         payload.get("graph_node", {}).get("state_patch", {}).get("fast_mode") is True
         for payload in graph_node_payloads
     )
+    verify_progress = next(
+        (
+            payload.get("progress")
+            for payload in graph_node_payloads
+            if payload.get("graph_node", {}).get("node") == "agent"
+        ),
+        None,
+    )
+    assert isinstance(verify_progress, dict)
+    assert verify_progress.get("llm_input_tokens") == 11
+    assert verify_progress.get("llm_total_tokens") == 15
 
     tool_payloads = [
         payload for payload in payloads if "messages" in payload and payload["messages"][0].get("type") == "tool"
     ]
     assert tool_payloads
     assert tool_payloads[0]["messages"][0].get("name") == "verification"
+    assert isinstance(tool_payloads[0].get("progress"), dict)
 
 
 def test_chat_stream_filters_verify_internal_message_stream(monkeypatch):
@@ -558,6 +604,30 @@ def test_chat_stream_keeps_richer_update_message_after_same_id_delta(monkeypatch
     ]
     assert len(assistant_messages) == 1
     assert assistant_messages[0]["messages"][0].get("id") == "assistant-refined"
+    assert assistant_messages[0]["messages"][0].get("content") == "The result is 5."
+
+
+def test_chat_stream_keeps_richer_update_message_after_unidentified_delta(monkeypatch):
+    monkeypatch.setattr(api_module, "get_agent", fake_get_unidentified_refined_assistant_agent)
+    client = TestClient(api_module.app)
+
+    with client.stream(
+        "POST",
+        "/chat/stream",
+        json={"message": "hi", "thread_id": "t-unidentified-refined-assistant"},
+    ) as response:
+        assert response.status_code == 200
+        payloads = collect_sse_payloads(response.iter_lines())
+
+    deltas = [payload["delta"] for payload in payloads if "delta" in payload]
+    assert deltas == ["The"]
+
+    assistant_messages = [
+        payload
+        for payload in payloads
+        if "messages" in payload and payload["messages"][0].get("type") == "ai"
+    ]
+    assert len(assistant_messages) == 1
     assert assistant_messages[0]["messages"][0].get("content") == "The result is 5."
 
 
@@ -663,6 +733,7 @@ def test_chat_stream_emits_tool_call_started_before_tool_result(monkeypatch):
     assert tool_result_index is not None
     assert tool_start_index < tool_result_index
     assert payloads[tool_start_index]["tool_call"]["id"] == "tool-1"
+    assert payloads[tool_start_index]["progress"]["tool_calls_started"] == 1
 
 
 def test_chat_stream_emits_started_event_for_each_same_named_tool_call(monkeypatch):

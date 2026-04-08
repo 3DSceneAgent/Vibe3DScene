@@ -4,6 +4,8 @@ import type {
   RenderImage,
   SceneArtifactManifestInfo,
   SceneInfo,
+  StreamProgress,
+  TelemetryMetrics,
   TodoItem
 } from '../api/types'
 import type { EnvironmentPreset } from '../constants/environmentPresets'
@@ -52,6 +54,7 @@ export type ThreadStreamSession = {
   streamRequestId: string | null
   lastEventId: number
   updatedAtMs: number
+  progress?: StreamProgress | null
 }
 
 export type Thread = {
@@ -79,6 +82,8 @@ export type Thread = {
   occupyingResources?: boolean
   lastRuntimeActiveMs?: number
   streamSession?: ThreadStreamSession | null
+  threadMetrics?: TelemetryMetrics | null
+  turnMetricsByTurnId?: Record<string, TelemetryMetrics>
 }
 
 export type ThemeId = 'dark' | 'light'

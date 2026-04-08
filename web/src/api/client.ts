@@ -10,6 +10,9 @@ import type {
   SceneArtifactManifestInfo,
   SceneInfo,
   StreamEvent,
+  StreamProgress,
+  TelemetryMetrics,
+  ThreadStreamStopInfo,
   ThreadStreamSessionInfo,
   ThreadHistoryInfo,
   ThreadListInfo,
@@ -303,6 +306,60 @@ function parseHistoryMessages(payload: unknown): HistoryMessage[] {
       }
     ]
   })
+}
+
+function parseTelemetryMetrics(payload: unknown): TelemetryMetrics | undefined {
+  if (!isRecord(payload)) return undefined
+  const hasKey = (key: string) => Object.prototype.hasOwnProperty.call(payload, key)
+  const toNumberOrNull = (key: string): number | null | undefined => {
+    if (!hasKey(key)) return undefined
+    const value = payload[key]
+    if (value == null) return null
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+  }
+  return {
+    input_tokens: toNumberOrNull('input_tokens'),
+    output_tokens: toNumberOrNull('output_tokens'),
+    total_tokens: toNumberOrNull('total_tokens'),
+    image_input_tokens: toNumberOrNull('image_input_tokens'),
+    has_image_inputs: typeof payload.has_image_inputs === 'boolean' ? payload.has_image_inputs : undefined,
+    llm_call_count: typeof payload.llm_call_count === 'number' ? payload.llm_call_count : undefined,
+    tool_call_count: typeof payload.tool_call_count === 'number' ? payload.tool_call_count : undefined,
+    peak_context_used_tokens: toNumberOrNull('peak_context_used_tokens'),
+    peak_context_limit_tokens: toNumberOrNull('peak_context_limit_tokens')
+  }
+}
+
+function parseStreamProgress(payload: unknown): StreamProgress | undefined {
+  if (!isRecord(payload)) return undefined
+  const hasKey = (key: string) => Object.prototype.hasOwnProperty.call(payload, key)
+  const numberOrNull = (key: string): number | null | undefined => {
+    if (!hasKey(key)) return undefined
+    const value = payload[key]
+    if (value == null) return null
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+  }
+  const progress: StreamProgress = {}
+  if (typeof payload.request_id === 'string') progress.request_id = payload.request_id
+  if (typeof payload.stream_request_id === 'string') progress.stream_request_id = payload.stream_request_id
+  if (typeof payload.task_mode === 'string') progress.task_mode = payload.task_mode
+  if (typeof payload.graph_steps === 'number') progress.graph_steps = payload.graph_steps
+  if (typeof payload.last_node === 'string' || payload.last_node === null) progress.last_node = payload.last_node as string | null
+  if (typeof payload.tool_events === 'number') progress.tool_events = payload.tool_events
+  if (typeof payload.tool_calls_started === 'number') progress.tool_calls_started = payload.tool_calls_started
+  if (typeof payload.assistant_chunks === 'number') progress.assistant_chunks = payload.assistant_chunks
+  if (typeof payload.todo_total === 'number') progress.todo_total = payload.todo_total
+  if (typeof payload.todo_completed === 'number') progress.todo_completed = payload.todo_completed
+  if (typeof payload.latest_seq === 'number') progress.latest_seq = payload.latest_seq
+  if (typeof payload.scene_has_change === 'boolean') progress.scene_has_change = payload.scene_has_change
+  if (typeof payload.done === 'boolean') progress.done = payload.done
+  progress.llm_input_tokens = numberOrNull('llm_input_tokens')
+  progress.llm_output_tokens = numberOrNull('llm_output_tokens')
+  progress.llm_total_tokens = numberOrNull('llm_total_tokens')
+  progress.image_input_tokens = numberOrNull('image_input_tokens')
+  progress.peak_context_used_tokens = numberOrNull('peak_context_used_tokens')
+  progress.peak_context_limit_tokens = numberOrNull('peak_context_limit_tokens')
+  return progress
 }
 
 function parseThreadSummary(entry: unknown): ThreadSummaryInfo | null {
@@ -785,7 +842,16 @@ export async function getThreadHistory(
     updated_at_ms: typeof data.updated_at_ms === 'number' ? data.updated_at_ms : Date.now(),
     scene_revision: typeof data.scene_revision === 'number' ? data.scene_revision : undefined,
     messages: parseHistoryMessages(data.messages),
-    todos: Array.isArray(data.todos) ? (data.todos as TodoItem[]) : []
+    todos: Array.isArray(data.todos) ? (data.todos as TodoItem[]) : [],
+    thread_metrics: parseTelemetryMetrics(data.thread_metrics),
+    turn_metrics_by_turn_id:
+      isRecord(data.turn_metrics_by_turn_id)
+        ? Object.fromEntries(
+            Object.entries(data.turn_metrics_by_turn_id)
+              .map(([turnId, value]) => [turnId, parseTelemetryMetrics(value)])
+              .filter((entry): entry is [string, TelemetryMetrics] => Boolean(entry[0]) && Boolean(entry[1]))
+          )
+        : undefined
   }
 }
 
@@ -807,7 +873,36 @@ export async function getThreadStreamSession(
     latest_seq: typeof data.latest_seq === 'number' ? data.latest_seq : 0,
     done: Boolean(data.done),
     updated_at_ms: typeof data.updated_at_ms === 'number' ? data.updated_at_ms : null,
-    progress: data.progress
+    progress: parseStreamProgress(data.progress)
+  }
+}
+
+export async function stopThreadStreamSession(
+  baseUrl: string,
+  threadId: string,
+  streamRequestId?: string | null,
+  signal?: AbortSignal
+): Promise<ThreadStreamStopInfo> {
+  const response = await apiFetch(`${baseUrl}/threads/${threadId}/stream-session/stop`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      stream_request_id: streamRequestId ?? null
+    }),
+    signal
+  })
+  if (!response.ok) {
+    throw await buildHttpError(response, `Failed to stop thread stream session (${response.status})`)
+  }
+  const data = (await response.json()) as Partial<ThreadStreamStopInfo>
+  return {
+    thread_id: typeof data.thread_id === 'string' ? data.thread_id : threadId,
+    stream_request_id: typeof data.stream_request_id === 'string' ? data.stream_request_id : null,
+    accepted: Boolean(data.accepted),
+    already_requested: Boolean(data.already_requested),
+    done: Boolean(data.done)
   }
 }
 

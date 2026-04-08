@@ -66,6 +66,18 @@ export type HistoryMessage = {
   attached_images?: ImageAsset[]
 }
 
+export type TelemetryMetrics = {
+  input_tokens?: number | null
+  output_tokens?: number | null
+  total_tokens?: number | null
+  image_input_tokens?: number | null
+  has_image_inputs?: boolean
+  llm_call_count?: number
+  tool_call_count?: number
+  peak_context_used_tokens?: number | null
+  peak_context_limit_tokens?: number | null
+}
+
 export type ThreadHistoryInfo = {
   thread_id: string
   title: string
@@ -73,6 +85,8 @@ export type ThreadHistoryInfo = {
   scene_revision?: number | null
   messages: HistoryMessage[]
   todos: TodoItem[]
+  thread_metrics?: TelemetryMetrics
+  turn_metrics_by_turn_id?: Record<string, TelemetryMetrics>
 }
 
 export type SceneArtifactManifestInfo = {
@@ -118,6 +132,13 @@ export type StreamProgress = {
   assistant_chunks?: number
   todo_total?: number
   todo_completed?: number
+  llm_input_tokens?: number | null
+  llm_output_tokens?: number | null
+  llm_total_tokens?: number | null
+  image_input_tokens?: number | null
+  tool_calls_started?: number
+  peak_context_used_tokens?: number | null
+  peak_context_limit_tokens?: number | null
   latest_seq?: number
   scene_has_change?: boolean
   done?: boolean
@@ -132,6 +153,14 @@ export type ThreadStreamSessionInfo = {
   done?: boolean
   updated_at_ms?: number | null
   progress?: StreamProgress
+}
+
+export type ThreadStreamStopInfo = {
+  thread_id: string
+  stream_request_id?: string | null
+  accepted: boolean
+  already_requested: boolean
+  done: boolean
 }
 
 export type StreamEvent = {

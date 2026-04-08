@@ -7,6 +7,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
+from scene_agent.vlm.metrics import invoke_with_metrics
 
 CONTEXT_SUMMARY_MESSAGE_ID = "context_summary_current"
 _DEFAULT_CONTEXT_TOKEN_BUDGET_RATIO = 0.8
@@ -241,9 +242,11 @@ def _summarize_omitted_history_with_model(
     summary_model: Any | None,
     state_messages: list[Any],
     omitted_indices: list[int],
-) -> str | None:
+    thread_id: str | None = None,
+    turn_id: str | None = None,
+) -> tuple[str | None, list[dict[str, Any]]]:
     if summary_model is None or not omitted_indices:
-        return None
+        return None, []
 
     source_indices = _sample_summary_source_indices(
         omitted_indices,
@@ -279,22 +282,38 @@ def _summarize_omitted_history_with_model(
         except Exception:
             invoke_model = summary_model
 
+    llm_call_records: list[dict[str, Any]] = []
     try:
-        response = invoke_model.invoke(prompt_messages)
+        response, llm_call_record = invoke_with_metrics(
+            invoke_model,
+            prompt_messages,
+            thread_id=thread_id or "default",
+            turn_id=turn_id,
+            node_name="context_summary",
+            call_role="context_summary",
+        )
+        if isinstance(llm_call_record, dict):
+            llm_call_records.append(llm_call_record)
     except TypeError:
         try:
-            response = invoke_model.invoke(
+            response, llm_call_record = invoke_with_metrics(
+                summary_model,
                 prompt_messages,
-                config={"tags": ["nostream"], "run_name": "context_summary_internal"},
+                thread_id=thread_id or "default",
+                turn_id=turn_id,
+                node_name="context_summary",
+                call_role="context_summary",
             )
+            if isinstance(llm_call_record, dict):
+                llm_call_records.append(llm_call_record)
         except Exception:
-            return None
+            return None, []
     except Exception:
-        return None
+        return None, []
 
     response_text = _coerce_response_text(response)
     if not response_text:
-        return None
+        return None, llm_call_records
 
     normalized = "\n".join(
         line.strip()
@@ -302,12 +321,13 @@ def _summarize_omitted_history_with_model(
         if isinstance(line, str) and line.strip()
     )
     if not normalized:
-        return None
+        return None, llm_call_records
     if len(normalized) > _SUMMARY_MAX_CHARS:
         normalized = f"{normalized[:_SUMMARY_MAX_CHARS - 3].rstrip()}..."
     return (
         f"Historical context summary: {len(omitted_indices)} earlier messages were compacted.\n"
-        f"{normalized}"
+        f"{normalized}",
+        llm_call_records,
     )
 
 
@@ -359,10 +379,12 @@ def build_projected_context(
     token_counter: Any | None = None,
     summary_model: Any | None = None,
     token_budget_ratio: float = _DEFAULT_CONTEXT_TOKEN_BUDGET_RATIO,
-) -> tuple[list[Any], str, int]:
+    thread_id: str | None = None,
+    turn_id: str | None = None,
+) -> tuple[list[Any], str, int, list[dict[str, Any]]]:
     total = len(state_messages)
     if total <= 0:
-        return list(base_messages), "", 0
+        return list(base_messages), "", 0, []
 
     selected_indices: set[int] = set()
     protected_indices: set[int] = set()
@@ -437,10 +459,12 @@ def build_projected_context(
     fallback_summary_text = _build_fallback_summary_text(state_messages, omitted_indices)
     summary_text = fallback_summary_text
 
-    model_summary_text = _summarize_omitted_history_with_model(
+    model_summary_text, llm_call_records = _summarize_omitted_history_with_model(
         summary_model=summary_model,
         state_messages=state_messages,
         omitted_indices=omitted_indices,
+        thread_id=thread_id,
+        turn_id=turn_id,
     )
     if model_summary_text:
         summary_text = model_summary_text
@@ -479,4 +503,4 @@ def build_projected_context(
         selected_indices=selected_list,
         summary_text=summary_text,
     )
-    return projected, summary_text, omitted_count
+    return projected, summary_text, omitted_count, llm_call_records

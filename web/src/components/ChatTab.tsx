@@ -2,8 +2,9 @@ import type { PendingImageAttachment, Thread } from '../state/types'
 import { MessageList } from './MessageList'
 import { ChatComposer } from './ChatComposer'
 import { GraphTimeline } from './GraphTimeline'
+import { TelemetrySummary } from './TelemetrySummary'
 import { TodoPanel } from './TodoPanel'
-import type { GraphNodeStream, TodoItem, VlmProviderOption } from '../api/types'
+import type { GraphNodeStream, TelemetryMetrics, TodoItem, VlmProviderOption } from '../api/types'
 
 type ChatTabProps = {
   thread: Thread | null
@@ -53,6 +54,30 @@ function normalizeWorkflowValue(value: unknown): string | null {
   const normalized = value.trim()
   return normalized || null
 }
+
+function toTelemetryFromProgress(thread: Thread | null): TelemetryMetrics | null {
+  const progress = thread?.streamSession?.progress
+  if (!progress) return null
+  return {
+    input_tokens: progress.llm_input_tokens,
+    output_tokens: progress.llm_output_tokens,
+    total_tokens: progress.llm_total_tokens,
+    image_input_tokens: progress.image_input_tokens,
+    has_image_inputs:
+      typeof progress.image_input_tokens === 'number' || progress.image_input_tokens === null,
+    tool_call_count: progress.tool_calls_started ?? 0,
+    peak_context_used_tokens: progress.peak_context_used_tokens,
+    peak_context_limit_tokens: progress.peak_context_limit_tokens
+  }
+}
+
+const THREAD_TELEMETRY_HELP_LINES = [
+  'Tokens shows the current saved total for this thread.',
+  'Live only counts the run still streaming; retry rewinds the old attempt first.',
+  'In adds up every internal model call in the thread, including router, builder, verifier, and other helpers.',
+  'Ctx is only the largest single model call, so it is often smaller than In.',
+  'Image tokens are included in In; renders are usually sent after being capped to 960x540.'
+]
 
 export function ChatTab({
   thread,
@@ -122,24 +147,45 @@ export function ChatTab({
     return <div className="empty-state">Create a conversation to begin.</div>
   }
 
+  const liveTelemetry = toTelemetryFromProgress(thread)
+
   return (
     <div className={`chat-tab chat-pane ${minimalUi ? 'minimal-ui' : ''}`}>
       {!minimalUi && (
-        <div className="chat-status-row">
-          <div
-            className={`chat-stream-status ${streamStatus === 'streaming' ? 'streaming' : 'complete'}`}
-            role="status"
-            aria-live="polite"
-          >
-            <span className="chat-stream-status-dot" />
-            <span className="chat-stream-status-text">
-              {streamStatus === 'streaming' ? 'Agent is building the scene' : 'Agent ready'}
-            </span>
+        <div className="chat-status-stack">
+          <div className="chat-status-row">
+            <div
+              className={`chat-stream-status ${streamStatus === 'streaming' ? 'streaming' : 'complete'}`}
+              role="status"
+              aria-live="polite"
+            >
+              <span className="chat-stream-status-dot" />
+              <span className="chat-stream-status-text">
+                {streamStatus === 'streaming' ? 'Agent is building the scene' : 'Agent ready'}
+              </span>
+            </div>
+            <GraphTimeline events={graphEvents} isStreaming={streamStatus === 'streaming'} />
           </div>
-          <GraphTimeline events={graphEvents} isStreaming={streamStatus === 'streaming'} />
+          {thread.threadMetrics || (streamStatus === 'streaming' && liveTelemetry) ? (
+            <div className="chat-status-meta">
+              <TelemetrySummary
+                label="Tokens"
+                metrics={thread.threadMetrics}
+                variant="inline"
+                helpLines={THREAD_TELEMETRY_HELP_LINES}
+              />
+              {streamStatus === 'streaming' ? (
+                <TelemetrySummary
+                  label="Live"
+                  metrics={liveTelemetry}
+                  variant="inline"
+                  compact
+                />
+              ) : null}
+            </div>
+          ) : null}
         </div>
       )}
-      {!minimalUi && <TodoPanel todos={todos} activeTodoId={activeTodoId} fastMode={fastMode} isStreaming={streamStatus === 'streaming'} />}
       <div className="chat-scroll-area">
         <MessageList
           messages={thread.messages}
@@ -148,40 +194,50 @@ export function ChatTab({
           onRetryTurn={onRetryTurn}
         />
       </div>
-      <ChatComposer
-        disabled={isStreaming}
-        onSend={onSend}
-        onStop={onStop}
-        referenceImagesCount={thread.images?.length ?? 0}
-        examplePrompts={availablePrompts}
-        promptHistory={promptHistory}
-        mcpTools={mcpTools}
-        mcpToolHints={mcpToolHints}
-        mcpToolEnabled={mcpToolEnabled}
-        onMcpToolToggle={onMcpToolToggle}
-        mcpToolsLoading={mcpToolsLoading}
-        mcpToolsError={mcpToolsError}
-        modelOptions={selectionOptions.map((option) => ({
-          value: option.value,
-          label: option.label
-        }))}
-        selectedModelValue={selectedOption?.value ?? ''}
-        onModelSelectionChange={(value) => {
-          const option = selectionOptions.find((entry) => entry.value === value)
-          if (!option) return
-          onVlmSelectionChange?.(option.provider, option.model)
-        }}
-        fastMode={fastMode}
-        fastModeAvailable={fastModeAvailable}
-        onFastModeToggle={onFastModeToggle}
-        modelLoading={vlmLoading}
-        modelError={vlmError}
-        modelLocked={selectorDisabled}
-        showModelSelector={!minimalUi}
-        showMcpTools={!minimalUi}
-        showFastMode={!minimalUi}
-        runtimeHint={!minimalUi ? runtimeClaimHint : null}
-      />
+      <div className="chat-composer-dock">
+        {!minimalUi && (
+          <TodoPanel
+            todos={todos}
+            activeTodoId={activeTodoId}
+            fastMode={fastMode}
+            isStreaming={streamStatus === 'streaming'}
+          />
+        )}
+        <ChatComposer
+          disabled={isStreaming}
+          onSend={onSend}
+          onStop={onStop}
+          referenceImagesCount={thread.images?.length ?? 0}
+          examplePrompts={availablePrompts}
+          promptHistory={promptHistory}
+          mcpTools={mcpTools}
+          mcpToolHints={mcpToolHints}
+          mcpToolEnabled={mcpToolEnabled}
+          onMcpToolToggle={onMcpToolToggle}
+          mcpToolsLoading={mcpToolsLoading}
+          mcpToolsError={mcpToolsError}
+          modelOptions={selectionOptions.map((option) => ({
+            value: option.value,
+            label: option.label
+          }))}
+          selectedModelValue={selectedOption?.value ?? ''}
+          onModelSelectionChange={(value) => {
+            const option = selectionOptions.find((entry) => entry.value === value)
+            if (!option) return
+            onVlmSelectionChange?.(option.provider, option.model)
+          }}
+          fastMode={fastMode}
+          fastModeAvailable={fastModeAvailable}
+          onFastModeToggle={onFastModeToggle}
+          modelLoading={vlmLoading}
+          modelError={vlmError}
+          modelLocked={selectorDisabled}
+          showModelSelector={!minimalUi}
+          showMcpTools={!minimalUi}
+          showFastMode={!minimalUi}
+          runtimeHint={!minimalUi ? runtimeClaimHint : null}
+        />
+      </div>
     </div>
   )
 }

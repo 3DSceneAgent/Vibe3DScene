@@ -4,6 +4,7 @@ import {
   getThreadStreamSession,
   retryChatStream,
   resumeChatStream,
+  stopThreadStreamSession,
   streamChat,
   getTodos,
   getSceneRenders,
@@ -34,9 +35,11 @@ import type {
   HistoryMessage,
   ImageAsset,
   SceneArtifactManifestInfo,
+  StreamProgress,
   StreamEvent,
   ThreadHistoryInfo,
   ThreadListInfo,
+  ThreadStreamSessionInfo,
   ThreadSummaryInfo,
   TodoItem,
   VlmProviderOption
@@ -78,6 +81,40 @@ type ThreadLoadingState = {
   renders: boolean
   gltf: boolean
   download: boolean
+}
+
+type StartThreadStreamRunArgs = {
+  threadId: string
+  turnId: string
+  assistantId: string
+  baselineMessages: Message[]
+  startStream: (
+    handleEvent: (event: StreamEvent) => void,
+    signal: AbortSignal,
+    handleSessionStateChange: (state: { streamRequestId: string | null; lastEventId: number }) => void
+  ) => Promise<void>
+}
+
+function hasLocalStreamingMessages(thread: Thread | null | undefined): boolean {
+  return Boolean(thread?.messages.some((message) => message.status === 'streaming'))
+}
+
+function hasLocalStreamSession(thread: Thread | null | undefined): boolean {
+  return Boolean(thread?.streamSession?.streamRequestId)
+}
+
+function hasLocalStreamingState(thread: Thread | null | undefined): boolean {
+  return hasLocalStreamSession(thread) || hasLocalStreamingMessages(thread)
+}
+
+function isRemoteStreamSessionLive(sessionInfo: ThreadStreamSessionInfo | null | undefined): boolean {
+  if (!sessionInfo?.stream_request_id) {
+    return false
+  }
+  if (sessionInfo.done) {
+    return false
+  }
+  return sessionInfo.active || sessionInfo.resumable
 }
 
 function createThreadLoadingState(): ThreadLoadingState {
@@ -331,7 +368,9 @@ function applyThreadSummary(current: Thread | undefined, summary: ThreadSummaryI
       images: [],
       graphEvents: [],
       occupyingResources: summary.has_runtime,
-      lastRuntimeActiveMs: summaryUpdatedAtMs || 0
+      lastRuntimeActiveMs: summaryUpdatedAtMs || 0,
+      threadMetrics: null,
+      turnMetricsByTurnId: {}
     }
   }
   return {
@@ -360,7 +399,9 @@ function applyThreadHistory(current: Thread, history: ThreadHistoryInfo): Thread
     updatedAtMs: historyUpdatedAtMs || current.updatedAtMs,
     messages: [...historyMessages, ...pendingStreamingMessages],
     todos: history.todos ?? current.todos,
-    sceneRevision: history.scene_revision ?? current.sceneRevision ?? null
+    sceneRevision: history.scene_revision ?? current.sceneRevision ?? null,
+    threadMetrics: history.thread_metrics ?? current.threadMetrics ?? null,
+    turnMetricsByTurnId: history.turn_metrics_by_turn_id ?? current.turnMetricsByTurnId ?? {}
   }
 }
 
@@ -668,6 +709,8 @@ function App() {
   const autoFetchLastRunRef = useRef<Record<string, number>>({})
   const runtimeOccupancyRef = useRef<Record<string, boolean>>({})
   const resumingThreadIdRef = useRef<string | null>(null)
+  const stopRequestedThreadsRef = useRef<Set<string>>(new Set())
+  const startThreadStreamRunRef = useRef<((args: StartThreadStreamRunArgs) => void) | null>(null)
 
   const activeThread = useMemo(
     () => threads.find((thread) => thread.id === activeThreadId) ?? null,
@@ -681,8 +724,7 @@ function App() {
       return 'streaming' as const
     }
     if (
-      activeThread.streamSession ||
-      activeThread.messages.some((message) => message.status === 'streaming') ||
+      hasLocalStreamingState(activeThread) ||
       (currentStreamRef.current?.threadId === activeThread.id && (isStreaming || isSending))
     ) {
       return 'streaming' as const
@@ -776,19 +818,51 @@ function App() {
             ? {
                 streamRequestId: streamSession.streamRequestId ?? null,
                 lastEventId: Math.max(0, Number(streamSession.lastEventId) || 0),
-                updatedAtMs: Math.max(0, Number(streamSession.updatedAtMs) || 0)
+                updatedAtMs: Math.max(0, Number(streamSession.updatedAtMs) || 0),
+                progress:
+                  streamSession.progress && typeof streamSession.progress === 'object'
+                    ? streamSession.progress
+                    : current?.progress ?? null
               }
             : null
         if (
           (current?.streamRequestId ?? null) === (normalizedNext?.streamRequestId ?? null) &&
           (current?.lastEventId ?? 0) === (normalizedNext?.lastEventId ?? 0) &&
-          (current?.updatedAtMs ?? 0) === (normalizedNext?.updatedAtMs ?? 0)
+          (current?.updatedAtMs ?? 0) === (normalizedNext?.updatedAtMs ?? 0) &&
+          (current?.progress ?? null) === (normalizedNext?.progress ?? null)
         ) {
           return thread
         }
         return {
           ...thread,
           streamSession: normalizedNext
+        }
+      })
+    },
+    [updateThread]
+  )
+
+  const setThreadStreamProgress = useCallback(
+    (threadId: string, progress: StreamProgress | null | undefined) => {
+      updateThread(threadId, (thread) => {
+        const current = thread.streamSession
+        if (!current && !progress) {
+          return thread
+        }
+        return {
+          ...thread,
+          streamSession: {
+            streamRequestId:
+              progress?.stream_request_id ??
+              current?.streamRequestId ??
+              null,
+            lastEventId: Math.max(
+              0,
+              Number(progress?.latest_seq ?? current?.lastEventId ?? 0) || 0
+            ),
+            updatedAtMs: Date.now(),
+            progress: progress ?? current?.progress ?? null
+          }
         }
       })
     },
@@ -1625,12 +1699,28 @@ function App() {
   )
 
   const handleStop = useCallback(() => {
-    if (streamAbortRef.current) {
-      streamAbortRef.current.abort()
+    const currentStream = currentStreamRef.current
+    const threadId = currentStream?.threadId ?? activeThreadId
+    if (!threadId) {
+      return
     }
-    
-    if (currentStreamRef.current) {
-      const { threadId, runId } = currentStreamRef.current
+    stopRequestedThreadsRef.current.add(threadId)
+    const streamRequestId =
+      threadsRef.current.find((thread) => thread.id === threadId)?.streamSession?.streamRequestId ?? null
+
+    void (async () => {
+      if (settings.backendUrl) {
+        try {
+          await stopThreadStreamSession(settings.backendUrl, threadId, streamRequestId)
+        } catch (error) {
+          console.warn(`Failed to request stream stop for ${threadId}`, error)
+        }
+      }
+
+      if (streamAbortRef.current) {
+        streamAbortRef.current.abort()
+      }
+
       updateThread(threadId, (thread) => {
         const messages = finalizeStreamingMessages(thread.messages)
         return messages === thread.messages
@@ -1638,20 +1728,24 @@ function App() {
           : { ...thread, messages, streamSession: null }
       })
       setThreadStreamStatus(threadId, 'complete')
-      if (streamRunIdRef.current === runId) {
-        streamRunIdRef.current += 1
+
+      if (currentStreamRef.current) {
+        const { runId } = currentStreamRef.current
+        if (streamRunIdRef.current === runId) {
+          streamRunIdRef.current += 1
+        }
+        currentStreamRef.current = null
       }
-      currentStreamRef.current = null
-    }
-    
-    messageIdMapRef.current.clear()
-    knownToolCallKeysRef.current.clear()
-    pendingToolTimestampsRef.current.clear()
-    for (const timer of pendingToolTimersRef.current.values()) clearTimeout(timer)
-    pendingToolTimersRef.current.clear()
-    setIsStreaming(false)
-    setIsSending(false)
-  }, [setThreadStreamStatus, updateThread])
+
+      messageIdMapRef.current.clear()
+      knownToolCallKeysRef.current.clear()
+      pendingToolTimestampsRef.current.clear()
+      for (const timer of pendingToolTimersRef.current.values()) clearTimeout(timer)
+      pendingToolTimersRef.current.clear()
+      setIsStreaming(false)
+      setIsSending(false)
+    })()
+  }, [activeThreadId, setThreadStreamStatus, settings.backendUrl, updateThread])
 
   function resolveThreadSelection(thread: Thread) {
     const selectedProvider =
@@ -1847,17 +1941,8 @@ function App() {
     assistantId,
     baselineMessages,
     startStream
-  }: {
-    threadId: string
-    turnId: string
-    assistantId: string
-    baselineMessages: Message[]
-    startStream: (
-      handleEvent: (event: StreamEvent) => void,
-      signal: AbortSignal,
-      handleSessionStateChange: (state: { streamRequestId: string | null; lastEventId: number }) => void
-    ) => Promise<void>
-  }) {
+  }: StartThreadStreamRunArgs) {
+    stopRequestedThreadsRef.current.delete(threadId)
     if (streamAbortRef.current) {
       streamAbortRef.current.abort()
     }
@@ -1943,7 +2028,11 @@ function App() {
       }
       if (event.event === 'done') {
         sawTerminalStreamEvent = true
+        stopRequestedThreadsRef.current.delete(threadId)
         setThreadStreamStatus(threadId, 'complete')
+      }
+      if (event.progress) {
+        setThreadStreamProgress(threadId, event.progress)
       }
       if (event.event === 'graph_node' && event.graph_node) {
         const graphEvent: GraphNodeStream = event.graph_node
@@ -2063,6 +2152,7 @@ function App() {
 
       if (event.error) {
         sawTerminalStreamEvent = true
+        stopRequestedThreadsRef.current.delete(threadId)
         appendStreamErrorMessage(event.error)
         setThreadStreamStatus(threadId, 'complete')
         return
@@ -2286,6 +2376,11 @@ function App() {
           return
         }
         if (error instanceof ApiRequestError && error.status === 409) {
+          if (stopRequestedThreadsRef.current.has(threadId)) {
+            appendStreamErrorMessage('Previous run is still stopping. Please retry in a moment.')
+            setThreadStreamStatus(threadId, 'complete')
+            return
+          }
           const detail = error.detail
           const streamRequestId =
             detail && typeof detail === 'object' && 'stream_request_id' in detail
@@ -2336,9 +2431,11 @@ function App() {
         }
       })
   }
+  startThreadStreamRunRef.current = startThreadStreamRun
 
   const clearThreadStreamSessionState = useCallback(
     (threadId: string, options?: { finalizeMessages?: boolean }) => {
+      stopRequestedThreadsRef.current.delete(threadId)
       setThreadStreamStatus(threadId, 'complete')
       setThreadStreamSession(threadId, null)
       if (!options?.finalizeMessages) {
@@ -2361,6 +2458,9 @@ function App() {
       }
     ): Promise<boolean> => {
       if (!settings.backendUrl || backendStatus !== 'online') {
+        return false
+      }
+      if (stopRequestedThreadsRef.current.has(threadId)) {
         return false
       }
       if (currentStreamRef.current?.threadId === threadId) {
@@ -2387,11 +2487,18 @@ function App() {
 
       if (!streamRequestId) {
         const sessionInfo = await getThreadStreamSession(settings.backendUrl, threadId)
-        if (!sessionInfo.resumable || !sessionInfo.stream_request_id) {
+        if (!isRemoteStreamSessionLive(sessionInfo)) {
+          clearThreadStreamSessionState(threadId, { finalizeMessages: true })
+          return false
+        }
+        if (!sessionInfo.stream_request_id) {
           clearThreadStreamSessionState(threadId, { finalizeMessages: true })
           return false
         }
         streamRequestId = sessionInfo.stream_request_id
+        if (sessionInfo.progress) {
+          setThreadStreamProgress(threadId, sessionInfo.progress)
+        }
       }
 
       const thread = threadsRef.current.find((entry) => entry.id === threadId)
@@ -2421,7 +2528,15 @@ function App() {
       })
       setIsSending(false)
 
-      startThreadStreamRun({
+      const runThreadStream = startThreadStreamRunRef.current
+      if (!runThreadStream) {
+        return false
+      }
+      if (!streamRequestId) {
+        return false
+      }
+
+      runThreadStream({
         threadId,
         turnId,
         assistantId,
@@ -2442,10 +2557,10 @@ function App() {
     [
       backendStatus,
       clearThreadStreamSessionState,
+      setThreadStreamProgress,
       setThreadStreamSession,
       setThreadStreamStatus,
       settings.backendUrl,
-      startThreadStreamRun,
       updateThread
     ]
   )
@@ -2471,18 +2586,31 @@ function App() {
         if (cancelled) {
           return
         }
+        const remoteSessionLive = isRemoteStreamSessionLive(sessionInfo)
+        if (remoteSessionLive && sessionInfo.progress) {
+          setThreadStreamProgress(threadId, sessionInfo.progress)
+        }
+        if (stopRequestedThreadsRef.current.has(threadId)) {
+          if (!remoteSessionLive) {
+            stopRequestedThreadsRef.current.delete(threadId)
+          } else {
+            const thread = threadsRef.current.find((entry) => entry.id === threadId)
+            if (hasLocalStreamingState(thread)) {
+              clearThreadStreamSessionState(threadId, { finalizeMessages: true })
+            }
+            return
+          }
+        }
         const thread = threadsRef.current.find((entry) => entry.id === threadId)
-        const hasLocalStreamingState = Boolean(thread?.streamSession) || Boolean(
-          thread?.messages.some((message) => message.status === 'streaming')
-        )
-        if (sessionInfo.stream_request_id && (sessionInfo.active || hasLocalStreamingState)) {
+        const hasLocalState = hasLocalStreamingState(thread)
+        if (remoteSessionLive && (sessionInfo.active || hasLocalState)) {
           await resumeThreadStream(threadId, {
             streamRequestId: sessionInfo.stream_request_id,
             lastEventId: thread?.streamSession?.lastEventId ?? 0
           })
           return
         }
-        if (thread?.streamSession || thread?.messages.some((message) => message.status === 'streaming')) {
+        if (hasLocalState) {
           clearThreadStreamSessionState(threadId, { finalizeMessages: true })
         }
       } catch (error) {
@@ -2509,6 +2637,7 @@ function App() {
     clearThreadStreamSessionState,
     isStorageHydrated,
     resumeThreadStream,
+    setThreadStreamProgress,
     settings.backendUrl
   ])
 
@@ -2523,17 +2652,28 @@ function App() {
     if (settings.backendUrl && backendStatus === 'online') {
       try {
         const sessionInfo = await getThreadStreamSession(settings.backendUrl, threadId)
+        const remoteSessionLive = isRemoteStreamSessionLive(sessionInfo)
+        if (remoteSessionLive && sessionInfo.progress) {
+          setThreadStreamProgress(threadId, sessionInfo.progress)
+        }
+        if (stopRequestedThreadsRef.current.has(threadId)) {
+          if (remoteSessionLive) {
+            return false
+          }
+          stopRequestedThreadsRef.current.delete(threadId)
+        }
         if (
-          sessionInfo.stream_request_id &&
-          (sessionInfo.active ||
-            Boolean(activeThread.streamSession) ||
-            activeThread.messages.some((message) => message.status === 'streaming'))
+          remoteSessionLive &&
+          (sessionInfo.active || hasLocalStreamingState(activeThread))
         ) {
           await resumeThreadStream(threadId, {
             streamRequestId: sessionInfo.stream_request_id,
             lastEventId: activeThread.streamSession?.lastEventId ?? 0
           })
           return false
+        }
+        if (!remoteSessionLive && hasLocalStreamingState(activeThread)) {
+          clearThreadStreamSessionState(threadId, { finalizeMessages: true })
         }
       } catch (error) {
         console.warn(`Failed to probe active stream session for ${threadId}`, error)

@@ -1,6 +1,6 @@
 # Configuration Reference
 
-Last updated: 2026-03-30
+Last updated: 2026-04-04
 
 This document summarizes the main environment variables used by the current runtime. For defaults and validation logic, the source of truth is `scene_agent/config.py` plus MCP/runtime-specific modules such as `mcp_server/runtime.py`.
 
@@ -53,10 +53,10 @@ This document summarizes the main environment variables used by the current runt
 | `API_STREAM_TIMEOUT_SECONDS` | Idle timeout for normal streaming responses. |
 | `API_PLAN_STREAM_TIMEOUT_SECONDS` | Longer idle timeout for planning-heavy streams. |
 | `FAST_MODE_DEFAULT` | Default `fast_mode` value when a request omits it. |
-| `SCENE_AGENT_ENABLE_PENETRATION_VERIFY` | Enables the internal geometry penetration check that single-agent `verify` can run alongside VLM verification. |
-| `SCENE_AGENT_PENETRATION_THRESHOLD_M` | Minimum penetration depth in meters before geometry verification marks the merged verify result as `working` (default `0.02`). |
-| `SCENE_AGENT_PENETRATION_MAX_CANDIDATE_PAIRS` | Broad-phase candidate limit for internal geometry verification. |
-| `SCENE_AGENT_PENETRATION_MAX_REPORTED_PAIRS` | Maximum confirmed penetration pairs included in verification payloads. |
+| `SCENE_AGENT_ENABLE_PENETRATION_VERIFY` | Enables the internal Blender command `check_scene_penetration` during single-agent `verify`. This is a runtime-only verification feature, not a public MCP tool. |
+| `SCENE_AGENT_PENETRATION_THRESHOLD_M` | Minimum penetration depth in meters before geometry verification marks the merged verify result as `working` (default `0.02`). This is intentionally conservative so only more obvious intersections override a `done` status. |
+| `SCENE_AGENT_PENETRATION_MAX_CANDIDATE_PAIRS` | Broad-phase candidate limit for internal geometry verification before narrow-phase BVH checks run. |
+| `SCENE_AGENT_PENETRATION_MAX_REPORTED_PAIRS` | Maximum confirmed penetration pairs included in the `verification` payload under `penetration_check`. |
 | `PLAN_MODE_MAX_AGENT_TURNS` | Agent-turn budget for plan mode. |
 | `PLAN_MODE_MAX_TOOL_BATCHES` | Tool-batch budget for plan mode. |
 | `PLAN_MODE_MAX_REPLANS` | Replan budget for plan mode. |
@@ -171,6 +171,8 @@ This document summarizes the main environment variables used by the current runt
 - Treat generator-family flags as mutually exclusive unless the code explicitly documents otherwise.
 - In colocated external deployments, set `TOOL_SERVICE_HOST` once and override only the exceptions.
 - For multi-worker and persistent operation, Redis plus shared storage should be treated as part of the baseline deployment, not as optional polish.
+- Penetration verification settings are fail-fast: invalid values should be corrected in `.env` rather than relying on silent fallback.
+- The penetration check supplements VLM-based verification. It is meant to catch more obvious mesh intersections, not to replace visual verification as the primary evidence source.
 
 ## 9. Related Docs
 

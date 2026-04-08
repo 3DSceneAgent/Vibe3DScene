@@ -1,6 +1,9 @@
 import asyncio
 import time
 
+from fastapi.testclient import TestClient
+
+from scene_agent.interfaces import api as api_module
 from scene_agent.interfaces.api import routes_chat
 
 
@@ -39,6 +42,22 @@ def test_create_stream_session_for_thread_rejects_second_active_session() -> Non
     finally:
         routes_chat._ACTIVE_STREAM_SESSIONS.clear()
         routes_chat._ACTIVE_STREAM_SESSIONS.update(original_sessions)
+
+
+def test_build_thread_stream_session_response_marks_done_session_not_resumable() -> None:
+    session = routes_chat._ActiveStreamSession(
+        stream_request_id="stream-done",
+        thread_id="thread-done",
+        request_id="request-done",
+    )
+    session.mark_done()
+
+    payload = routes_chat._build_thread_stream_session_response("thread-done", session)
+
+    assert payload.active is False
+    assert payload.resumable is False
+    assert payload.done is True
+    assert payload.stream_request_id == "stream-done"
 
 
 def test_coerce_last_event_id_handles_invalid_values() -> None:
@@ -108,6 +127,81 @@ def test_active_stream_session_request_stop_records_reason_once() -> None:
     assert session.termination_reason == "ownership_lost"
     assert session.request_stop(reason="another_reason") is False
     assert session.termination_reason == "ownership_lost"
+
+
+def test_active_stream_session_tracks_llm_call_progress() -> None:
+    session = routes_chat._ActiveStreamSession(
+        stream_request_id="stream-telemetry",
+        thread_id="thread-telemetry",
+        request_id="request-telemetry",
+    )
+
+    session.note_llm_call_record(
+        {
+            "input_tokens": 100,
+            "output_tokens": 25,
+            "total_tokens": 125,
+            "image_input_tokens": 30,
+            "has_image_inputs": True,
+            "context_limit_tokens": 1048576,
+        }
+    )
+
+    progress = session.progress_snapshot()
+    assert progress["llm_input_tokens"] == 100
+    assert progress["llm_output_tokens"] == 25
+    assert progress["llm_total_tokens"] == 125
+    assert progress["image_input_tokens"] == 30
+    assert progress["peak_context_used_tokens"] == 100
+    assert progress["peak_context_limit_tokens"] == 1048576
+
+
+def test_stop_thread_stream_session_route_requests_stop(monkeypatch) -> None:
+    session = routes_chat._ActiveStreamSession(
+        stream_request_id="stream-stop-route",
+        thread_id="thread-stop-route",
+        request_id="request-stop-route",
+    )
+
+    monkeypatch.setattr(routes_chat, "resolve_frontend_client_id", lambda _request: "client-a")
+    monkeypatch.setattr(routes_chat, "ensure_frontend_client_can_manage_thread", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(routes_chat, "_find_thread_stream_session", lambda *_args, **_kwargs: session)
+
+    with TestClient(api_module.app) as client:
+        response = client.post(
+            "/threads/thread-stop-route/stream-session/stop",
+            json={"stream_request_id": "stream-stop-route"},
+            headers={"X-Frontend-Client-Id": "client-a"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["accepted"] is True
+    assert payload["already_requested"] is False
+    assert payload["done"] is False
+    assert session.should_stop() is True
+
+
+def test_stop_thread_stream_session_route_rejects_mismatched_stream_id(monkeypatch) -> None:
+    session = routes_chat._ActiveStreamSession(
+        stream_request_id="stream-stop-current",
+        thread_id="thread-stop-conflict",
+        request_id="request-stop-conflict",
+    )
+
+    monkeypatch.setattr(routes_chat, "resolve_frontend_client_id", lambda _request: "client-a")
+    monkeypatch.setattr(routes_chat, "ensure_frontend_client_can_manage_thread", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(routes_chat, "_find_thread_stream_session", lambda *_args, **_kwargs: session)
+
+    with TestClient(api_module.app) as client:
+        response = client.post(
+            "/threads/thread-stop-conflict/stream-session/stop",
+            json={"stream_request_id": "stream-stop-old"},
+            headers={"X-Frontend-Client-Id": "client-a"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["stream_request_id"] == "stream-stop-current"
 
 
 def test_active_stream_session_caps_history_and_replays_by_sequence(monkeypatch) -> None:

@@ -259,6 +259,9 @@ def _sanitize_graph_state_patch(update: dict[str, Any]) -> dict[str, Any]:
     for key, value in update.items():
         if key == "messages":
             continue
+        if key == "llm_call_records":
+            patch["llm_call_record_count"] = len(value) if isinstance(value, list) else 0
+            continue
         patch[key] = _sanitize_stream_value(value)
     return patch
 
@@ -1064,6 +1067,13 @@ _REASONING_LIKE_CONTENT_TYPES = frozenset(
         "summary_text",
     }
 )
+_VISIBLE_TEXT_CONTENT_TYPES = frozenset(
+    {
+        "text",
+        "output_text",
+        "text_delta",
+    }
+)
 _IMAGE_LIKE_CONTENT_TYPES = frozenset(
     {
         "image",
@@ -1099,6 +1109,26 @@ def _content_block_has_thought_signature(item: Dict[str, Any]) -> bool:
     return False
 
 
+def _content_block_is_explicit_reasoning(
+    item: Dict[str, Any],
+    *,
+    item_type: str | None = None,
+) -> bool:
+    normalized_type = item_type or _content_block_type(item)
+    if normalized_type in _REASONING_LIKE_CONTENT_TYPES:
+        return True
+    if item.get("thought") is True:
+        return True
+    if not _content_block_has_thought_signature(item):
+        return False
+    if normalized_type in _VISIBLE_TEXT_CONTENT_TYPES:
+        text = item.get("text")
+        content = item.get("content")
+        if isinstance(text, str) or isinstance(content, str):
+            return False
+    return True
+
+
 def _extract_text_from_content_item(item: Any) -> str | None:
     if isinstance(item, str):
         return item
@@ -1119,9 +1149,7 @@ def _extract_text_from_content_item(item: Any) -> str | None:
     item_type = _content_block_type(item)
     if item_type in _TOOL_LIKE_CONTENT_TYPES:
         return ""
-    if item_type in _REASONING_LIKE_CONTENT_TYPES:
-        return ""
-    if _content_block_has_thought_signature(item):
+    if _content_block_is_explicit_reasoning(item, item_type=item_type):
         return ""
 
     if item_type == "non_standard":
@@ -1238,7 +1266,7 @@ def _extract_reasoning_from_value(value: Any, *, allow_plain_string: bool = Fals
         return ""
 
     item_type = _content_block_type(value)
-    if item_type in _REASONING_LIKE_CONTENT_TYPES or _content_block_has_thought_signature(value):
+    if _content_block_is_explicit_reasoning(value, item_type=item_type):
         if item_type == "reasoning":
             reasoning = value.get("reasoning")
             if isinstance(reasoning, str):
@@ -1604,6 +1632,18 @@ class HistoryMessageResponse(BaseModel):
     attached_images: list[ImageAssetResponse] = Field(default_factory=list)
 
 
+class TelemetryMetricsResponse(BaseModel):
+    input_tokens: int | None = 0
+    output_tokens: int | None = 0
+    total_tokens: int | None = 0
+    image_input_tokens: int | None = 0
+    has_image_inputs: bool = False
+    llm_call_count: int = 0
+    tool_call_count: int = 0
+    peak_context_used_tokens: int | None = None
+    peak_context_limit_tokens: int | None = None
+
+
 class ThreadHistoryResponse(BaseModel):
     thread_id: str
     title: str
@@ -1611,6 +1651,8 @@ class ThreadHistoryResponse(BaseModel):
     scene_revision: int | None = None
     messages: list[HistoryMessageResponse] = Field(default_factory=list)
     todos: list[Dict[str, Any]] = Field(default_factory=list)
+    thread_metrics: TelemetryMetricsResponse = Field(default_factory=TelemetryMetricsResponse)
+    turn_metrics_by_turn_id: dict[str, TelemetryMetricsResponse] = Field(default_factory=dict)
 
 
 class ThreadStreamSessionResponse(BaseModel):
@@ -1622,6 +1664,18 @@ class ThreadStreamSessionResponse(BaseModel):
     done: bool = False
     updated_at_ms: int | None = None
     progress: dict[str, Any] = Field(default_factory=dict)
+
+
+class ThreadStreamSessionStopRequest(BaseModel):
+    stream_request_id: str | None = None
+
+
+class ThreadStreamSessionStopResponse(BaseModel):
+    thread_id: str
+    stream_request_id: str | None = None
+    accepted: bool
+    already_requested: bool
+    done: bool
 
 
 class SceneArtifactRenderResponse(BaseModel):
@@ -2261,6 +2315,107 @@ def _extract_attached_image_ids(serialized: dict[str, Any]) -> list[str]:
     return [item for item in raw_ids if isinstance(item, str) and item.strip()]
 
 
+def _coerce_llm_call_records(raw_records: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_records, list):
+        return []
+    records: list[dict[str, Any]] = []
+    for entry in raw_records:
+        if isinstance(entry, dict):
+            records.append(dict(entry))
+    return records
+
+
+def _exact_sum_from_records(records: list[dict[str, Any]], field_name: str) -> int | None:
+    if not records:
+        return 0
+    total = 0
+    for record in records:
+        raw_value = record.get(field_name)
+        value = _safe_int_optional(raw_value)
+        if value is None:
+            return None
+        total += value
+    return total
+
+
+def _aggregate_llm_call_records(records: list[dict[str, Any]]) -> TelemetryMetricsResponse:
+    has_image_inputs = any(record.get("has_image_inputs") is True for record in records)
+    image_total = 0
+    image_unknown = False
+    for record in records:
+        if record.get("has_image_inputs") is not True:
+            continue
+        value = _safe_int_optional(record.get("image_input_tokens"))
+        if value is None:
+            image_unknown = True
+            break
+        image_total += value
+
+    peak_context_used_tokens: int | None = 0
+    peak_context_limit_tokens: int | None = None
+    peak_unknown = False
+    if records:
+        peak_record: dict[str, Any] | None = None
+        peak_value = -1
+        for record in records:
+            value = _safe_int_optional(record.get("input_tokens"))
+            if value is None:
+                peak_unknown = True
+                peak_record = None
+                break
+            if value > peak_value:
+                peak_value = value
+                peak_record = record
+        if peak_unknown:
+            peak_context_used_tokens = None
+            peak_context_limit_tokens = None
+        elif peak_record is not None:
+            peak_context_used_tokens = peak_value
+            peak_context_limit_tokens = _safe_int_optional(peak_record.get("context_limit_tokens"))
+
+    return TelemetryMetricsResponse(
+        input_tokens=_exact_sum_from_records(records, "input_tokens"),
+        output_tokens=_exact_sum_from_records(records, "output_tokens"),
+        total_tokens=_exact_sum_from_records(records, "total_tokens"),
+        image_input_tokens=None if image_unknown else image_total,
+        has_image_inputs=has_image_inputs,
+        llm_call_count=len(records),
+        tool_call_count=0,
+        peak_context_used_tokens=peak_context_used_tokens,
+        peak_context_limit_tokens=peak_context_limit_tokens,
+    )
+
+
+def _collect_tool_call_counts_by_turn(messages: list[Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    seen_keys: set[str] = set()
+    current_turn_id: str | None = None
+    for index, raw_message in enumerate(messages):
+        serialized = serialize_message(raw_message)
+        message_type = str(serialized.get("type") or "")
+        message_id = serialized.get("id")
+        if message_type == "human":
+            if isinstance(message_id, str) and message_id:
+                current_turn_id = message_id
+            else:
+                current_turn_id = None
+            continue
+        if message_type not in {"ai", "assistant"} or not current_turn_id:
+            continue
+        for tool_call in extract_message_tool_calls(serialized):
+            key = (
+                tool_call.get("key")
+                or tool_call.get("id")
+                or f"{current_turn_id}:{tool_call.get('name') or 'tool'}:{index}"
+            )
+            normalized_key = f"{current_turn_id}:{key}"
+            if normalized_key in seen_keys:
+                continue
+            seen_keys.add(normalized_key)
+            counts[current_turn_id] = counts.get(current_turn_id, 0) + 1
+    return counts
+
+
 def _derive_thread_title(thread_id: str, messages: list[Any]) -> str:
     meta = get_session_coordinator().get_session_meta(thread_id) or {}
     raw_title = str(meta.get("title") or "").strip()
@@ -2280,6 +2435,7 @@ def build_thread_history_payload(thread_id: str) -> ThreadHistoryResponse:
     channel_values = _load_thread_checkpoint_channel_values(thread_id)
     raw_messages = channel_values.get("messages")
     messages = list(raw_messages) if isinstance(raw_messages, list) else []
+    llm_call_records = _coerce_llm_call_records(channel_values.get("llm_call_records"))
     meta = get_session_coordinator().get_session_meta(thread_id) or {}
     checkpoint_updated_at_ms = _load_thread_checkpoint_timestamp_ms(thread_id)
     meta_updated_at_ms = (
@@ -2366,6 +2522,24 @@ def build_thread_history_payload(thread_id: str) -> ThreadHistoryResponse:
             fallback_todos_raw=channel_values.get("todos"),
         )
     )
+    tool_call_counts_by_turn = _collect_tool_call_counts_by_turn(messages)
+    turn_llm_call_records: dict[str, list[dict[str, Any]]] = {}
+    thread_level_records: list[dict[str, Any]] = []
+    for record in llm_call_records:
+        turn_id = record.get("turn_id")
+        if isinstance(turn_id, str) and turn_id.strip():
+            turn_llm_call_records.setdefault(turn_id.strip(), []).append(record)
+        thread_level_records.append(record)
+
+    turn_metrics_by_turn_id: dict[str, TelemetryMetricsResponse] = {}
+    metric_turn_ids = set(turn_llm_call_records.keys()) | set(tool_call_counts_by_turn.keys())
+    for turn_id in sorted(metric_turn_ids):
+        metrics = _aggregate_llm_call_records(turn_llm_call_records.get(turn_id, []))
+        metrics.tool_call_count = tool_call_counts_by_turn.get(turn_id, 0)
+        turn_metrics_by_turn_id[turn_id] = metrics
+
+    thread_metrics = _aggregate_llm_call_records(thread_level_records)
+    thread_metrics.tool_call_count = sum(tool_call_counts_by_turn.values())
     return ThreadHistoryResponse(
         thread_id=thread_id,
         title=_derive_thread_title(thread_id, messages),
@@ -2373,6 +2547,8 @@ def build_thread_history_payload(thread_id: str) -> ThreadHistoryResponse:
         scene_revision=get_thread_scene_revision(thread_id),
         messages=history_messages,
         todos=todos,
+        thread_metrics=thread_metrics,
+        turn_metrics_by_turn_id=turn_metrics_by_turn_id,
     )
 
 

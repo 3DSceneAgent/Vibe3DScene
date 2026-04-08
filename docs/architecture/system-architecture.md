@@ -1,6 +1,6 @@
 # System Architecture
 
-Last updated: 2026-03-30
+Last updated: 2026-04-04
 
 This document provides a high-level view of the current Vibe3DScene architecture, deployment topologies, and system boundaries. For the exact runtime graph and node-level control flow, see [Runtime Workflow](./runtime-workflow.md).
 
@@ -54,6 +54,8 @@ The graph runtime is responsible for:
 - single-agent or experimental dual-agent execution
 - verification and evaluator-based convergence
 
+In addition to agent-callable MCP tools, the graph runtime can also trigger a few runtime-only Blender commands for system-managed steps such as scene observation or verify-time geometry checks.
+
 ### MCP server
 
 The MCP layer is the bridge between the agent runtime and the tool surface.
@@ -64,6 +66,8 @@ It handles:
 - tool gating from environment and runtime mode
 - connections to Blender tools
 - connections to optional external retrieval/generation/reconstruction services
+
+The MCP layer does **not** include every internal runtime capability. Some verification-only Blender commands are intentionally kept outside the public MCP registry.
 
 ### Blender runtime
 
@@ -183,6 +187,7 @@ Current separation:
   - MCP runtime
   - tool registry
   - Blender-facing tools
+  - runtime-only Blender command integrations used by graph nodes
   - service adapters and gating logic
 - out-of-repo
   - TRELLIS2
@@ -223,7 +228,7 @@ At a high level, the project now behaves like a layered scene-agent platform rat
 
 - requests enter through FastAPI
 - runtime control lives in LangGraph
-- tool invocation is mediated by MCP
+- agent-callable tool invocation is mediated by MCP, while a small number of runtime-only Blender commands are invoked directly by graph nodes
 - Blender and external services execute the actual scene, rendering, retrieval, and generation work
 - Redis and persisted storage provide coordination and recovery
 

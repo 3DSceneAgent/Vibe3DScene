@@ -51,18 +51,65 @@ def test_plan_node_uses_single_fallback_todo_when_model_returns_empty():
     assert result["todos"][0]["description"] == "Add one red cube to the scene."
 
 
-def test_plan_node_fallback_records_all_raw_model_text_in_one_todo():
+def test_plan_node_fallback_splits_numbered_list_text_into_multiple_todos():
     result = plan_node(
         {"messages": [HumanMessage(content="Help me build a scene.")]},
         planner_model=_PlannerModelStub(
             "1. Add a floor and wall.\n2. Place a sofa near the center.\n3. Add a lamp behind it."
         ),
     )
-    assert len(result["todos"]) == 1
-    assert result["todos"][0]["status"] == "pending"
-    assert result["todos"][0]["description"] == (
-        "1. Add a floor and wall. 2. Place a sofa near the center. 3. Add a lamp behind it."
+    assert [todo["description"] for todo in result["todos"]] == [
+        "Add a floor and wall.",
+        "Place a sofa near the center.",
+        "Add a lamp behind it.",
+    ]
+
+
+def test_plan_node_fallback_splits_bullet_list_text_into_multiple_todos() -> None:
+    result = plan_node(
+        {"messages": [HumanMessage(content="Make a courtyard scene.")]},
+        planner_model=_PlannerModelStub(
+            "- Add a stone floor.\n- Place a central fountain.\n- Scatter planters around the edges."
+        ),
     )
+    assert [todo["description"] for todo in result["todos"]] == [
+        "Add a stone floor.",
+        "Place a central fountain.",
+        "Scatter planters around the edges.",
+    ]
+
+
+def test_plan_node_fallback_parses_fenced_json_and_discards_thought() -> None:
+    result = plan_node(
+        {"messages": [HumanMessage(content="Build the house.")]},
+        planner_model=_PlannerModelStub(
+            """```json
+            [
+              {
+                "thought": "First I should block out the main form.",
+                "description": "Create the main building blocks."
+              },
+              {
+                "thought": "Then I can add facade details.",
+                "description": "Insert the large windows and front door."
+              }
+            ]
+            ```"""
+        ),
+    )
+    assert [todo["description"] for todo in result["todos"]] == [
+        "Create the main building blocks.",
+        "Insert the large windows and front door.",
+    ]
+
+
+def test_plan_node_fallback_uses_request_when_raw_payload_is_not_recoverable() -> None:
+    result = plan_node(
+        {"messages": [HumanMessage(content="Build a small pavilion.")]},
+        planner_model=_PlannerModelStub("```json\n{\"unexpected\": true}\n```"),
+    )
+    assert len(result["todos"]) == 1
+    assert result["todos"][0]["description"] == "Build a small pavilion."
 
 
 def test_plan_node_early_exit_reuses_existing_todos_without_invoking_model():

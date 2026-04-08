@@ -1,6 +1,6 @@
 # MCP Server and Tools
 
-Last updated: 2026-03-30
+Last updated: 2026-04-04
 
 This document summarizes the role of the in-repo MCP server, how tools are registered and gated, and which tool families are currently supported.
 
@@ -26,6 +26,11 @@ Its responsibilities are:
 - preventing invalid tool combinations from booting silently
 
 In practice, the graph runtime does not talk directly to every external service. It talks to the MCP tool surface, and the MCP server decides what is currently valid and reachable.
+
+Important exception:
+
+- a small number of runtime-only Blender commands are invoked internally by graph nodes and are **not** registered as public MCP tools
+- these commands are intended for system-managed verification or observation steps, not for direct builder/verifier tool use
 
 ## 2. Registration and Gating Model
 
@@ -81,7 +86,28 @@ Examples:
 | Reconstruction | SAM / SAM3D service | `reconstruct_full_scene` | SAM-based full-scene reconstruction. |
 | PCG | Infinigen / PCG service | `get_infinigen_available_assets`, `generate_infinigen_assets` | Depends on the PCG service stack. |
 
-## 5. Retrieval Backend Selection
+## 5. Runtime-Only Internal Blender Commands
+
+Not every Blender-facing capability is exposed through the MCP registry.
+
+Current internal-only examples include:
+
+- scene-observe support flows that use the per-thread Blender command channel directly
+- `check_scene_penetration`, which is used by single-agent `verify` when `SCENE_AGENT_ENABLE_PENETRATION_VERIFY=true`
+
+Why this stays internal:
+
+- the capability is meant to run at system-controlled verification timing
+- builder agents do not need to call it directly
+- keeping it out of the MCP registry avoids expanding the public tool surface with a runtime-only diagnostic command
+
+`check_scene_penetration` is a read-only Blender command with this role:
+
+- broad phase: rank candidate pairs using object AABBs
+- narrow phase: confirm mesh intersections with Blender BVH overlap checks
+- output: structured penetration facts merged into the `verification` payload, not a standalone MCP tool response exposed to the agent
+
+## 6. Retrieval Backend Selection
 
 `ASSET_RETRIEVAL_BACKEND` chooses which retrieval family is active:
 
@@ -95,7 +121,7 @@ Behavior:
 - `scenesmith` enables SceneSmith-compatible HSSD retrieval
 - AmbientCG material support is controlled independently via `ENABLE_AMBIENTCG`
 
-## 6. Service Endpoint Resolution
+## 7. Service Endpoint Resolution
 
 External service adapters resolve endpoints through environment variables and shared host defaults.
 
@@ -109,14 +135,15 @@ This allows a single deployment to colocate multiple tool services while still s
 
 For the complete variable list and defaults, see [Configuration Reference](../reference/configuration.md).
 
-## 7. Operational Notes
+## 8. Operational Notes
 
 - The MCP server belongs to this repository.
 - Heavy external services are expected to run in the sibling `../3DAgentTools` checkout.
 - Health probes and gating are meant to fail early rather than letting the agent discover broken tool combinations at runtime.
 - The agent runtime may still apply request-level allow-lists on top of the MCP-available tool set.
+- Internal Blender commands such as `check_scene_penetration` are documented separately from MCP tools because they bypass the public tool registry by design.
 
-## 8. Related Docs
+## 9. Related Docs
 
 - [System Architecture](../architecture/system-architecture.md)
 - [Runtime Workflow](../architecture/runtime-workflow.md)

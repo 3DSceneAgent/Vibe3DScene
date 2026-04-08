@@ -77,6 +77,7 @@ from scene_agent.utils.verification_helpers import (
     latest_verification_payload,
     replan_budget_remaining,
 )
+from scene_agent.vlm.metrics import invoke_structured_with_metrics, invoke_with_metrics
 
 class ReferenceImageNameSuggestion(BaseModel):
     name: str = ""
@@ -355,6 +356,9 @@ def _merge_reference_assets_into_catalog(
     now_iso: str,
     provider_name: str | None,
     api_key: str | None,
+    thread_id: str,
+    turn_id: str | None,
+    llm_call_records: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     synced_keys: list[str] = []
     for asset in assets:
@@ -368,6 +372,9 @@ def _merge_reference_assets_into_catalog(
                 asset=asset,
                 provider_name=provider_name,
                 api_key=api_key,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                llm_call_records=llm_call_records,
             )
             entry_key = _ensure_unique_reference_image_key(
                 suggested_name,
@@ -439,6 +446,9 @@ def _describe_reference_image_with_helper(
     asset: Any,
     provider_name: str | None,
     api_key: str | None,
+    thread_id: str,
+    turn_id: str | None,
+    llm_call_records: list[dict[str, Any]] | None = None,
 ) -> tuple[str, str]:
     fallback_name = _fallback_reference_image_name(asset)
     stored_path = str(getattr(asset, "stored_path", "")).strip()
@@ -466,10 +476,18 @@ def _describe_reference_image_with_helper(
     content.append({"type": "image_url", "image_url": {"url": data_url}})
 
     try:
-        structured = helper_model.with_structured_output(ReferenceImageNameSuggestion)
-        response = structured.invoke([HumanMessage(content=content)])
-        if not isinstance(response, ReferenceImageNameSuggestion):
-            response = ReferenceImageNameSuggestion.model_validate(response)
+        response, llm_call_record = invoke_structured_with_metrics(
+            helper_model,
+            ReferenceImageNameSuggestion,
+            [HumanMessage(content=content)],
+            thread_id=thread_id,
+            turn_id=turn_id,
+            node_name="sync_reference_catalog",
+            call_role="reference_image_name_helper",
+            provider_name=provider_name,
+        )
+        if llm_call_records is not None and isinstance(llm_call_record, dict):
+            llm_call_records.append(llm_call_record)
         suggested_key = _normalize_reference_image_key(response.name)
         caption = response.caption.strip() if isinstance(response.caption, str) else ""
         return suggested_key or fallback_name, caption[:240]
@@ -517,6 +535,9 @@ def _select_reference_image_with_helper(
     catalog: dict[str, ReferenceImageCatalogEntry],
     provider_name: str | None,
     api_key: str | None,
+    thread_id: str,
+    turn_id: str | None,
+    llm_call_records: list[dict[str, Any]] | None = None,
 ) -> tuple[bool, str | None, str]:
     if not catalog:
         return False, None, "no_catalog_images"
@@ -550,15 +571,21 @@ def _select_reference_image_with_helper(
     )
 
     try:
-        structured = helper_model.with_structured_output(ReferenceImageSelectionDecision)
-        response = structured.invoke(
+        response, llm_call_record = invoke_structured_with_metrics(
+            helper_model,
+            ReferenceImageSelectionDecision,
             [
                 SystemMessage(content=selection_prompt),
                 HumanMessage(content=selection_input),
-            ]
+            ],
+            thread_id=thread_id,
+            turn_id=turn_id,
+            node_name="prepare_reference_context",
+            call_role="reference_image_select_helper",
+            provider_name=provider_name,
         )
-        if not isinstance(response, ReferenceImageSelectionDecision):
-            response = ReferenceImageSelectionDecision.model_validate(response)
+        if llm_call_records is not None and isinstance(llm_call_record, dict):
+            llm_call_records.append(llm_call_record)
         selected_name = _normalize_reference_image_key(response.selected_name)
         reason = response.reason.strip() if isinstance(response.reason, str) else ""
         if response.should_attach and selected_name in catalog:
@@ -618,6 +645,8 @@ def sync_reference_catalog_node(
     api_key: str | None = None,
 ) -> Dict[str, Any]:
     now_iso = datetime.now().isoformat()
+    thread_id = str(state.get("thread_id") or "default")
+    turn_id = latest_human_turn_id(state)
     catalog = _coerce_reference_image_catalog(state.get("reference_image_catalog"))
     attached_image_ids = _coerce_attached_image_ids(state.get("attached_image_ids"))
     assets = _resolve_reference_assets_for_catalog_sync(
@@ -625,6 +654,7 @@ def sync_reference_catalog_node(
         catalog=catalog,
         attached_image_ids=attached_image_ids,
     )
+    llm_call_records: list[dict[str, Any]] = []
     if assets:
         _merge_reference_assets_into_catalog(
             catalog=catalog,
@@ -632,13 +662,19 @@ def sync_reference_catalog_node(
             now_iso=now_iso,
             provider_name=provider_name,
             api_key=api_key,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            llm_call_records=llm_call_records,
         )
-    return {
+    result: Dict[str, Any] = {
         "reference_image_catalog": catalog,
         "request_reference_image_keys": [],
         "request_reference_image_source": "none",
         "request_reference_image_reason": None,
     }
+    if llm_call_records:
+        result["llm_call_records"] = llm_call_records
+    return result
 
 
 def prepare_reference_context_node(
@@ -648,8 +684,11 @@ def prepare_reference_context_node(
     api_key: str | None = None,
 ) -> Dict[str, Any]:
     now_iso = datetime.now().isoformat()
+    thread_id = str(state.get("thread_id") or "default")
+    turn_id = latest_human_turn_id(state)
     catalog = _coerce_reference_image_catalog(state.get("reference_image_catalog"))
     attached_image_ids = _coerce_attached_image_ids(state.get("attached_image_ids"))
+    llm_call_records: list[dict[str, Any]] = []
 
     if attached_image_ids:
         request_keys = _request_reference_keys_for_attached_images(
@@ -676,6 +715,9 @@ def prepare_reference_context_node(
         catalog=catalog,
         provider_name=provider_name,
         api_key=api_key,
+        thread_id=thread_id,
+        turn_id=turn_id,
+        llm_call_records=llm_call_records,
     )
     if should_attach and selected_name and selected_name in catalog:
         selected_entry = catalog[selected_name]
@@ -688,18 +730,24 @@ def prepare_reference_context_node(
             last_used_at=now_iso,
             use_count=max(1, selected_entry["use_count"] + 1),
         )
-        return {
+        result: Dict[str, Any] = {
             "reference_image_catalog": catalog,
             "request_reference_image_keys": [selected_name],
             "request_reference_image_source": "memory_retrieved",
             "request_reference_image_reason": reason or "selected_from_reference_catalog",
         }
-    return {
+        if llm_call_records:
+            result["llm_call_records"] = llm_call_records
+        return result
+    result = {
         "reference_image_catalog": catalog,
         "request_reference_image_keys": [],
         "request_reference_image_source": "none",
         "request_reference_image_reason": reason or "no_reference_image_selected",
     }
+    if llm_call_records:
+        result["llm_call_records"] = llm_call_records
+    return result
 
 
 def resolve_verification_assets(state: AgentState) -> list[Any]:
@@ -935,7 +983,9 @@ def invoke_role_agent(
             state_messages,
             state=state,
         )
-    messages, summary_text, omitted_count = build_projected_context(
+    turn_id = latest_human_turn_id(state)
+    thread_id = str(state.get("thread_id") or "default")
+    messages, summary_text, omitted_count, llm_call_records = build_projected_context(
         base_messages=messages,
         state_messages=state_messages,
         pinned_message_ids={
@@ -946,11 +996,22 @@ def invoke_role_agent(
         max_recent_messages=12,
         token_counter=llm_with_tools,
         summary_model=summary_model,
+        thread_id=thread_id,
+        turn_id=turn_id,
     )
     
     # Invoke the LLM
     try:
-        response = llm_with_tools.invoke(messages)
+        response, llm_call_record = invoke_with_metrics(
+            llm_with_tools,
+            messages,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            node_name=role,
+            call_role=role,
+        )
+        if isinstance(llm_call_record, dict):
+            llm_call_records.append(llm_call_record)
     except Exception as exc:
         original_provider_error = _extract_masked_google_genai_error(exc)
         if original_provider_error is not None:
@@ -970,6 +1031,8 @@ def invoke_role_agent(
             )
     
     result: Dict[str, Any] = {"messages": [response]}
+    if llm_call_records:
+        result["llm_call_records"] = llm_call_records
     if omitted_count > 0:
         current_compactions = coerce_non_negative_int(state.get("context_compaction_count"))
         result["context_summary"] = summary_text
@@ -1027,15 +1090,15 @@ def compose_finalize_summary(
     workflow: dict[str, Any],
     *,
     finalizer_model: Any | None = None,
-) -> str:
-    generated = _build_finalize_summary_with_model(
+) -> tuple[str, list[dict[str, Any]]]:
+    generated, llm_call_records = _build_finalize_summary_with_model(
         state,
         workflow,
         finalizer_model=finalizer_model,
     )
     if generated:
-        return generated
-    return _build_finalize_summary(state, workflow)
+        return generated, llm_call_records
+    return _build_finalize_summary(state, workflow), llm_call_records
 
 
 def build_workflow_metadata(state: AgentState) -> dict[str, Any]:
@@ -1137,9 +1200,9 @@ def _build_finalize_summary_with_model(
     workflow: dict[str, Any],
     *,
     finalizer_model: Any | None,
-) -> str | None:
+) -> tuple[str | None, list[dict[str, Any]]]:
     if finalizer_model is None:
-        return None
+        return None, []
 
     summary_payload = _build_finalize_summary_context(state, workflow)
     summarize_prompt = (
@@ -1157,29 +1220,52 @@ def _build_finalize_summary_with_model(
         SystemMessage(content=summarize_prompt),
         HumanMessage(content=f"workflow_state:\n{context_json}"),
     ]
+    thread_id = str(state.get("thread_id") or "default")
+    turn_id = latest_human_turn_id(state)
+    llm_call_records: list[dict[str, Any]] = []
     try:
         if hasattr(finalizer_model, "with_config"):
             invoke_model = finalizer_model.with_config(
                 tags=["nostream"],
                 run_name="finalize_summary_internal",
             )
-            response = invoke_model.invoke(summarize_messages)
+            response, llm_call_record = invoke_with_metrics(
+                invoke_model,
+                summarize_messages,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                node_name="finalize",
+                call_role="finalize_summary",
+            )
         else:
             try:
-                response = finalizer_model.invoke(
+                response, llm_call_record = invoke_with_metrics(
+                    finalizer_model,
                     summarize_messages,
-                    config={"tags": ["nostream"], "run_name": "finalize_summary_internal"},
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    node_name="finalize",
+                    call_role="finalize_summary",
                 )
             except TypeError:
-                response = finalizer_model.invoke(summarize_messages)
+                response, llm_call_record = invoke_with_metrics(
+                    finalizer_model,
+                    summarize_messages,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    node_name="finalize",
+                    call_role="finalize_summary",
+                )
+        if isinstance(llm_call_record, dict):
+            llm_call_records.append(llm_call_record)
     except Exception:
-        return None
+        return None, []
 
     content_text = message_content_to_text(getattr(response, "content", response))
     if not isinstance(content_text, str):
-        return None
+        return None, llm_call_records
     normalized = re.sub(r"<agent_decision>.*?</agent_decision>", "", content_text, flags=re.DOTALL).strip()
-    return normalized or None
+    return normalized or None, llm_call_records
 
 
 def _build_finalize_summary_context(
@@ -1515,6 +1601,22 @@ def latest_human_message(state: AgentState) -> str:
         if isinstance(msg, HumanMessage) and getattr(msg, "id", None) not in _skip_ids:
             return message_content_to_text(msg.content)
     return ""
+
+
+def latest_human_turn_id(state: AgentState) -> str | None:
+    _skip_ids = {
+        RENDER_VISION_MESSAGE_ID,
+        SCENE_OBSERVE_MESSAGE_ID,
+    }
+    for msg in reversed(state["messages"]):
+        if not isinstance(msg, HumanMessage):
+            continue
+        message_id = getattr(msg, "id", None)
+        if message_id in _skip_ids:
+            continue
+        if isinstance(message_id, str) and message_id.strip():
+            return message_id.strip()
+    return None
 
 
 # Export all non-dunder names for package-level compatibility.
