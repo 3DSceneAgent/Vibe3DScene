@@ -37,6 +37,7 @@ from .constants_workflow import (
 from .constants_runtime import FAST_MODE_EVIDENCE_REQUIRED_MESSAGE_ID
 from .shared import (
     ai_message_has_tool_calls,
+    coerce_budget_limit,
     coerce_workflow_topology,
     effective_todo_snapshot,
     latest_human_turn_id,
@@ -262,6 +263,11 @@ def verifier_feedback_node(
         "verifier_turn_count": coerce_non_negative_int(state.get("verifier_turn_count")) + 1,
         "assistant_turn_kind": "has_calls" if has_calls else "no_calls",
     }
+    max_turns = coerce_budget_limit(state.get("max_request_agent_turns"))
+    if max_turns >= 0 and base_update["request_agent_turns"] >= max_turns:
+        base_update["request_stop_reason"] = "max_request_agent_turns_reached"
+        base_update["transition_reason"] = "max_request_agent_turns_reached"
+        base_update["transition_next"] = "finalize"
     if has_calls:
         base_update["verification_result"] = None
         base_update["verifier_feedback"] = {

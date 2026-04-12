@@ -55,6 +55,33 @@ def test_qwen_provider_chat_model_uses_dashscope_env(monkeypatch):
     assert captured["thinking_budget"] == 128
 
 
+def test_qwen_provider_thinking_override(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class DummyChatQwen:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    class DummySettings:
+        qwen_enable_thinking = True
+        qwen_thinking_budget = None
+        gemini_include_thoughts = True
+        gemini_thinking_budget = None
+
+    fake_module = types.SimpleNamespace(ChatQwen=DummyChatQwen)
+    monkeypatch.setitem(sys.modules, "langchain_qwq", fake_module)
+    monkeypatch.setattr("scene_agent.vlm.providers.get_settings", lambda: DummySettings())
+
+    provider = QwenProvider(
+        api_key="dashscope-key",
+        model="qwen-vl-plus-latest",
+        thinking_enabled=False,
+    )
+    provider.get_chat_model()
+
+    assert captured["enable_thinking"] is False
+
+
 def test_gemini_provider_chat_model_includes_thoughts(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -81,3 +108,30 @@ def test_gemini_provider_chat_model_includes_thoughts(monkeypatch):
     assert captured["streaming"] is True
     assert captured["include_thoughts"] is True
     assert captured["thinking_budget"] == 256
+
+
+def test_gemini_provider_thinking_override(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class DummyChatGoogleGenerativeAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    class DummySettings:
+        gemini_include_thoughts = True
+        gemini_thinking_budget = None
+        qwen_enable_thinking = True
+        qwen_thinking_budget = None
+
+    fake_module = types.SimpleNamespace(ChatGoogleGenerativeAI=DummyChatGoogleGenerativeAI)
+    monkeypatch.setitem(sys.modules, "langchain_google_genai", fake_module)
+    monkeypatch.setattr("scene_agent.vlm.providers.get_settings", lambda: DummySettings())
+
+    provider = GeminiProvider(
+        api_key="gemini-key",
+        model="gemini-2.5-flash",
+        thinking_enabled=False,
+    )
+    provider.get_chat_model()
+
+    assert captured["include_thoughts"] is False

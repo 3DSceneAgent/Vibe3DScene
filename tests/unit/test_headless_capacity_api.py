@@ -354,7 +354,7 @@ def test_send_blender_command_sync_preserve_activity_skips_touch_activity(monkey
 
 def test_scene_artifact_export_and_renders_preserve_idle_activity(monkeypatch, tmp_path):
     thread_id = "thread-artifact-maintenance"
-    recorded_calls: list[tuple[str, bool]] = []
+    recorded_calls: list[tuple[str, dict[str, object] | None, bool]] = []
 
     def fake_send_blender_command_sync(
         command_type: str,
@@ -364,13 +364,15 @@ def test_scene_artifact_export_and_renders_preserve_idle_activity(monkeypatch, t
         preserve_activity: bool = False,
     ) -> dict[str, object]:
         assert thread_id_arg == thread_id
-        recorded_calls.append((command_type, preserve_activity))
+        recorded_calls.append((command_type, params, preserve_activity))
         if command_type == "execute_code":
             payload = str((params or {}).get("code") or "")
             marker = 'filepath=r"'
             filepath = payload.split(marker, 1)[1].split('"', 1)[0]
             Path(filepath).write_bytes(b"glb")
             return {"success": True}
+        if command_type == "ensure_scene_agent_object_metadata":
+            return {}
         filepath = str((params or {}).get("filepath") or "")
         Path(filepath).write_bytes(b"png")
         return {"filepath": filepath}
@@ -404,8 +406,73 @@ def test_scene_artifact_export_and_renders_preserve_idle_activity(monkeypatch, t
     assert gltf_target.exists()
     assert renders
     assert len(renders) == len(api_shared._SCENE_LEVEL_RENDER_CAMERA_CONFIGS)
-    assert all(preserve_activity for _, preserve_activity in recorded_calls)
-    assert {command_type for command_type, _ in recorded_calls} == {"execute_code", "camera_observe"}
+    assert all(preserve_activity for _, _, preserve_activity in recorded_calls)
+    assert {command_type for command_type, _, _ in recorded_calls} == {
+        "camera_observe",
+        "ensure_scene_agent_object_metadata",
+        "execute_code",
+    }
+    execute_params = next(
+        params
+        for command_type, params, _preserve_activity in recorded_calls
+        if command_type == "execute_code"
+    )
+    assert execute_params is not None
+    assert execute_params["validate_scene"] is False
+
+
+def test_execute_headless_export_code_forwards_execute_code_params(monkeypatch):
+    thread_id = "thread-export-headless"
+    session = SimpleNamespace(
+        session_id=thread_id,
+        process=SimpleNamespace(pid=4321),
+        log_path="/tmp/headless-export.log",
+    )
+    captured: dict[str, object] = {}
+
+    class _Manager:
+        def ensure(self, session_id: str, mode: str) -> SimpleNamespace:
+            assert session_id == thread_id
+            assert mode == "headless"
+            return session
+
+    def fake_send_blender_command_sync(
+        command_type: str,
+        params: dict[str, object] | None = None,
+        thread_id_arg: str | None = None,
+    ) -> dict[str, object]:
+        captured["command_type"] = command_type
+        captured["params"] = params
+        captured["thread_id"] = thread_id_arg
+        return {"success": True}
+
+    async def fake_to_thread(func, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(api_shared, "get_session_manager", lambda: _Manager())
+    monkeypatch.setattr(api_shared, "send_blender_command_sync", fake_send_blender_command_sync)
+    monkeypatch.setattr(api_shared, "log_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(api_shared.asyncio, "to_thread", fake_to_thread)
+
+    asyncio.run(
+        api_shared.execute_headless_export_code(
+            thread_id=thread_id,
+            export_code="print('export')",
+            execute_code_params={"validate_scene": False},
+            timeout_seconds=1.0,
+            timeout_error_message="export timed out",
+            timeout_event_name="headless_export_timeout",
+            failed_event_name="headless_export_failed",
+            ok_event_name="headless_export_ok",
+        )
+    )
+
+    assert captured["command_type"] == "execute_code"
+    assert captured["thread_id"] == thread_id
+    assert captured["params"] == {
+        "code": "print('export')",
+        "validate_scene": False,
+    }
 
 
 def test_get_mcp_tools_returns_structured_503_for_capacity_errors(monkeypatch):

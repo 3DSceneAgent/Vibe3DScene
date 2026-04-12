@@ -38,6 +38,7 @@ def build_agent_state_graph(
     route_after_post_builder: Callable[..., Any],
     route_after_verifier_feedback: Callable[..., Any],
     route_after_update_memory: Callable[..., Any],
+    route_after_scene_observe: Callable[..., Any],
     route_after_evaluator: Callable[..., Any],
 ) -> StateGraph:
     builder = StateGraph(AgentState)
@@ -82,7 +83,7 @@ def build_agent_state_graph(
     builder.add_edge("tools", "update_memory")
     builder.add_conditional_edges("update_memory", route_after_update_memory)
 
-    builder.add_edge("scene_observe", "verify")
+    builder.add_conditional_edges("scene_observe", route_after_scene_observe)
     builder.add_edge("verify", "evaluator")
 
     builder.add_conditional_edges("evaluator", route_after_evaluator)

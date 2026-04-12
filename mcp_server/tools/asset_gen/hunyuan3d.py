@@ -152,7 +152,7 @@ def _resolve_generation_mode(requested_mode: str | None) -> tuple[str | None, st
         raw_mode = os.getenv("HUNYUAN3D_GENERATION_MODE") or os.getenv("HUNYUAN3D_API_VARIANT")
     normalized_mode = _normalize_generation_mode(raw_mode)
     if normalized_mode is not None:
-        return normalized_mode, None
+        return "rapid", None
     if raw_mode is None or not raw_mode.strip():
         return "rapid", None
     return None, f"Error: Unsupported generation_mode '{raw_mode}'. Use 'pro' or 'rapid'."

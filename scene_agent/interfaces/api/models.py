@@ -2,12 +2,14 @@
 
 
 from .shared import (
+    ReferencedObject,
     ChatRequest,
     RetryChatRequest,
     ChatResponse,
     ImageAssetResponse,
     ImageAssetListResponse,
     HistoryToolMediaResponse,
+    HistoryReferencedObjectResponse,
     HistoryMessageResponse,
     TelemetryMetricsResponse,
     ThreadHistoryResponse,
@@ -33,6 +35,12 @@ from .shared import (
     BlendFileListResponse,
     SceneArtifactRenderResponse,
     SceneArtifactManifestResponse,
+    AddPrimitiveRequest,
+    AddPrimitiveResponse,
+    DeleteSceneObjectRequest,
+    DeleteSceneObjectResponse,
+    TransformSceneObjectRequest,
+    TransformSceneObjectResponse,
 )
 from .shared import (
     serialize_image_asset,
@@ -40,11 +48,13 @@ from .shared import (
 
 __all__ = [
     "ChatRequest",
+    "ReferencedObject",
     "RetryChatRequest",
     "ChatResponse",
     "ImageAssetResponse",
     "ImageAssetListResponse",
     "HistoryToolMediaResponse",
+    "HistoryReferencedObjectResponse",
     "HistoryMessageResponse",
     "TelemetryMetricsResponse",
     "ThreadHistoryResponse",
@@ -70,5 +80,11 @@ __all__ = [
     "BlendFileListResponse",
     "SceneArtifactRenderResponse",
     "SceneArtifactManifestResponse",
+    "AddPrimitiveRequest",
+    "AddPrimitiveResponse",
+    "DeleteSceneObjectRequest",
+    "DeleteSceneObjectResponse",
+    "TransformSceneObjectRequest",
+    "TransformSceneObjectResponse",
     "serialize_image_asset",
 ]

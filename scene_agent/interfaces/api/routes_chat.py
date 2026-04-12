@@ -66,6 +66,99 @@ def _resolve_fast_mode_for_request(request: ChatRequest) -> bool:
     return bool(getattr(get_settings(), "fast_mode_default", False))
 
 
+def _normalize_referenced_objects(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for item in value:
+        if isinstance(item, dict):
+            backend_object_id = item.get("backend_object_id")
+            display_name = item.get("display_name")
+            object_type = item.get("object_type")
+        else:
+            backend_object_id = getattr(item, "backend_object_id", None)
+            display_name = getattr(item, "display_name", None)
+            object_type = getattr(item, "object_type", None)
+        if not isinstance(backend_object_id, str) or not backend_object_id.strip():
+            continue
+        if not isinstance(display_name, str) or not display_name.strip():
+            continue
+        normalized_backend_object_id = backend_object_id.strip()
+        if normalized_backend_object_id in seen_ids:
+            continue
+        seen_ids.add(normalized_backend_object_id)
+        normalized.append(
+            {
+                "backend_object_id": normalized_backend_object_id,
+                "display_name": display_name.strip(),
+                "object_type": object_type.strip() if isinstance(object_type, str) and object_type.strip() else None,
+            }
+        )
+    return normalized
+
+
+def _build_referenced_objects_context(
+    thread_id: str,
+    referenced_objects: list[dict[str, Any]],
+) -> str:
+    if not referenced_objects:
+        return ""
+
+    lines = ["<referenced_scene_objects>"]
+    for reference in referenced_objects:
+        backend_object_id = str(reference.get("backend_object_id") or "").strip()
+        display_name = str(reference.get("display_name") or "").strip() or backend_object_id
+        object_type = reference.get("object_type")
+        lines.append(f"- display_name: {display_name}")
+        lines.append(f"  backend_object_id: {backend_object_id}")
+        if isinstance(object_type, str) and object_type.strip():
+            lines.append(f"  frontend_object_type: {object_type.strip()}")
+
+        try:
+            resolved = send_blender_command_sync(
+                "resolve_scene_agent_object",
+                {
+                    "backend_object_id": backend_object_id,
+                    "backend_object_name": display_name,
+                },
+                thread_id,
+            )
+            resolved_name = str((resolved or {}).get("object_name") or "").strip()
+            if resolved_name:
+                lines.append(f"  blender_object_name: {resolved_name}")
+                object_info = send_blender_command_sync(
+                    "get_object_info",
+                    {"name": resolved_name},
+                    thread_id,
+                ) or {}
+                object_type_from_blender = object_info.get("type")
+                if isinstance(object_type_from_blender, str) and object_type_from_blender.strip():
+                    lines.append(f"  blender_object_type: {object_type_from_blender.strip()}")
+                parent_name = object_info.get("parent")
+                if isinstance(parent_name, str) and parent_name.strip():
+                    lines.append(f"  parent: {parent_name.strip()}")
+                for key in ("location", "world_location", "scale", "world_scale"):
+                    value = object_info.get(key)
+                    if isinstance(value, list) and value:
+                        lines.append(f"  {key}: {json.dumps(value)}")
+        except Exception as exc:
+            log_event(
+                "warning",
+                "referenced_object_context_lookup_failed",
+                {
+                    "thread_id": thread_id,
+                    "backend_object_id": backend_object_id,
+                    "error": str(exc),
+                },
+            )
+            lines.append("  lookup_status: unavailable")
+
+    lines.append("</referenced_scene_objects>")
+    return "\n".join(lines)
+
+
 def _truncate_text(value: str, *, limit: int = 240) -> str:
     if len(value) <= limit:
         return value
@@ -202,19 +295,30 @@ _LATEST_RETRY_SNAPSHOT_FILENAME = "latest_turn_pre.blend"
 
 def _build_human_message(request: ChatRequest) -> HumanMessage:
     normalized_turn_id = request.turn_id.strip() if isinstance(request.turn_id, str) else ""
+    normalized_referenced_objects = _normalize_referenced_objects(request.referenced_objects)
     additional_kwargs: dict[str, Any] = {
         "created_at_ms": int(time.time() * 1000),
     }
     attached_image_ids = _normalize_retry_attached_image_ids(request.attached_image_ids)
     if attached_image_ids:
         additional_kwargs["attached_image_ids"] = attached_image_ids
+    if normalized_referenced_objects:
+        additional_kwargs["referenced_objects"] = normalized_referenced_objects
+    content = request.message
+    if normalized_referenced_objects:
+        references_block = _build_referenced_objects_context(
+            request.thread_id,
+            normalized_referenced_objects,
+        )
+        if references_block:
+            content = f"{request.message}\n\n{references_block}"
     if normalized_turn_id:
         return HumanMessage(
-            content=request.message,
+            content=content,
             id=normalized_turn_id,
             additional_kwargs=additional_kwargs,
         )
-    return HumanMessage(content=request.message, additional_kwargs=additional_kwargs)
+    return HumanMessage(content=content, additional_kwargs=additional_kwargs)
 
 
 def _retry_storage_dir(thread_id: str) -> Path:
@@ -307,9 +411,12 @@ async def _capture_latest_turn_retry_state(
         "turn_id": normalized_turn_id,
         "message": request.message,
         "attached_image_ids": _normalize_retry_attached_image_ids(request.attached_image_ids),
+        "referenced_objects": _normalize_referenced_objects(request.referenced_objects),
         "task_id": request.task_id,
         "workflow_topology": request.workflow_topology,
         "memory_profile": request.memory_profile,
+        "max_request_agent_turns": request.max_request_agent_turns,
+        "max_request_tool_batches": request.max_request_tool_batches,
         "pre_turn_checkpoint_id": checkpoint_id,
         "pre_turn_checkpoint_ns": checkpoint_ns,
         "pre_turn_blend_snapshot": str(snapshot_path),
@@ -470,6 +577,7 @@ class _ActiveStreamSession:
             "last_node": None,
             "tool_events": 0,
             "tool_calls_started": 0,
+            "llm_call_count": 0,
             "assistant_chunks": 0,
             "todo_total": 0,
             "todo_completed": 0,
@@ -581,6 +689,7 @@ class _ActiveStreamSession:
                 return None
 
         with self.lock:
+            self.progress["llm_call_count"] = int(self.progress.get("llm_call_count") or 0) + 1
             input_tokens = _coerce_int(record.get("input_tokens"))
             if input_tokens is None:
                 self.llm_input_tokens_exact = False
@@ -965,6 +1074,7 @@ async def _produce_stream_events(
             request.thread_id,
             request.vlm_provider,
             request.vlm_model,
+            request.provider_thinking,
         )
         agent = await get_agent(request.thread_id)
         coordinator = get_session_coordinator()
@@ -1009,10 +1119,14 @@ async def _produce_stream_events(
             for message in state_messages:
                 serialized = serialize_message(message)
                 message_type = serialized.get("type")
+                message_id = serialized.get("id")
+                if (
+                    message_type in {"ai", "assistant", "tool"}
+                    and isinstance(message_id, str)
+                    and message_id
+                ):
+                    existing_message_ids.add(message_id)
                 if message_type in {"ai", "assistant"}:
-                    message_id = serialized.get("id")
-                    if isinstance(message_id, str) and message_id:
-                        existing_message_ids.add(message_id)
                     reasoning_text = extract_message_reasoning_text(serialized)
                     content_text = assistant_message_display_text(serialized)
                     if not content_text and reasoning_text:
@@ -1032,6 +1146,8 @@ async def _produce_stream_events(
                 "workflow_topology_request": request.workflow_topology,
                 "memory_profile_request": request.memory_profile,
                 "fast_mode": resolved_fast_mode,
+                "max_request_agent_turns": request.max_request_agent_turns,
+                "max_request_tool_batches": request.max_request_tool_batches,
             },
             config=config,
             stream_mode=["messages", "values", "updates"],
@@ -1085,6 +1201,11 @@ async def _produce_stream_events(
                         "thread_id": request.thread_id,
                         "step": step_event["step"],
                         "update_keys": step_event["update_keys"],
+                        **(
+                            {"summary": step_event["summary"]}
+                            if isinstance(step_event.get("summary"), dict)
+                            else {}
+                        ),
                     },
                 )
 
@@ -1223,6 +1344,9 @@ async def _produce_stream_events(
                         continue
                     serialized_stream = sanitize_message_for_stream(serialized)
                     message_type = serialized_stream.get("type")
+                    message_id = serialized_stream.get("id")
+                    if isinstance(message_id, str) and message_id in existing_message_ids:
+                        continue
                     reasoning_text = extract_message_reasoning_text(serialized_stream)
                     if reasoning_text:
                         serialized_stream["reasoning_content"] = reasoning_text
@@ -1265,9 +1389,6 @@ async def _produce_stream_events(
                             "scene_has_change": scene_has_change,
                         }
                         session.publish(_attach_progress(session, tool_event_payload))
-                        continue
-                    message_id = serialized_stream.get("id")
-                    if isinstance(message_id, str) and message_id in existing_message_ids:
                         continue
                     if is_message_stream and reasoning_text:
                         session.note_assistant_chunk()
@@ -1409,6 +1530,7 @@ async def chat(request: ChatRequest, request_http: Request, response: Response):
             request.thread_id,
             request.vlm_provider,
             request.vlm_model,
+            request.provider_thinking,
         )
         agent = await get_agent(request.thread_id)
         enabled_tool_names = resolve_enabled_tool_names(
@@ -1429,6 +1551,8 @@ async def chat(request: ChatRequest, request_http: Request, response: Response):
                 "workflow_topology_request": request.workflow_topology,
                 "memory_profile_request": request.memory_profile,
                 "fast_mode": resolved_fast_mode,
+                "max_request_agent_turns": request.max_request_agent_turns,
+                "max_request_tool_batches": request.max_request_tool_batches,
             },
             config=config
         )
@@ -1684,6 +1808,7 @@ async def retry_chat_stream(request: RetryChatRequest, request_http: Request):
         vlm_model=request.vlm_model,
         enabled_mcp_tools=request.enabled_mcp_tools,
         attached_image_ids=_normalize_retry_attached_image_ids(metadata.get("attached_image_ids")),
+        referenced_objects=_normalize_referenced_objects(metadata.get("referenced_objects")),
         task_id=metadata.get("task_id") if isinstance(metadata.get("task_id"), str) else None,
         workflow_topology=(
             metadata.get("workflow_topology")
@@ -1696,6 +1821,20 @@ async def retry_chat_stream(request: RetryChatRequest, request_http: Request):
             else None
         ),
         fast_mode=request.fast_mode,
+        max_request_agent_turns=(
+            request.max_request_agent_turns
+            if isinstance(request.max_request_agent_turns, int)
+            else metadata.get("max_request_agent_turns")
+            if isinstance(metadata.get("max_request_agent_turns"), int)
+            else None
+        ),
+        max_request_tool_batches=(
+            request.max_request_tool_batches
+            if isinstance(request.max_request_tool_batches, int)
+            else metadata.get("max_request_tool_batches")
+            if isinstance(metadata.get("max_request_tool_batches"), int)
+            else None
+        ),
     )
     return await _build_chat_stream_response(
         request=retry_chat_request,

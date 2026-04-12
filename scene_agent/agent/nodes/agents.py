@@ -19,6 +19,7 @@ from scene_agent.vlm.metrics import invoke_structured_with_metrics, invoke_with_
 from .constants_workflow import MODE_PLAN, ROLE_BUILDER, ROLE_GENERAL, ROLE_VERIFIER
 from .shared import (
     ai_message_has_tool_calls,
+    coerce_budget_limit,
     invoke_role_agent,
     latest_human_message,
     latest_human_turn_id,
@@ -42,6 +43,20 @@ _INLINE_NUMBERED_LIST_RE = re.compile(
     r"(?:^|\s)(?:\d+|[A-Za-z])[\.\)]\s+(.*?)(?=(?:\s+(?:\d+|[A-Za-z])[\.\)]\s+)|$)",
     re.DOTALL,
 )
+
+
+def _apply_agent_turn_budget(
+    state: AgentState,
+    *,
+    next_turns: int,
+    update: dict[str, Any],
+) -> dict[str, Any]:
+    max_turns = coerce_budget_limit(state.get("max_request_agent_turns"))
+    if max_turns >= 0 and next_turns >= max_turns:
+        update["request_stop_reason"] = "max_request_agent_turns_reached"
+        update["transition_reason"] = "max_request_agent_turns_reached"
+        update["transition_next"] = "finalize"
+    return update
 
 
 def _normalize_freeform_text(value: str) -> str:
@@ -247,7 +262,12 @@ def plan_node(
             "Rules:\n"
             "- Keep todos concrete and action-oriented.\n"
             "- 1 to 6 todos.\n"
-            "- Each todo should be independently verifiable by render inspection."
+            "- Each todo should be independently verifiable by render inspection.\n"
+            "- Todos must be mutually exclusive and minimally overlapping.\n"
+            "- Each todo should own a distinct scene change, object group, or spatial area.\n"
+            "- Earlier todos may prepare prerequisites, but must not already complete the core deliverable of later todos.\n"
+            "- If a later todo is about placing or refining a hero object, keep that hero object out of earlier setup/blockout todos.\n"
+            '- Example: if one todo is "Set up the basic beach environment" and a later todo is "Place the central camper van", the beach setup todo must NOT place the camper van.'
         )
         planner_messages = [
             SystemMessage(content=prompt),
@@ -391,11 +411,16 @@ def turn_dispatch_node(state: AgentState) -> dict[str, Any]:
     latest_ai_message = find_last_ai_message(list(state.get("messages") or [])[-10:])
     has_calls = ai_message_has_tool_calls(latest_ai_message)
     current_turns = coerce_non_negative_int(state.get("request_agent_turns"))
-    return {
+    next_turns = current_turns + 1
+    return _apply_agent_turn_budget(
+        state,
+        next_turns=next_turns,
+        update={
         "assistant_turn_kind": "has_calls" if has_calls else "no_calls",
-        "request_agent_turns": current_turns + 1,
+        "request_agent_turns": next_turns,
         "verification_result": None,
-    }
+        },
+    )
 
 
 def post_agent_node(state: AgentState) -> dict[str, Any]:
@@ -406,15 +431,20 @@ def post_builder_node(state: AgentState) -> dict[str, Any]:
     """Dual-agent builder post-processing (counts + stall tracking only)."""
     latest_ai_message = find_last_ai_message(list(state.get("messages") or [])[-10:])
     has_calls = ai_message_has_tool_calls(latest_ai_message)
+    next_turns = coerce_non_negative_int(state.get("request_agent_turns")) + 1
 
-    result: dict[str, Any] = {
+    result: dict[str, Any] = _apply_agent_turn_budget(
+        state,
+        next_turns=next_turns,
+        update={
         "active_role": ROLE_BUILDER,
-        "request_agent_turns": coerce_non_negative_int(state.get("request_agent_turns")) + 1,
+        "request_agent_turns": next_turns,
         "builder_turn_count": coerce_non_negative_int(state.get("builder_turn_count")) + 1,
         "builder_stall_count": 0 if has_calls else coerce_non_negative_int(state.get("builder_stall_count")) + 1,
         "assistant_turn_kind": "has_calls" if has_calls else "no_calls",
         "verification_result": None,
-    }
+        },
+    )
     if latest_ai_message is not None:
         builder_note = message_content_to_text(latest_ai_message.content).strip()
         if builder_note:

@@ -268,6 +268,42 @@ def import_glb_model(ctx: Context, model_url: str, object_name: str = None) -> s
             return f"Bounding box: min={raw_bbox[0]}, max={raw_bbox[1]}"
         return None
 
+    def _format_scale_normalization(raw_summary: Any) -> list[str]:
+        if not isinstance(raw_summary, dict):
+            return []
+
+        applied = raw_summary.get("applied") is True
+        reason = raw_summary.get("reason")
+        lines = [
+            "Scale normalization: "
+            + (
+                f"applied (reason={reason})"
+                if applied
+                else f"skipped (reason={reason})"
+            )
+        ]
+
+        scalar_fields = (
+            ("original_max_dimension_m", "Original max dimension (m)"),
+            ("target_max_dimension_m", "Target max dimension (m)"),
+            ("normalized_max_dimension_m", "Normalized max dimension (m)"),
+            ("scale_factor", "Scale factor"),
+        )
+        for key, label in scalar_fields:
+            value = raw_summary.get(key)
+            if isinstance(value, (int, float)):
+                lines.append(f"{label}: {float(value):.6f}")
+
+        applied_roots = raw_summary.get("applied_root_objects")
+        if isinstance(applied_roots, list) and applied_roots:
+            lines.append(f"Scaled root objects: {', '.join(str(item) for item in applied_roots)}")
+
+        normalized_bbox = raw_summary.get("normalized_bounding_box")
+        bbox_line = _format_bounding_box(normalized_bbox)
+        if bbox_line:
+            lines.append(f"Normalized {bbox_line}")
+        return lines
+
     try:
         blender = runtime.get_blender_connection(logger)
         object_name = object_name or "ImportedModel"
@@ -294,6 +330,8 @@ def import_glb_model(ctx: Context, model_url: str, object_name: str = None) -> s
                 bbox_line = _format_bounding_box(result["bounding_box"])
                 if bbox_line:
                     message += f"{bbox_line}\n"
+            for line in _format_scale_normalization(result.get("scale_normalization")):
+                message += f"{line}\n"
             return message
         return f"Failed to import model: {result.get('message', 'Unknown error')}"
     except Exception as exc:

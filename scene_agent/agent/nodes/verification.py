@@ -76,8 +76,9 @@ def verify_node(
         return {"verification_result": None}
 
     render_source = state.get("last_render_source", "agent_camera")
-    scene_context = build_verification_scene_context(state)
-    todo_context = active_todo_context(state)
+    active_only_todos = state.get("task_mode") == "plan_mode"
+    scene_context = build_verification_scene_context(state, active_only_todos=active_only_todos)
+    todo_context = active_todo_context(state, active_only=active_only_todos)
     reference_images = resolve_verification_assets(state)
     reference_paths = [
         image["stored_path"]
@@ -146,7 +147,11 @@ def verify_node(
             else ["vlm"],
         }
     )
-    guidance_text = build_verification_guidance_message(state, verification_payload)
+    guidance_text = build_verification_guidance_message(
+        state,
+        verification_payload,
+        active_only_todos=active_only_todos,
+    )
     if guidance_text:
         verification_payload["guidance"] = guidance_text
 

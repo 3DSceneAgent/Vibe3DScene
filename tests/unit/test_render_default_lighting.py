@@ -104,6 +104,19 @@ def _make_scene(objects=None, world=None):
     )
 
 
+def _make_transform(values):
+    return types.SimpleNamespace(x=values[0], y=values[1], z=values[2])
+
+
+def _make_scene_object(name, obj_type, *, location=(0.0, 0.0, 0.0), dimensions=(1.0, 1.0, 1.0)):
+    return types.SimpleNamespace(
+        name=name,
+        type=obj_type,
+        location=_make_transform(location),
+        dimensions=_make_transform(dimensions),
+    )
+
+
 def test_render_default_lighting_env_defaults_to_enabled(monkeypatch):
     module, _fake_bpy = _load_scene_tools_module(monkeypatch)
     server = module.ServerSceneToolsMixin()
@@ -113,6 +126,26 @@ def test_render_default_lighting_env_defaults_to_enabled(monkeypatch):
 
     monkeypatch.setenv(module.RENDER_DEFAULT_LIGHTING_ENV, "off")
     assert server._render_default_lighting_enabled() is False
+
+
+def test_scene_guard_snapshot_ignores_camera_objects(monkeypatch):
+    module, fake_bpy = _load_scene_tools_module(monkeypatch)
+    server = module.ServerSceneToolsMixin()
+    mesh = _make_scene_object("Desk", "MESH", dimensions=(2.0, 1.0, 1.0))
+    camera = _make_scene_object(
+        "SceneCamera_NE",
+        "CAMERA",
+        location=(10000.0, 0.0, 0.0),
+        dimensions=(0.0, 0.0, 0.0),
+    )
+    fake_bpy.context.scene = _make_scene(objects=[camera, mesh])
+    server._get_aabb = lambda _obj: [[-1.0, -0.5, 0.0], [1.0, 0.5, 1.0]]
+
+    snapshot = server._build_scene_guard_snapshot()
+
+    assert snapshot["object_count"] == 1
+    assert [entry["name"] for entry in snapshot["objects"]] == ["Desk"]
+    assert snapshot["scene_bbox_dimensions"] == [2.0, 1.0, 1.0]
 
 
 def test_render_from_camera_applies_default_lighting_when_enabled(monkeypatch):

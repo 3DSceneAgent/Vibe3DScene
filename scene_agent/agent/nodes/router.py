@@ -26,7 +26,7 @@ from .constants_workflow import (
     ROLE_GENERAL,
     TOPOLOGY_DUAL,
 )
-from .shared import latest_human_message, latest_human_turn_id, unfinished_todo_count
+from .shared import coerce_budget_limit, latest_human_message, latest_human_turn_id, unfinished_todo_count
 
 FAST_MODE_PLAN_TERMINATION_REASON = (
     "Planner-managed todo was terminated because fast mode is enabled for this request."
@@ -86,6 +86,22 @@ def initialize_request_node(state: AgentState) -> dict[str, Any]:
     max_plan_replans = coerce_non_negative_int(
         state.get("max_plan_replans"),
         default=max_plan_replans_default,
+    )
+    try:
+        max_request_agent_turns_default = int(get_settings().plan_mode_max_agent_turns)
+    except Exception:
+        max_request_agent_turns_default = 50
+    try:
+        max_request_tool_batches_default = int(get_settings().plan_mode_max_tool_batches)
+    except Exception:
+        max_request_tool_batches_default = 40
+    max_request_agent_turns = coerce_budget_limit(
+        state.get("max_request_agent_turns"),
+        default=max_request_agent_turns_default,
+    )
+    max_request_tool_batches = coerce_budget_limit(
+        state.get("max_request_tool_batches"),
+        default=max_request_tool_batches_default,
     )
 
     active_todo_id = state.get("active_todo_id")
@@ -149,6 +165,9 @@ def initialize_request_node(state: AgentState) -> dict[str, Any]:
         "active_role": ROLE_BUILDER if workflow_topology == TOPOLOGY_DUAL else ROLE_GENERAL,
         "request_agent_turns": 0,
         "request_tool_batches": 0,
+        "max_request_agent_turns": max_request_agent_turns,
+        "max_request_tool_batches": max_request_tool_batches,
+        "request_stop_reason": None,
         "builder_turn_count": 0,
         "verifier_turn_count": 0,
         "builder_stall_count": 0,

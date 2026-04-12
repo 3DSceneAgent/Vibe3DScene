@@ -90,13 +90,31 @@ def test_reconstruct_full_scene_success(monkeypatch, tmp_path):
             )
         raise AssertionError(f"Unexpected GET URL: {url}")
 
+    run_calls: list[list[str]] = []
+
     def fake_run(cmd, **kwargs):
-        transforms_path = Path(cmd[-2])
-        payload = json.loads(transforms_path.read_text(encoding="utf-8"))
-        assert payload == [{"glb_path": str(output_dir / "chair.glb")}]
-        assert Path(cmd[3]) == import_script
+        run_calls.append(list(cmd))
         assert Path(kwargs["cwd"]) == output_dir
-        Path(cmd[-1]).write_bytes(b"blend")
+        if len(run_calls) == 1:
+            transforms_path = Path(cmd[-2])
+            payload = json.loads(transforms_path.read_text(encoding="utf-8"))
+            assert payload == [{"glb_path": str(output_dir / "chair.glb")}]
+            assert Path(cmd[3]) == import_script
+            Path(cmd[-1]).write_bytes(b"blend")
+            return None
+
+        assert len(run_calls) == 2
+        assert cmd[0] == "blender"
+        assert cmd[1] == "-b"
+        assert Path(cmd[2]) == output_dir / "scene.blend"
+        assert cmd[3] == "-P"
+        script_path = Path(cmd[4])
+        assert script_path.exists()
+        script_text = script_path.read_text(encoding="utf-8")
+        assert 'background.inputs["Strength"].default_value = 1.5' in script_text
+        assert "sun_data.energy = 2.5" in script_text
+        assert Path(cmd[-1]) == output_dir / "scene.blend"
+        return None
 
     monkeypatch.setenv("TOOL_SERVICE_HOST", "10.0.0.9")
     monkeypatch.setattr(sam_reconstruct.requests, "post", fake_post)
@@ -126,6 +144,7 @@ def test_reconstruct_full_scene_success(monkeypatch, tmp_path):
         for key in result
         if key.endswith("_path") or key.endswith("_paths") or key.endswith("_dir")
     } == {"blend_file_path"}
+    assert len(run_calls) == 2
 
 
 def test_reconstruct_full_scene_returns_failed_status(monkeypatch, tmp_path):
@@ -291,13 +310,23 @@ def test_reconstruct_full_scene_generates_fallback_transforms(monkeypatch, tmp_p
             return DummyResponse(content=_make_zip({"lamp.glb": b"glb-bytes"}))
         raise AssertionError(f"Unexpected GET URL: {url}")
 
+    run_calls: list[list[str]] = []
+
     def fake_run(cmd, **kwargs):
-        transforms_path = Path(cmd[-2])
-        payload = json.loads(transforms_path.read_text(encoding="utf-8"))
-        assert payload == [{"glb_path": str(output_dir / "lamp.glb")}]
-        assert Path(cmd[3]) == import_script
+        run_calls.append(list(cmd))
         assert Path(kwargs["cwd"]) == output_dir
-        Path(cmd[-1]).write_bytes(b"blend")
+        if len(run_calls) == 1:
+            transforms_path = Path(cmd[-2])
+            payload = json.loads(transforms_path.read_text(encoding="utf-8"))
+            assert payload == [{"glb_path": str(output_dir / "lamp.glb")}]
+            assert Path(cmd[3]) == import_script
+            Path(cmd[-1]).write_bytes(b"blend")
+            return None
+
+        assert len(run_calls) == 2
+        assert Path(cmd[2]) == output_dir / "scene.blend"
+        assert Path(cmd[-1]) == output_dir / "scene.blend"
+        return None
 
     monkeypatch.setattr(sam_reconstruct.requests, "get", fake_get)
     monkeypatch.setattr(sam_reconstruct.time, "sleep", lambda _: None)
@@ -312,6 +341,54 @@ def test_reconstruct_full_scene_generates_fallback_transforms(monkeypatch, tmp_p
     assert result["success"] is True
     assert (output_dir / "object_transforms.json").exists()
     assert "json_paths" not in result
+    assert len(run_calls) == 2
+
+
+def test_reconstruct_full_scene_reports_blender_postprocess_failure(monkeypatch, tmp_path):
+    image_path = tmp_path / "input.png"
+    image_path.write_bytes(b"png")
+    output_dir = tmp_path / "output"
+    _prepare_tools_checkout(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(
+        sam_reconstruct.requests,
+        "post",
+        lambda *args, **kwargs: DummyResponse(json_data={"job_id": "job-postprocess"}),
+    )
+
+    def fake_get(url, params=None, **kwargs):
+        del kwargs
+        if url.endswith("/v1/jobs/job-postprocess"):
+            return DummyResponse(
+                json_data={"job_id": "job-postprocess", "status": "succeeded", "result": {"num_masks": 1}}
+            )
+        if url.endswith("/v1/jobs/job-postprocess/artifacts/download"):
+            assert params == {"extensions": "glb,json"}
+            return DummyResponse(content=_make_zip({"chair.glb": b"glb-bytes"}))
+        raise AssertionError(f"Unexpected GET URL: {url}")
+
+    run_count = {"value": 0}
+
+    def fake_run(cmd, **kwargs):
+        run_count["value"] += 1
+        if run_count["value"] == 1:
+            Path(cmd[-1]).write_bytes(b"blend")
+            return None
+        raise subprocess.CalledProcessError(returncode=1, cmd=cmd)
+
+    monkeypatch.setattr(sam_reconstruct.requests, "get", fake_get)
+    monkeypatch.setattr(sam_reconstruct.time, "sleep", lambda _: None)
+    monkeypatch.setattr(sam_reconstruct.subprocess, "run", fake_run)
+
+    result = sam_reconstruct.reconstruct_full_scene(
+        None,
+        str(image_path),
+        output_dir=str(output_dir),
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "blender_error"
+    assert "scene postprocess failed" in result["error"]
 
 
 def test_reconstruct_full_scene_reports_missing_tools_checkout(monkeypatch, tmp_path):

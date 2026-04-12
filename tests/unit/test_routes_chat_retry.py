@@ -21,6 +21,55 @@ def test_build_human_message_uses_turn_id() -> None:
     assert message.id == "turn-1"
 
 
+def test_build_human_message_embeds_referenced_objects_context(monkeypatch) -> None:
+    def fake_send_blender_command_sync(command_type, params=None, thread_id=None):
+        if command_type == "resolve_scene_agent_object":
+            return {
+                "found": True,
+                "backend_object_id": "obj-chair",
+                "backend_object_name": "Chair",
+                "object_name": "Chair",
+                "object_type": "MESH",
+            }
+        if command_type == "get_object_info":
+            return {
+                "name": "Chair",
+                "type": "MESH",
+                "location": [1.0, 2.0, 3.0],
+                "world_location": [1.0, 2.0, 3.0],
+                "scale": [1.0, 1.0, 1.0],
+                "world_scale": [1.0, 1.0, 1.0],
+            }
+        raise AssertionError(f"Unexpected command: {command_type}")
+
+    monkeypatch.setattr(routes_chat, "send_blender_command_sync", fake_send_blender_command_sync)
+
+    request = routes_chat.ChatRequest(
+        message="Move this closer to camera",
+        thread_id="thread-1",
+        referenced_objects=[
+            {
+                "backend_object_id": "obj-chair",
+                "display_name": "Chair",
+                "object_type": "MESH",
+            }
+        ],
+    )
+
+    message = routes_chat._build_human_message(request)
+
+    assert "Move this closer to camera" in message.content
+    assert "<referenced_scene_objects>" in message.content
+    assert "backend_object_id: obj-chair" in message.content
+    assert message.additional_kwargs["referenced_objects"] == [
+        {
+            "backend_object_id": "obj-chair",
+            "display_name": "Chair",
+            "object_type": "MESH",
+        }
+    ]
+
+
 def test_capture_latest_turn_retry_state_persists_metadata(tmp_path, monkeypatch) -> None:
     checkpoint_tuple = CheckpointTuple(
         config={"configurable": {"thread_id": "thread-1", "checkpoint_id": "ckpt-1"}},
@@ -47,7 +96,16 @@ def test_capture_latest_turn_retry_state_persists_metadata(tmp_path, monkeypatch
         thread_id="thread-1",
         turn_id="turn-5",
         attached_image_ids=["img-1", "", "img-2"],
+        referenced_objects=[
+            {
+                "backend_object_id": "obj-chair",
+                "display_name": "Chair",
+                "object_type": "MESH",
+            }
+        ],
         workflow_topology="single",
+        max_request_agent_turns=12,
+        max_request_tool_batches=7,
     )
 
     asyncio.run(
@@ -63,8 +121,17 @@ def test_capture_latest_turn_retry_state_persists_metadata(tmp_path, monkeypatch
     assert metadata["turn_id"] == "turn-5"
     assert metadata["message"] == "build a chair"
     assert metadata["attached_image_ids"] == ["img-1", "img-2"]
+    assert metadata["referenced_objects"] == [
+        {
+            "backend_object_id": "obj-chair",
+            "display_name": "Chair",
+            "object_type": "MESH",
+        }
+    ]
     assert metadata["pre_turn_checkpoint_id"] == "ckpt-1"
     assert metadata["workflow_topology"] == "single"
+    assert metadata["max_request_agent_turns"] == 12
+    assert metadata["max_request_tool_batches"] == 7
     assert blender_calls == [
         (
             "save_blend",
@@ -88,9 +155,18 @@ def test_restore_latest_turn_retry_state_rebuilds_checkpoint_and_scene(tmp_path,
                 "turn_id": "turn-5",
                 "message": "build a chair",
                 "attached_image_ids": ["img-1"],
+                "referenced_objects": [
+                    {
+                        "backend_object_id": "obj-chair",
+                        "display_name": "Chair",
+                        "object_type": "MESH",
+                    }
+                ],
                 "pre_turn_checkpoint_id": "ckpt-4",
                 "pre_turn_checkpoint_ns": "",
                 "pre_turn_blend_snapshot": str(snapshot_path),
+                "max_request_agent_turns": 15,
+                "max_request_tool_batches": 9,
             }
         ),
         encoding="utf-8",
@@ -147,6 +223,15 @@ def test_restore_latest_turn_retry_state_rebuilds_checkpoint_and_scene(tmp_path,
     )
 
     assert metadata["turn_id"] == "turn-5"
+    assert metadata["referenced_objects"] == [
+        {
+            "backend_object_id": "obj-chair",
+            "display_name": "Chair",
+            "object_type": "MESH",
+        }
+    ]
+    assert metadata["max_request_agent_turns"] == 15
+    assert metadata["max_request_tool_batches"] == 9
     assert blender_calls == [
         ("load_blend", {"filepath": str(snapshot_path)}, "thread-1"),
     ]

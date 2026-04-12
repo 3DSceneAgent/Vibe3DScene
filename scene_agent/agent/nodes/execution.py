@@ -32,6 +32,7 @@ from .constants_runtime import (
 )
 
 from .shared import (
+    coerce_budget_limit,
     get_logger,
     run_viewport_scene_observe,
     should_use_viewport_scene_observe,
@@ -59,6 +60,7 @@ def _clear_scene_observe_context() -> Dict[str, Any]:
         "last_render_source": "",
         "scene_camera_params": {},
         "scene_bbox": {},
+        "verification_result": None,
     }
 
 
@@ -80,6 +82,11 @@ def update_memory_node(state: AgentState) -> Dict[str, Any]:
         result["tool_round_count"] = coerce_non_negative_int(state.get("tool_round_count")) + 1
         next_request_batches = coerce_non_negative_int(state.get("request_tool_batches")) + 1
         result["request_tool_batches"] = next_request_batches
+        max_request_tool_batches = coerce_budget_limit(state.get("max_request_tool_batches"))
+        if max_request_tool_batches >= 0 and next_request_batches >= max_request_tool_batches:
+            result["request_stop_reason"] = "max_request_tool_batches_reached"
+            result["transition_reason"] = "max_request_tool_batches_reached"
+            result["transition_next"] = "finalize"
         if state.get("fast_mode") is True:
             if any(name in SCENE_MUTATING_TOOLS for name in latest_tool_batch_names):
                 result["fast_mode_last_mutation_batch"] = next_request_batches
@@ -210,11 +217,11 @@ def scene_observe_node(state: AgentState) -> Dict[str, Any]:
 
     latest_tools = state.get("last_tool_batch_names")
     if not isinstance(latest_tools, list):
-        return {}
+        return {"verification_result": None}
 
     has_scene_mutation = any(name in SCENE_MUTATING_TOOLS for name in latest_tools)
     if not has_scene_mutation:
-        return {}
+        return {"verification_result": None}
 
     thread_id = state.get("thread_id", "default")
     send_blender_command = None
@@ -344,6 +351,7 @@ def scene_observe_node(state: AgentState) -> Dict[str, Any]:
         "scene_camera_params": camera_params,
         "persistent_cameras": camera_names,
         "scene_bbox": scene_bbox,
+        "verification_result": None,
     }
 
 def blocked_recovery_node(state: AgentState) -> Dict[str, Any]:

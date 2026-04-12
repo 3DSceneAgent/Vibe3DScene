@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Literal
 from urllib.parse import quote
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
@@ -250,8 +250,48 @@ def extract_graph_step_events(mode: str | None, payload: Any) -> list[dict[str, 
         if not isinstance(raw_name, str) or not raw_name:
             continue
         update_keys = sorted(update.keys()) if isinstance(update, dict) else []
-        steps.append({"step": raw_name, "update_keys": update_keys})
+        step_event: dict[str, Any] = {"step": raw_name, "update_keys": update_keys}
+        summary = _summarize_graph_step_update(raw_name, update)
+        if summary:
+            step_event["summary"] = summary
+        steps.append(step_event)
     return steps
+
+
+def _summarize_graph_step_update(step: str, update: Any) -> dict[str, Any] | None:
+    if step != "evaluator" or not isinstance(update, dict):
+        return None
+
+    summary: dict[str, Any] = {}
+
+    transition_reason = update.get("transition_reason")
+    if isinstance(transition_reason, str) and transition_reason.strip():
+        summary["transition_reason"] = transition_reason.strip()
+
+    if "current_todo_stall_count" in update:
+        summary["current_todo_stall_count"] = _sanitize_stream_value(
+            update.get("current_todo_stall_count")
+        )
+
+    active_todo_id = update.get("active_todo_id")
+    if isinstance(active_todo_id, str) and active_todo_id.strip():
+        summary["active_todo_id"] = active_todo_id.strip()
+
+    if "todos" in update or "todo_versions" in update:
+        summary["todo_state_changed"] = True
+
+    verification = update.get("verification_result")
+    if verification is None:
+        summary["verification_status"] = None
+    elif isinstance(verification, dict):
+        verification_status = verification.get("status")
+        if isinstance(verification_status, str) and verification_status.strip():
+            summary["verification_status"] = verification_status.strip()
+        verification_reason = verification.get("reason")
+        if isinstance(verification_reason, str) and verification_reason.strip():
+            summary["verification_reason"] = verification_reason.strip()[:300]
+
+    return summary or None
 
 
 def _sanitize_graph_state_patch(update: dict[str, Any]) -> dict[str, Any]:
@@ -516,11 +556,13 @@ def ensure_thread_vlm_config(thread_id: str) -> Dict[str, Any]:
                 "provider": stored["provider"],
                 "model": stored["model"],
                 "locked": locked,
+                "provider_thinking": None,
             }
         return {
             "provider": str(stored["provider"]),
             "model": str(stored["model"]),
             "locked": locked,
+            "provider_thinking": None,
         }
 
     with _thread_vlm_lock:
@@ -533,6 +575,7 @@ def ensure_thread_vlm_config(thread_id: str) -> Dict[str, Any]:
                 current = {
                     "provider": resolved["provider"],
                     "model": resolved["model"],
+                    "provider_thinking": None,
                 }
                 _thread_vlm_configs[thread_id] = current
                 coordinator.set_thread_vlm(
@@ -546,6 +589,11 @@ def ensure_thread_vlm_config(thread_id: str) -> Dict[str, Any]:
         "provider": str(existing["provider"]),
         "model": str(existing["model"]),
         "locked": bool(existing.get("locked", False)),
+        "provider_thinking": (
+            existing.get("provider_thinking")
+            if isinstance(existing.get("provider_thinking"), bool)
+            else None
+        ),
     }
 
 
@@ -553,7 +601,8 @@ def resolve_thread_vlm_for_chat(
     thread_id: str,
     requested_provider: str | None,
     requested_model: str | None,
-) -> Dict[str, str]:
+    requested_provider_thinking: bool | None = None,
+) -> Dict[str, Any]:
     coordinator = get_session_coordinator()
     normalized_provider = _normalize_optional(requested_provider, lower=True)
     normalized_model = _normalize_optional(requested_model)
@@ -576,23 +625,35 @@ def resolve_thread_vlm_for_chat(
             current = {
                 "provider": resolved["provider"],
                 "model": resolved["model"],
+                "provider_thinking": requested_provider_thinking,
             }
             _thread_vlm_configs[thread_id] = current
         else:
             current["provider"] = resolved["provider"]
             current["model"] = resolved["model"]
+            current["provider_thinking"] = requested_provider_thinking
     coordinator.set_thread_vlm(
         thread_id=thread_id,
         provider=resolved["provider"],
         model=resolved["model"],
         locked=bool(current.get("locked", False)),
     )
-    return resolved
+    return {
+        **resolved,
+        "provider_thinking": requested_provider_thinking,
+    }
 
 
-def _resolve_thread_vlm_for_agent(thread_id: str) -> Dict[str, str]:
+def _resolve_thread_vlm_for_agent(thread_id: str) -> Dict[str, Any]:
     state = ensure_thread_vlm_config(thread_id)
-    return _resolve_vlm_selection(provider=state["provider"], model=state["model"])
+    return {
+        **_resolve_vlm_selection(provider=state["provider"], model=state["model"]),
+        "provider_thinking": (
+            state.get("provider_thinking")
+            if isinstance(state.get("provider_thinking"), bool)
+            else None
+        ),
+    }
 
 
 _MIGRATABLE_AGENT_STATE_KEYS = frozenset(getattr(AgentState, "__annotations__", {}).keys())
@@ -664,6 +725,7 @@ async def _create_agent_graph_for_runtime(
     provider: str,
     model: str,
     api_key: str,
+    provider_thinking: bool | None = None,
 ):
     try:
         return await create_agent_graph(
@@ -671,6 +733,7 @@ async def _create_agent_graph_for_runtime(
             provider_name=provider,
             model=model,
             api_key=api_key,
+            provider_thinking=provider_thinking,
         )
     except TypeError:
         # Backward compatibility for monkeypatched test doubles that accept only session_id.
@@ -1464,12 +1527,14 @@ def _thread_graph_matches_runtime(graph: Any, vlm_runtime: dict[str, Any]) -> bo
         return False
     graph_provider = getattr(graph, "_vlm_provider", None)
     graph_model = getattr(graph, "_vlm_model", None)
+    graph_provider_thinking = getattr(graph, "_provider_thinking", None)
     has_vlm_metadata = graph_provider is not None and graph_model is not None
     if not has_vlm_metadata:
         return True
     return (
         graph_provider == vlm_runtime["provider"]
         and graph_model == vlm_runtime["model"]
+        and graph_provider_thinking == vlm_runtime.get("provider_thinking")
     )
 
 
@@ -1484,6 +1549,7 @@ async def _refresh_thread_agent_graph(
         provider=vlm_runtime["provider"],
         model=vlm_runtime["model"],
         api_key=vlm_runtime["api_key"],
+        provider_thinking=vlm_runtime.get("provider_thinking"),
     )
     if previous_graph is not None:
         await _migrate_agent_state_if_possible(
@@ -1568,18 +1634,28 @@ async def get_agent(thread_id: str | None = None):
 
 
 # Request/Response models
+class ReferencedObject(BaseModel):
+    backend_object_id: str
+    display_name: str
+    object_type: str | None = None
+
+
 class ChatRequest(BaseModel):
     message: str
     thread_id: str = "default"
     turn_id: str | None = None
     vlm_provider: str | None = None
     vlm_model: str | None = None
+    provider_thinking: bool | None = None
     enabled_mcp_tools: list[str] | None = None
     attached_image_ids: list[str] | None = None
+    referenced_objects: list[ReferencedObject] | None = None
     task_id: str | None = None
     workflow_topology: str | None = None
     memory_profile: str | None = None
     fast_mode: bool | None = None
+    max_request_agent_turns: int | None = None
+    max_request_tool_batches: int | None = None
 
 
 class RetryChatRequest(BaseModel):
@@ -1587,8 +1663,11 @@ class RetryChatRequest(BaseModel):
     retry_turn_id: str
     vlm_provider: str | None = None
     vlm_model: str | None = None
+    provider_thinking: bool | None = None
     enabled_mcp_tools: list[str] | None = None
     fast_mode: bool | None = None
+    max_request_agent_turns: int | None = None
+    max_request_tool_batches: int | None = None
 
 
 class ChatResponse(BaseModel):
@@ -1619,6 +1698,12 @@ class HistoryToolMediaResponse(BaseModel):
     value: str
 
 
+class HistoryReferencedObjectResponse(BaseModel):
+    backend_object_id: str
+    display_name: str
+    object_type: str | None = None
+
+
 class HistoryMessageResponse(BaseModel):
     id: str
     turn_id: str | None = None
@@ -1630,6 +1715,7 @@ class HistoryMessageResponse(BaseModel):
     tool_payload: Any | None = None
     tool_media: list[HistoryToolMediaResponse] = Field(default_factory=list)
     attached_images: list[ImageAssetResponse] = Field(default_factory=list)
+    referenced_objects: list[HistoryReferencedObjectResponse] = Field(default_factory=list)
 
 
 class TelemetryMetricsResponse(BaseModel):
@@ -1651,6 +1737,7 @@ class ThreadHistoryResponse(BaseModel):
     scene_revision: int | None = None
     messages: list[HistoryMessageResponse] = Field(default_factory=list)
     todos: list[Dict[str, Any]] = Field(default_factory=list)
+    active_todo_id: str | None = None
     thread_metrics: TelemetryMetricsResponse = Field(default_factory=TelemetryMetricsResponse)
     turn_metrics_by_turn_id: dict[str, TelemetryMetricsResponse] = Field(default_factory=dict)
 
@@ -1690,6 +1777,61 @@ class SceneArtifactManifestResponse(BaseModel):
     generated_at_ms: int | None = None
     gltf_url: str | None = None
     renders: list[SceneArtifactRenderResponse] = Field(default_factory=list)
+
+
+class DeleteSceneObjectRequest(BaseModel):
+    backend_object_id: str
+    backend_object_name: str | None = None
+    mode: Literal["cascade"] = "cascade"
+
+
+class DeleteSceneObjectResponse(BaseModel):
+    thread_id: str
+    backend_object_id: str
+    backend_object_name: str | None = None
+    deleted_names: list[str] = Field(default_factory=list)
+    scene_revision: int | None = None
+    manifest_generated_at_ms: int | None = None
+    has_persisted_blend: bool = False
+
+
+class TransformSceneObjectRequest(BaseModel):
+    backend_object_id: str
+    backend_object_name: str | None = None
+    world_matrix: list[list[float]]
+    refresh_artifacts: bool = True
+
+
+class TransformSceneObjectResponse(BaseModel):
+    thread_id: str
+    backend_object_id: str
+    backend_object_name: str | None = None
+    object_name: str | None = None
+    object_type: str | None = None
+    world_location: list[float] = Field(default_factory=list)
+    world_rotation_quaternion: list[float] = Field(default_factory=list)
+    world_scale: list[float] = Field(default_factory=list)
+    scene_revision: int | None = None
+    manifest_generated_at_ms: int | None = None
+    has_persisted_blend: bool = False
+    artifacts_refreshed: bool = False
+
+
+class AddPrimitiveRequest(BaseModel):
+    primitive_type: Literal["cube", "sphere", "cylinder", "plane", "cone", "torus", "icosphere"]
+    location: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0], min_length=3, max_length=3)
+    size: float = Field(default=1.0, gt=0.0)
+
+
+class AddPrimitiveResponse(BaseModel):
+    thread_id: str
+    primitive_type: str
+    object_name: str
+    backend_object_id: str
+    backend_object_name: str
+    scene_revision: int | None = None
+    manifest_generated_at_ms: int | None = None
+    has_persisted_blend: bool = False
 
 
 class ThreadSummaryResponse(BaseModel):
@@ -1882,8 +2024,11 @@ def resolve_thread_artifact_manifest_path(thread_id: str) -> Path:
     return resolve_thread_artifacts_dir(thread_id) / _SCENE_ARTIFACT_MANIFEST_FILENAME
 
 
-def build_thread_artifact_gltf_url(thread_id: str) -> str:
-    return f"/threads/{quote(thread_id, safe='')}/scene-artifacts/latest.glb"
+def build_thread_artifact_gltf_url(thread_id: str, scene_revision: int | None = None) -> str:
+    base_url = f"/threads/{quote(thread_id, safe='')}/scene-artifacts/latest.glb"
+    if isinstance(scene_revision, int) and scene_revision > 0:
+        return f"{base_url}?rev={scene_revision}"
+    return base_url
 
 
 def build_thread_artifact_render_url(thread_id: str, filename: str) -> str:
@@ -1930,6 +2075,27 @@ def get_thread_scene_revision(thread_id: str) -> int | None:
     return _path_mtime_ms(resolve_thread_storage_dir(thread_id) / "scene.blend")
 
 
+def build_scene_gltf_export_code(target_path: str | Path) -> str:
+    return (
+        "import bpy\n"
+        f"bpy.ops.export_scene.gltf(filepath=r\"{target_path}\", "
+        "export_format='GLB', export_apply=True, export_lights=True, export_extras=True)\n"
+    )
+
+
+def ensure_scene_agent_object_metadata_sync(
+    thread_id: str | None,
+    *,
+    preserve_activity: bool = False,
+) -> dict[str, Any]:
+    return send_blender_command_sync(
+        "ensure_scene_agent_object_metadata",
+        {},
+        thread_id,
+        preserve_activity=preserve_activity,
+    )
+
+
 def _coerce_scene_artifact_renders(thread_id: str, raw_renders: Any) -> list[SceneArtifactRenderResponse]:
     if not isinstance(raw_renders, list):
         return []
@@ -1955,19 +2121,18 @@ def load_thread_scene_artifact_manifest(thread_id: str) -> SceneArtifactManifest
     has_persisted_blend = blend_path.exists() and blend_path.is_file()
     raw_scene_revision = manifest_raw.get("scene_revision")
     scene_revision = raw_scene_revision if isinstance(raw_scene_revision, int) and raw_scene_revision > 0 else None
+    if scene_revision is None:
+        scene_revision = get_thread_scene_revision(thread_id)
     raw_generated_at_ms = manifest_raw.get("generated_at_ms")
     generated_at_ms = raw_generated_at_ms if isinstance(raw_generated_at_ms, int) and raw_generated_at_ms > 0 else None
-    raw_gltf_url = manifest_raw.get("gltf_url")
-    gltf_url = raw_gltf_url if isinstance(raw_gltf_url, str) and raw_gltf_url else None
-    if gltf_url and not gltf_path.exists():
-        gltf_url = None
-    if gltf_url is None and gltf_path.exists():
-        gltf_url = build_thread_artifact_gltf_url(thread_id)
+    gltf_url = None
+    if gltf_path.exists() and gltf_path.is_file():
+        gltf_url = build_thread_artifact_gltf_url(thread_id, scene_revision=scene_revision)
     renders = _coerce_scene_artifact_renders(thread_id, manifest_raw.get("renders"))
     return SceneArtifactManifestResponse(
         thread_id=thread_id,
         has_persisted_blend=has_persisted_blend,
-        scene_revision=scene_revision or get_thread_scene_revision(thread_id),
+        scene_revision=scene_revision,
         generated_at_ms=generated_at_ms,
         gltf_url=gltf_url,
         renders=renders,
@@ -2002,15 +2167,15 @@ def _wait_for_file(path: Path, *, retries: int = 20, delay_seconds: float = 0.15
 
 def _export_scene_gltf_to_path(thread_id: str, target_path: Path) -> bool:
     temp_path = target_path.with_suffix(f".tmp-{int(time.time() * 1000)}.glb")
-    export_code = (
-        "import bpy\n"
-        f"bpy.ops.export_scene.gltf(filepath=r\"{temp_path}\", "
-        "export_format='GLB', export_apply=True, export_lights=True)\n"
-    )
+    export_code = build_scene_gltf_export_code(temp_path)
     try:
+        ensure_scene_agent_object_metadata_sync(thread_id, preserve_activity=True)
         send_blender_command_sync(
             "execute_code",
-            {"code": export_code},
+            {
+                "code": export_code,
+                "validate_scene": False,
+            },
             thread_id,
             preserve_activity=True,
         )
@@ -2118,7 +2283,7 @@ def persist_thread_scene_artifacts_sync(thread_id: str) -> SceneArtifactManifest
         "has_persisted_blend": bool((storage_dir / "scene.blend").exists()),
         "scene_revision": revision,
         "generated_at_ms": revision,
-        "gltf_url": build_thread_artifact_gltf_url(thread_id) if gltf_ok else existing_manifest.gltf_url,
+        "gltf_url": build_thread_artifact_gltf_url(thread_id, scene_revision=revision) if gltf_ok else existing_manifest.gltf_url,
         "renders": renders if renders else [item.model_dump() for item in existing_manifest.renders],
     }
     _write_json_file(manifest_path, manifest_payload)
@@ -2315,6 +2480,50 @@ def _extract_attached_image_ids(serialized: dict[str, Any]) -> list[str]:
     return [item for item in raw_ids if isinstance(item, str) and item.strip()]
 
 
+def _extract_referenced_objects(
+    serialized: dict[str, Any],
+) -> list[HistoryReferencedObjectResponse]:
+    additional_kwargs = serialized.get("additional_kwargs")
+    if not isinstance(additional_kwargs, dict):
+        return []
+    raw_items = additional_kwargs.get("referenced_objects")
+    if not isinstance(raw_items, list):
+        return []
+
+    collected: list[HistoryReferencedObjectResponse] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        backend_object_id = item.get("backend_object_id")
+        display_name = item.get("display_name")
+        object_type = item.get("object_type")
+        if not isinstance(backend_object_id, str) or not backend_object_id.strip():
+            continue
+        if not isinstance(display_name, str) or not display_name.strip():
+            continue
+        collected.append(
+            HistoryReferencedObjectResponse(
+                backend_object_id=backend_object_id.strip(),
+                display_name=display_name.strip(),
+                object_type=object_type if isinstance(object_type, str) else None,
+            )
+        )
+    return collected
+
+
+_REFERENCED_SCENE_OBJECTS_BLOCK_PATTERN = re.compile(
+    r"(?:\n\s*)?<reference(?:d)?_scene_objects>[\s\S]*?</reference(?:d)?_scene_objects>\s*",
+    re.IGNORECASE,
+)
+
+
+def _strip_referenced_objects_context_block(content: str) -> str:
+    if not content:
+        return ""
+    stripped = _REFERENCED_SCENE_OBJECTS_BLOCK_PATTERN.sub("", content)
+    return stripped.rstrip()
+
+
 def _coerce_llm_call_records(raw_records: Any) -> list[dict[str, Any]]:
     if not isinstance(raw_records, list):
         return []
@@ -2425,7 +2634,9 @@ def _derive_thread_title(thread_id: str, messages: list[Any]) -> str:
         serialized = serialize_message(message)
         if serialized.get("type") != "human":
             continue
-        text = message_content_to_text(serialized.get("content")).strip()
+        text = _strip_referenced_objects_context_block(
+            message_content_to_text(serialized.get("content"))
+        ).strip()
         if text:
             return normalize_thread_title(text[:32]) or "New chat"
     return "New chat"
@@ -2493,6 +2704,9 @@ def build_thread_history_payload(thread_id: str) -> ThreadHistoryResponse:
             image = assets_by_id.get(image_id)
             if image is not None:
                 attached_images.append(image)
+        referenced_objects = _extract_referenced_objects(serialized)
+        if role == "user" and referenced_objects:
+            content = _strip_referenced_objects_context_block(content)
         tool_name = None
         tool_payload = None
         tool_media: list[HistoryToolMediaResponse] = []
@@ -2513,6 +2727,7 @@ def build_thread_history_payload(thread_id: str) -> ThreadHistoryResponse:
                 tool_payload=tool_payload,
                 tool_media=tool_media,
                 attached_images=attached_images,
+                referenced_objects=referenced_objects,
             )
         )
 
@@ -2522,6 +2737,19 @@ def build_thread_history_payload(thread_id: str) -> ThreadHistoryResponse:
             fallback_todos_raw=channel_values.get("todos"),
         )
     )
+    active_todo_id = None
+    raw_active_todo_id = channel_values.get("active_todo_id")
+    if isinstance(raw_active_todo_id, str):
+        candidate = raw_active_todo_id.strip()
+        if candidate and any(str(todo.get("id", "")).strip() == candidate for todo in todos):
+            active_todo_id = candidate
+    if active_todo_id is None:
+        for todo in todos:
+            todo_id = str(todo.get("id", "")).strip()
+            status = str(todo.get("status", "")).strip()
+            if todo_id and status in {"pending", "in_progress"}:
+                active_todo_id = todo_id
+                break
     tool_call_counts_by_turn = _collect_tool_call_counts_by_turn(messages)
     turn_llm_call_records: dict[str, list[dict[str, Any]]] = {}
     thread_level_records: list[dict[str, Any]] = []
@@ -2547,6 +2775,7 @@ def build_thread_history_payload(thread_id: str) -> ThreadHistoryResponse:
         scene_revision=get_thread_scene_revision(thread_id),
         messages=history_messages,
         todos=todos,
+        active_todo_id=active_todo_id,
         thread_metrics=thread_metrics,
         turn_metrics_by_turn_id=turn_metrics_by_turn_id,
     )
@@ -2674,6 +2903,7 @@ async def execute_headless_export_code(
     *,
     thread_id: str,
     export_code: str,
+    execute_code_params: dict[str, Any] | None = None,
     timeout_seconds: float,
     timeout_error_message: str,
     timeout_event_name: str,
@@ -2685,12 +2915,16 @@ async def execute_headless_export_code(
     session = manager.ensure(thread_id, "headless")
     request_id = new_request_id(thread_id)
     start_time = start_timer()
+    execute_code_payload: dict[str, Any] = {"code": export_code}
+    if isinstance(execute_code_params, dict):
+        execute_code_payload.update(execute_code_params)
+    execute_code_payload["code"] = export_code
     try:
         await asyncio.wait_for(
             asyncio.to_thread(
                 send_blender_command_sync,
                 "execute_code",
-                {"code": export_code},
+                execute_code_payload,
                 thread_id,
             ),
             timeout=timeout_seconds,

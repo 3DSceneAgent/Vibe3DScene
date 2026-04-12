@@ -44,6 +44,10 @@ Guidelines for tool usage:
 - Verify object bounding boxes to prevent clipping/overlap
 - Prefer enabled asset libraries over procedural generation when they can satisfy the request
 - For Infinigen outputs, do NOT write custom bpy import scripts unless import_blend_contents() fails
+- For reference-image full-scene reconstruction requests (for example, "reconstruct the scene"), if you use
+  reconstruct_full_scene(), execute reconstruct_full_scene() -> import_blend_contents() and then stop.
+- Do NOT automatically continue with retrieval, generation, replacement, or refinement after that import unless
+  the user explicitly asks to refine, replace, edit, or polish the reconstruction afterward.
 - Use execute_blender_code() only when necessary, with retrieved examples
 If CURRENT_AVAILABLE_TOOLS is provided at runtime, never call tools outside that list.
 

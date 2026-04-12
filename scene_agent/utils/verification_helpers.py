@@ -220,7 +220,11 @@ def _effective_todo_snapshot(state: AgentState) -> list[TodoItem]:
     )
 
 
-def active_todo_context(state: AgentState) -> list[dict[str, str]]:
+def active_todo_context(
+    state: AgentState,
+    *,
+    active_only: bool = False,
+) -> list[dict[str, str]]:
     todos = _effective_todo_snapshot(state)
     if not todos:
         return []
@@ -245,7 +249,10 @@ def active_todo_context(state: AgentState) -> list[dict[str, str]]:
             in_progress.append(payload)
         elif status == "pending":
             pending.append(payload)
-    return (in_progress + pending)[:5]
+    ordered = in_progress + pending
+    if active_only:
+        return ordered[:1]
+    return ordered[:5]
 
 
 def _normalize_verification_todo_status(raw_status: Any) -> str | None:
@@ -389,7 +396,11 @@ def build_todo_updates_from_verification(
     return todo_actions, update_records
 
 
-def build_verification_scene_context(state: AgentState) -> dict[str, Any] | None:
+def build_verification_scene_context(
+    state: AgentState,
+    *,
+    active_only_todos: bool = False,
+) -> dict[str, Any] | None:
     context: dict[str, Any] = {}
 
     scene_objects = state.get("scene_objects")
@@ -426,7 +437,7 @@ def build_verification_scene_context(state: AgentState) -> dict[str, Any] | None
         if cameras:
             context["persistent_cameras"] = cameras[:12]
 
-    active_todos = active_todo_context(state)
+    active_todos = active_todo_context(state, active_only=active_only_todos)
     if active_todos:
         context["active_todos"] = active_todos
 
@@ -447,6 +458,8 @@ def _resolve_enabled_tool_set(state: AgentState) -> set[str]:
 def build_verification_guidance_message(
     state: AgentState,
     verification: dict[str, Any],
+    *,
+    active_only_todos: bool = False,
 ) -> str:
     status_value = verification.get("status")
     status = status_value.strip().lower() if isinstance(status_value, str) else ""
@@ -457,7 +470,7 @@ def build_verification_guidance_message(
     is_scene_level = isinstance(render_source, str) and render_source == "scene_observe"
     focus_candidates: list[str] = []
 
-    for line in active_todo_context(state):
+    for line in active_todo_context(state, active_only=active_only_todos):
         todo_id = str(line.get("todo_id", "")).strip()
         title = str(line.get("title", "")).strip()
         label = f"{todo_id} {title}".strip()

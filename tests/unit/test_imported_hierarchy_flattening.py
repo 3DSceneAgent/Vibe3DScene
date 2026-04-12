@@ -7,6 +7,8 @@ import types
 import zipfile
 from pathlib import Path
 
+import pytest
+
 
 class FakeVector:
     def __init__(self, x: float, y: float, z: float) -> None:
@@ -233,6 +235,23 @@ def _load_module(monkeypatch, module_name: str, relative_path: str):
     return module, fake_bpy
 
 
+def _scaled_bbox_for_fake_object(obj: FakeObject):
+    base_dimensions = getattr(obj, "_base_dimensions", None)
+    if not isinstance(base_dimensions, tuple):
+        raise AssertionError(f"Missing _base_dimensions on fake object {obj.name}")
+
+    location = tuple(float(value) for value in obj.location)
+    scale = tuple(float(value) for value in obj.scale)
+    half_extents = [
+        (base_dimensions[index] * scale[index]) / 2.0
+        for index in range(3)
+    ]
+    return [
+        [location[index] - half_extents[index] for index in range(3)],
+        [location[index] + half_extents[index] for index in range(3)],
+    ]
+
+
 def test_flatten_imported_hierarchy_unparents_meshes_and_removes_empty_wrappers(monkeypatch):
     module, fake_bpy = _load_module(
         monkeypatch,
@@ -290,6 +309,125 @@ def test_flatten_imported_hierarchy_is_safe_for_flat_meshes(monkeypatch):
     assert summary["processed_meshes"] == ["FlatMesh"]
     assert summary["unparented_meshes"] == []
     assert summary["removed_empties"] == []
+
+
+def test_scale_normalization_uses_union_bbox_for_multiple_mesh_roots(monkeypatch):
+    module, fake_bpy = _load_module(
+        monkeypatch,
+        "asset_handlers_under_test_scale_union",
+        "addon/blender_mcpv_addon/asset_handlers.py",
+    )
+
+    mesh_a = FakeObject(
+        "SmallMeshA",
+        "MESH",
+        location=(0.02, 0.0, 0.0),
+        data=FakeMeshData("SmallMeshAData"),
+    )
+    mesh_b = FakeObject(
+        "SmallMeshB",
+        "MESH",
+        location=(0.08, 0.0, 0.0),
+        data=FakeMeshData("SmallMeshBData"),
+    )
+    mesh_a._base_dimensions = (0.02, 0.02, 0.02)
+    mesh_b._base_dimensions = (0.02, 0.02, 0.02)
+
+    for obj in (mesh_a, mesh_b):
+        fake_bpy.data.objects.add(obj)
+
+    handler = module.AssetHandlerMixin()
+    handler._get_aabb = _scaled_bbox_for_fake_object
+
+    summary, bbox = handler._normalize_imported_object_scale([mesh_a, mesh_b])
+
+    assert summary["applied"] is True
+    assert summary["reason"] == "too_small"
+    assert summary["scale_factor"] == 12.5
+    assert summary["applied_root_objects"] == ["SmallMeshA", "SmallMeshB"]
+    assert summary["original_max_dimension_m"] == 0.08
+    assert summary["normalized_max_dimension_m"] == 1.0
+    assert bbox["min"] == pytest.approx([-0.45, -0.125, -0.125])
+    assert bbox["max"] == pytest.approx([0.55, 0.125, 0.125])
+
+
+def test_scale_normalization_skips_assets_within_threshold(monkeypatch):
+    module, fake_bpy = _load_module(
+        monkeypatch,
+        "asset_handlers_under_test_scale_skip",
+        "addon/blender_mcpv_addon/asset_handlers.py",
+    )
+
+    mesh = FakeObject(
+        "Desk",
+        "MESH",
+        location=(1.0, 2.0, 3.0),
+        data=FakeMeshData("DeskData"),
+    )
+    mesh._base_dimensions = (2.0, 1.0, 0.8)
+    fake_bpy.data.objects.add(mesh)
+
+    handler = module.AssetHandlerMixin()
+    handler._get_aabb = _scaled_bbox_for_fake_object
+
+    summary, bbox = handler._normalize_imported_object_scale([mesh])
+
+    assert summary["applied"] is False
+    assert summary["reason"] == "within_threshold"
+    assert summary["original_max_dimension_m"] == 2.0
+    assert bbox == {"min": [0.0, 1.5, 2.6], "max": [2.0, 2.5, 3.4]}
+
+
+def test_scale_normalization_scales_large_asset_down(monkeypatch):
+    module, fake_bpy = _load_module(
+        monkeypatch,
+        "asset_handlers_under_test_scale_large",
+        "addon/blender_mcpv_addon/asset_handlers.py",
+    )
+
+    mesh = FakeObject(
+        "LargeAsset",
+        "MESH",
+        location=(0.0, 0.0, 0.0),
+        data=FakeMeshData("LargeAssetData"),
+    )
+    mesh._base_dimensions = (20.0, 4.0, 2.0)
+    fake_bpy.data.objects.add(mesh)
+
+    handler = module.AssetHandlerMixin()
+    handler._get_aabb = _scaled_bbox_for_fake_object
+
+    summary, bbox = handler._normalize_imported_object_scale([mesh])
+
+    assert summary["applied"] is True
+    assert summary["reason"] == "too_large"
+    assert summary["scale_factor"] == 0.05
+    assert summary["normalized_max_dimension_m"] == 1.0
+    assert bbox == {"min": [-0.5, -0.1, -0.05], "max": [0.5, 0.1, 0.05]}
+
+
+def test_scale_normalization_skips_when_mesh_bbox_is_invalid(monkeypatch):
+    module, fake_bpy = _load_module(
+        monkeypatch,
+        "asset_handlers_under_test_scale_invalid_bbox",
+        "addon/blender_mcpv_addon/asset_handlers.py",
+    )
+
+    mesh = FakeObject(
+        "BrokenAsset",
+        "MESH",
+        data=FakeMeshData("BrokenAssetData"),
+    )
+    fake_bpy.data.objects.add(mesh)
+
+    handler = module.AssetHandlerMixin()
+    handler._get_aabb = lambda _obj: [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+
+    summary, bbox = handler._normalize_imported_object_scale([mesh])
+
+    assert summary["applied"] is False
+    assert summary["reason"] == "skipped_invalid_bbox"
+    assert bbox is None
 
 
 def test_import_glb_model_falls_back_to_legacy_obj_operator_when_wm_obj_import_is_missing(monkeypatch):

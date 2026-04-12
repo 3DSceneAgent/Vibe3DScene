@@ -98,6 +98,12 @@ def coerce_task_mode(raw_mode: Any) -> TaskMode:
     return MODE_DIRECT
 
 
+def coerce_budget_limit(raw_value: Any, *, default: int = -1) -> int:
+    if isinstance(raw_value, int):
+        return raw_value if raw_value >= -1 else default
+    return default
+
+
 def coerce_workflow_topology(raw_topology: Any) -> str:
     if isinstance(raw_topology, str):
         normalized = raw_topology.strip()
@@ -160,6 +166,102 @@ def build_todo_runtime_prompt(state: AgentState) -> str:
         marker = " (active)" if todo_id == active_todo_id else ""
         lines.append(f"- {todo_id} [{status}] {description}{marker}")
     return "\n".join(lines)
+
+
+def build_single_agent_active_todo_prompt(state: AgentState) -> str:
+    focus = active_todo_context(state, active_only=True)
+    open_todo_count = unfinished_todo_count(state)
+    lines = [
+        "Plan mode execution focus:",
+        "- Todo lifecycle is evaluator-managed. Do not modify todo statuses directly.",
+        "- Work only on the current active todo in this turn.",
+        "- Do not proactively work on later todos, even if they seem related or easy to finish alongside the current one.",
+        "- When the active todo looks complete, gather fresh render evidence and stop instead of moving to the next todo yourself.",
+    ]
+    if not focus:
+        lines.append("- No active todo is currently resolved. Focus only on the next unfinished objective if one appears.")
+        return "\n".join(lines)
+
+    focus_entry = focus[0]
+    focus_id = str(focus_entry.get("todo_id", "")).strip()
+    focus_title = str(focus_entry.get("title", "")).strip()
+    status = str(focus_entry.get("status", "")).strip()
+    label = focus_title
+    if focus_id:
+        label = f"{focus_id}: {focus_title}" if focus_title else focus_id
+    if label:
+        lines.append(f"- Active todo only: {label}")
+    if status:
+        lines.append(f"- Active todo status: {status}")
+    if open_todo_count > 1:
+        lines.append(
+            f"- There are {open_todo_count - 1} later unfinished todos. Ignore them until evaluator advances the active todo."
+        )
+    return "\n".join(lines)
+
+
+def build_single_agent_active_todo_request(state: AgentState) -> str:
+    focus = active_todo_context(state, active_only=True)
+    lines = [
+        "Plan mode execution request:",
+        "- Execute only the current active todo in this turn.",
+        "- Do not complete later todos or their core deliverables yet.",
+        "- Use the current scene state, render evidence, and attached/reference images as guidance.",
+    ]
+    if not focus:
+        lines.append("- No active todo is currently resolved. Do not expand scope on your own.")
+        return "\n".join(lines)
+
+    focus_entry = focus[0]
+    focus_id = str(focus_entry.get("todo_id", "")).strip()
+    focus_title = str(focus_entry.get("title", "")).strip()
+    status = str(focus_entry.get("status", "")).strip()
+    label = focus_title
+    if focus_id:
+        label = f"{focus_id}: {focus_title}" if focus_title else focus_id
+    if label:
+        lines.append(f"- Current active todo: {label}")
+    if status:
+        lines.append(f"- Active todo status: {status}")
+    return "\n".join(lines)
+
+
+def _project_single_agent_plan_mode_human_message(
+    messages: list[Any],
+    *,
+    state: AgentState,
+) -> list[Any]:
+    skip_ids = {RENDER_VISION_MESSAGE_ID, SCENE_OBSERVE_MESSAGE_ID}
+    target_index: int | None = None
+    for idx in range(len(messages) - 1, -1, -1):
+        message = messages[idx]
+        if not isinstance(message, HumanMessage):
+            continue
+        if getattr(message, "id", None) in skip_ids:
+            continue
+        target_index = idx
+        break
+    if target_index is None:
+        return messages
+
+    projected_text = build_single_agent_active_todo_request(state)
+    original = messages[target_index]
+    updated = list(messages)
+    updated_human = copy.deepcopy(original)
+    original_content = getattr(original, "content", "")
+    if isinstance(original_content, list):
+        preserved_blocks: list[Any] = []
+        for item in original_content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                continue
+            if isinstance(item, str):
+                continue
+            preserved_blocks.append(copy.deepcopy(item))
+        updated_human.content = [{"type": "text", "text": projected_text}, *preserved_blocks]
+    else:
+        updated_human.content = projected_text
+    updated[target_index] = updated_human
+    return updated
 
 def _normalize_reference_image_key(raw_value: Any) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9]+", "_", str(raw_value or "").strip().lower())
@@ -975,11 +1077,23 @@ def invoke_role_agent(
                 )
             )
         )
-    if role == ROLE_GENERAL and (mode == MODE_PLAN or effective_todo_snapshot(state)):
-        messages.append(SystemMessage(content=build_todo_runtime_prompt(state)))
+    if role == ROLE_GENERAL:
+        if mode == MODE_PLAN and coerce_workflow_topology(state.get("workflow_topology")) != TOPOLOGY_DUAL:
+            messages.append(SystemMessage(content=build_single_agent_active_todo_prompt(state)))
+        elif effective_todo_snapshot(state):
+            messages.append(SystemMessage(content=build_todo_runtime_prompt(state)))
     state_messages = list(state["messages"])
     if role in {ROLE_GENERAL, ROLE_BUILDER, ROLE_VERIFIER}:
         state_messages = _inject_reference_images_into_latest_human_message(
+            state_messages,
+            state=state,
+        )
+    if (
+        role == ROLE_GENERAL
+        and mode == MODE_PLAN
+        and coerce_workflow_topology(state.get("workflow_topology")) == TOPOLOGY_SINGLE
+    ):
+        state_messages = _project_single_agent_plan_mode_human_message(
             state_messages,
             state=state,
         )

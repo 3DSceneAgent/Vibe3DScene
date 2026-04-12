@@ -49,12 +49,17 @@ class GeminiProvider(BaseVLMProvider):
     def get_chat_model(self) -> Any:
         from langchain_google_genai import ChatGoogleGenerativeAI
         settings = get_settings()
+        include_thoughts = (
+            self.thinking_enabled
+            if self.thinking_enabled is not None
+            else settings.gemini_include_thoughts
+        )
         kwargs: dict[str, Any] = {
             "model": self.model,
             "google_api_key": self.api_key,
             "temperature": 0.7,
             "streaming": True,
-            "include_thoughts": settings.gemini_include_thoughts,
+            "include_thoughts": include_thoughts,
         }
         if settings.gemini_thinking_budget is not None:
             kwargs["thinking_budget"] = settings.gemini_thinking_budget
@@ -72,6 +77,11 @@ class QwenProvider(BaseVLMProvider):
     def get_chat_model(self) -> Any:
         chat_qwen_cls = getattr(import_module("langchain_qwq"), "ChatQwen")
         settings = get_settings()
+        enable_thinking = (
+            self.thinking_enabled
+            if self.thinking_enabled is not None
+            else settings.qwen_enable_thinking
+        )
 
         # langchain-qwq primarily reads DASHSCOPE_API_KEY from environment.
         # Keep this provider-level key authoritative for current runtime.
@@ -81,7 +91,7 @@ class QwenProvider(BaseVLMProvider):
             "api_key": self.api_key,
             "temperature": 0.7,
             "streaming": True,
-            "enable_thinking": settings.qwen_enable_thinking,
+            "enable_thinking": enable_thinking,
         }
         if settings.qwen_thinking_budget is not None:
             kwargs["thinking_budget"] = settings.qwen_thinking_budget
@@ -91,7 +101,8 @@ class QwenProvider(BaseVLMProvider):
 def get_vlm_provider(
     provider_name: str,
     api_key: str,
-    model: str = None
+    model: str = None,
+    thinking_enabled: bool | None = None,
 ) -> BaseVLMProvider:
     """
     Factory function to get a VLM provider by name.
@@ -121,4 +132,8 @@ def get_vlm_provider(
             f"Available providers: {', '.join(providers.keys())}"
         )
     
-    return providers[provider_name](api_key=api_key, model=model)
+    return providers[provider_name](
+        api_key=api_key,
+        model=model,
+        thinking_enabled=thinking_enabled,
+    )

@@ -433,6 +433,111 @@ async def fake_get_duplicate_named_tool_calls_agent(_thread_id=None):
     return DuplicateNamedToolCallsAgent()
 
 
+class ReplayExistingToolMessagesAgent:
+    async def aget_state(self, *_args, **_kwargs):
+        class State:
+            values = {
+                "messages": [
+                    AIMessage(
+                        id="assistant-old",
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "search_3d_assets_by_text",
+                                "args": {"query": "chair"},
+                                "id": "old-tool-1",
+                                "type": "tool_call",
+                            }
+                        ],
+                    ),
+                    ToolMessage(
+                        id="tool-old-result",
+                        name="search_3d_assets_by_text",
+                        content='{"status":"cached"}',
+                        tool_call_id="old-tool-1",
+                    ),
+                ]
+            }
+
+        return State()
+
+    async def astream(self, *_args, **_kwargs):
+        yield (
+            "updates",
+            {
+                "agent": {
+                    "messages": [
+                        AIMessage(
+                            id="assistant-old",
+                            content="",
+                            tool_calls=[
+                                {
+                                    "name": "search_3d_assets_by_text",
+                                    "args": {"query": "chair"},
+                                    "id": "old-tool-1",
+                                    "type": "tool_call",
+                                }
+                            ],
+                        )
+                    ],
+                },
+                "tools": {
+                    "messages": [
+                        ToolMessage(
+                            id="tool-old-result",
+                            name="search_3d_assets_by_text",
+                            content='{"status":"cached"}',
+                            tool_call_id="old-tool-1",
+                        )
+                    ],
+                },
+            },
+        )
+        yield (
+            AIMessageChunk(
+                id="assistant-new",
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_scene_info",
+                        "args": {},
+                        "id": "new-tool-1",
+                        "type": "tool_call",
+                    }
+                ],
+                tool_call_chunks=[
+                    {
+                        "name": "get_scene_info",
+                        "args": "{}",
+                        "id": "new-tool-1",
+                        "index": 0,
+                        "type": "tool_call_chunk",
+                    }
+                ],
+            ),
+            {"langgraph_node": "agent"},
+        )
+        yield (
+            "updates",
+            {
+                "tools": {
+                    "messages": [
+                        ToolMessage(
+                            id="tool-new-result",
+                            name="get_scene_info",
+                            content='{"status":"ok"}',
+                            tool_call_id="new-tool-1",
+                        )
+                    ],
+                },
+            },
+        )
+
+
+async def fake_get_replay_existing_tool_messages_agent(_thread_id=None):
+    return ReplayExistingToolMessagesAgent()
+
+
 class ResumableAgent:
     async def astream(self, *_args, **_kwargs):
         yield ("messages", [{"type": "ai", "content": "hello"}])
@@ -759,6 +864,36 @@ def test_chat_stream_emits_started_event_for_each_same_named_tool_call(monkeypat
         "tool-1",
         "tool-2",
     ]
+
+
+def test_chat_stream_does_not_reemit_preexisting_tool_events(monkeypatch):
+    monkeypatch.setattr(api_module, "get_agent", fake_get_replay_existing_tool_messages_agent)
+    client = TestClient(api_module.app)
+
+    with client.stream(
+        "POST",
+        "/chat/stream",
+        json={"message": "hi", "thread_id": "t-replay-existing-tools"},
+    ) as response:
+        assert response.status_code == 200
+        payloads = collect_sse_payloads(response.iter_lines())
+
+    started_ids = [
+        payload.get("tool_call", {}).get("id")
+        for payload in payloads
+        if payload.get("event") == "tool_call_started"
+    ]
+    assert "old-tool-1" not in started_ids
+    assert "new-tool-1" in started_ids
+
+    tool_message_ids = [
+        message.get("id")
+        for payload in payloads
+        for message in payload.get("messages", [])
+        if message.get("type") == "tool"
+    ]
+    assert "tool-old-result" not in tool_message_ids
+    assert "tool-new-result" in tool_message_ids
 
 
 def test_chat_stream_emits_done(monkeypatch):

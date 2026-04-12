@@ -16,7 +16,7 @@ ROLE_VERIFIER = "verifier"
 
 # Global defaults for workflow evaluator behavior.
 DEFAULT_MAX_PLAN_REPLANS = 2
-DEFAULT_SKIP_THRESHOLD = 6
+DEFAULT_SKIP_THRESHOLD = 4
 DEFAULT_REPLAN_THRESHOLD = 2
 
 # Deprecated compatibility aliases retained for legacy imports/tests.

@@ -429,14 +429,14 @@ class Settings(BaseSettings):
         default_models = {
             "openai": ["gpt-4o"],
             "anthropic": ["claude-3-5-sonnet-20241022"],
+            "qwen": ["qwen3.6-plus"],
             "gemini": ["gemini-2.5-pro"],
-            "qwen": ["qwen-vl-max-latest"],
         }
         raw_by_provider = {
             "openai": self.vlm_openai_models,
             "anthropic": self.vlm_anthropic_models,
-            "gemini": self.vlm_gemini_models,
             "qwen": self.vlm_qwen_models,
+            "gemini": self.vlm_gemini_models,
         }
         raw = raw_by_provider.get(provider_lower, "")
         models: list[str] = []

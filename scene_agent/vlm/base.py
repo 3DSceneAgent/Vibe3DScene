@@ -12,16 +12,18 @@ class BaseVLMProvider(ABC):
     Allows swapping between OpenAI, Anthropic, Gemini, etc.
     """
     
-    def __init__(self, api_key: str, model: str = None):
+    def __init__(self, api_key: str, model: str = None, thinking_enabled: bool | None = None):
         """
         Initialize the VLM provider.
         
         Args:
             api_key: API key for the provider
             model: Optional model override
+            thinking_enabled: Optional provider reasoning/thinking override
         """
         self.api_key = api_key
         self.model = model or self.get_default_model()
+        self.thinking_enabled = thinking_enabled
     
     @abstractmethod
     def get_default_model(self) -> str:

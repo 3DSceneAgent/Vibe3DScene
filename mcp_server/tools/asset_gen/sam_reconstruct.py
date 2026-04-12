@@ -6,6 +6,7 @@ import logging
 import mimetypes
 import os
 import subprocess
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -22,6 +23,8 @@ logger = logging.getLogger("BlenderMCPServer")
 DEFAULT_TIMEOUT_SECONDS = 300
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
 DEFAULT_STORAGE_DIR = "/tmp/scene_agent_sam_reconstruct"
+DEFAULT_SCENE_BACKGROUND_STRENGTH = 1.5
+DEFAULT_SCENE_SUN_ENERGY = 2.5
 
 
 class ReconstructToolError(Exception):
@@ -469,6 +472,11 @@ def _run_blender_import(*, transforms_path: Path, blend_file_path: Path, output_
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
             )
+        _run_blender_scene_postprocess(
+            blender_cmd=blender_cmd,
+            blend_file_path=blend_file_path,
+            output_dir=output_dir,
+        )
     except subprocess.CalledProcessError as exc:
         raise ReconstructToolError(
             status="blender_error",
@@ -479,6 +487,153 @@ def _run_blender_import(*, transforms_path: Path, blend_file_path: Path, output_
             status="blender_error",
             message=f"Failed to start Blender import command '{blender_cmd}': {str(exc)}",
         ) from exc
+
+
+def _sam_blend_postprocess_script() -> str:
+    return f"""
+import sys
+
+import bpy
+
+
+def _blend_path_from_argv() -> str:
+    argv = sys.argv
+    if "--" not in argv:
+        raise RuntimeError("Expected -- <blend_file_path> argument for SAM reconstruct postprocess")
+    idx = argv.index("--")
+    if len(argv) <= idx + 1:
+        raise RuntimeError("Missing blend_file_path argument for SAM reconstruct postprocess")
+    return argv[idx + 1]
+
+
+def _ensure_world_background() -> None:
+    scene = bpy.context.scene
+    world = scene.world
+    if world is None:
+        world = bpy.data.worlds.new("World")
+        scene.world = world
+
+    world.use_nodes = True
+    node_tree = world.node_tree
+    background = node_tree.nodes.get("Background")
+    if background is None:
+        background = node_tree.nodes.new(type="ShaderNodeBackground")
+
+    world_output = node_tree.nodes.get("World Output")
+    if world_output is None:
+        world_output = node_tree.nodes.new(type="ShaderNodeOutputWorld")
+
+    for link in list(world_output.inputs["Surface"].links):
+        node_tree.links.remove(link)
+    node_tree.links.new(background.outputs["Background"], world_output.inputs["Surface"])
+
+    background.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+    background.inputs["Strength"].default_value = {DEFAULT_SCENE_BACKGROUND_STRENGTH!r}
+
+
+def _scene_has_effective_light() -> bool:
+    for obj in getattr(bpy.context.scene, "objects", []):
+        if getattr(obj, "type", "") != "LIGHT":
+            continue
+        light_data = getattr(obj, "data", None)
+        energy = getattr(light_data, "energy", 0.0) if light_data is not None else 0.0
+        try:
+            if float(energy) > 0.0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _ensure_sun_light() -> None:
+    if _scene_has_effective_light():
+        return
+
+    sun_data = bpy.data.lights.new(name="SAM3D_Postprocess_Sun", type="SUN")
+    sun_data.energy = {DEFAULT_SCENE_SUN_ENERGY!r}
+    if hasattr(sun_data, "angle"):
+        sun_data.angle = 0.261799
+
+    sun_obj = bpy.data.objects.new("SAM3D_Postprocess_Sun", sun_data)
+    bpy.context.scene.collection.objects.link(sun_obj)
+    sun_obj.location = (5.0, 5.0, 10.0)
+    sun_obj.rotation_euler = (0.785398, 0.0, 0.785398)
+
+
+blend_file_path = _blend_path_from_argv()
+_ensure_world_background()
+_ensure_sun_light()
+bpy.ops.wm.save_mainfile(filepath=blend_file_path)
+print(
+    "Configured SAM3D scene lighting with "
+    f"world_strength={DEFAULT_SCENE_BACKGROUND_STRENGTH} "
+    f"and fallback_sun_energy={DEFAULT_SCENE_SUN_ENERGY}"
+)
+""".strip() + "\n"
+
+
+def _run_blender_scene_postprocess(
+    *,
+    blender_cmd: str,
+    blend_file_path: Path,
+    output_dir: Path,
+) -> None:
+    if not blend_file_path.exists():
+        raise ReconstructToolError(
+            status="blender_error",
+            message=f"SAM reconstruct import did not produce a blend file: {blend_file_path}",
+        )
+
+    script_path: Path | None = None
+    script_file = tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix="_sam_reconstruct_postprocess.py",
+        dir=output_dir,
+        delete=False,
+        encoding="utf-8",
+    )
+    try:
+        script_file.write(_sam_blend_postprocess_script())
+        script_file.flush()
+        script_path = Path(script_file.name)
+    finally:
+        script_file.close()
+
+    log_path = output_dir / "blender_postprocess.log"
+    try:
+        with log_path.open("w", encoding="utf-8") as log_handle:
+            subprocess.run(
+                [
+                    blender_cmd,
+                    "-b",
+                    str(blend_file_path),
+                    "-P",
+                    str(script_path),
+                    "--",
+                    str(blend_file_path),
+                ],
+                cwd=output_dir,
+                check=True,
+                text=True,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+            )
+    except subprocess.CalledProcessError as exc:
+        raise ReconstructToolError(
+            status="blender_error",
+            message=f"Blender scene postprocess failed: {str(exc)}. See log: {log_path}",
+        ) from exc
+    except OSError as exc:
+        raise ReconstructToolError(
+            status="blender_error",
+            message=f"Failed to start Blender scene postprocess command '{blender_cmd}': {str(exc)}",
+        ) from exc
+    finally:
+        try:
+            if script_path is not None:
+                script_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def _parse_response_json(response: requests.Response, action: str) -> dict[str, Any]:

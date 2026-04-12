@@ -7,6 +7,7 @@ class _PlannerModelStub:
     def __init__(self, payload):
         self.payload = payload
         self.called = False
+        self.last_messages = None
 
     def with_config(self, **_kwargs):
         return self
@@ -16,6 +17,7 @@ class _PlannerModelStub:
 
     def invoke(self, _messages):
         self.called = True
+        self.last_messages = _messages
         return self.payload
 
 
@@ -133,3 +135,26 @@ def test_plan_node_early_exit_reuses_existing_todos_without_invoking_model():
     assert result["task_mode"] == "plan_mode"
     assert result["routed_to_plan"] is True
     assert result["active_todo_id"] == "todo-1"
+
+
+def test_plan_node_prompt_requires_non_overlapping_todos():
+    planner = _PlannerModelStub(
+        {
+            "todos": [
+                {"title": "Beach setup", "description": "Set up the basic beach environment."},
+                {"title": "Camper van", "description": "Place the central camper van."},
+            ]
+        }
+    )
+
+    plan_node(
+        {"messages": [HumanMessage(content="Build a beach campsite with a central camper van.")]},
+        planner_model=planner,
+    )
+
+    assert planner.called is True
+    assert isinstance(planner.last_messages, list)
+    planner_input = planner.last_messages[-1].content
+    assert "Todos must be mutually exclusive and minimally overlapping." in planner_input
+    assert "must not already complete the core deliverable of later todos" in planner_input
+    assert "the beach setup todo must NOT place the camper van" in planner_input

@@ -182,14 +182,14 @@ def build_image_routing_compare_stub_tools() -> list[StructuredTool]:
             input_image_url=input_image_url,
             input_image_name=input_image_name,
             input_image_id=input_image_id,
-            generation_mode=generation_mode,
+            generation_mode="rapid",
             timeout_seconds=timeout_seconds,
             poll_interval_seconds=poll_interval_seconds,
         )
         payload = {
             "job_id": "job_hunyuan_reference_compare",
             "status": "DONE",
-            "generation_mode": generation_mode or "rapid",
+            "generation_mode": "rapid",
             "result_file_3ds": [
                 {
                     "File3D": [

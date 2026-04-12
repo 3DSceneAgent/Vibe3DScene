@@ -80,14 +80,14 @@ def test_generate_hunyuan3d_model_exposes_preferred_obj_zip_asset(monkeypatch):
     ]
 
 
-def test_generate_hunyuan3d_model_surfaces_query_error_detail(monkeypatch):
+def test_generate_hunyuan3d_model_forces_rapid_when_pro_is_requested(monkeypatch):
     def _fake_call_tencent_cloud_api(*, action: str, payload: dict, **_kwargs):
-        if action == "SubmitHunyuanTo3DProJob":
+        if action == "SubmitHunyuanTo3DRapidJob":
             assert payload["Prompt"] == "A broken chair"
             assert payload["EnablePBR"] is True
-            assert "ResultFormat" not in payload
+            assert payload["ResultFormat"] == "GLB"
             return {"Response": {"JobId": "1428029626508517376"}}
-        if action == "QueryHunyuanTo3DProJob":
+        if action == "QueryHunyuanTo3DRapidJob":
             return {
                 "Response": {
                     "Status": "FAIL",
@@ -118,7 +118,7 @@ def test_generate_hunyuan3d_model_surfaces_query_error_detail(monkeypatch):
 
     assert parsed["job_id"] == "job_1428029626508517376"
     assert parsed["status"] == "FAIL"
-    assert parsed["generation_mode"] == "pro"
+    assert parsed["generation_mode"] == "rapid"
     assert parsed["detail"] == {
         "Code": "ResourceInsufficient",
         "Message": "资源不足。",
@@ -177,3 +177,45 @@ def test_generate_hunyuan3d_model_supports_rapid_mode(monkeypatch):
         "url_extension": "glb",
         "is_archive": False,
     }
+
+
+def test_generate_hunyuan3d_model_ignores_pro_env_override(monkeypatch):
+    def _fake_call_tencent_cloud_api(*, action: str, payload: dict, **_kwargs):
+        if action == "SubmitHunyuanTo3DRapidJob":
+            assert payload["Prompt"] == "A forced rapid chair"
+            assert payload["ResultFormat"] == "GLB"
+            return {"Response": {"JobId": "1428029626508517378"}}
+        if action == "QueryHunyuanTo3DRapidJob":
+            return {
+                "Response": {
+                    "Status": "DONE",
+                    "ResultFile3Ds": [
+                        {
+                            "Type": "GLB",
+                            "Url": "https://example.test/hunyuan/output/forced_rapid_model.glb",
+                        }
+                    ],
+                }
+            }
+        raise AssertionError(f"Unexpected action: {action}")
+
+    monkeypatch.setattr(hunyuan3d.runtime, "is_hunyuan_tool_enabled", lambda: True)
+    monkeypatch.setattr(
+        hunyuan3d.runtime,
+        "call_tencent_cloud_api",
+        _fake_call_tencent_cloud_api,
+    )
+    monkeypatch.setattr(hunyuan3d.runtime, "extract_hunyuan_status", lambda _resp: "DONE")
+    monkeypatch.setenv("HUNYUAN3D_SECRET_ID", "secret-id")
+    monkeypatch.setenv("HUNYUAN3D_SECRET_KEY", "secret-key")
+    monkeypatch.setenv("HUNYUAN3D_GENERATION_MODE", "pro")
+
+    raw_result = hunyuan3d.generate_hunyuan3d_model(
+        ctx=None,
+        text_prompt="A forced rapid chair",
+        timeout_seconds=5,
+        poll_interval_seconds=0.01,
+    )
+    parsed = json.loads(raw_result)
+
+    assert parsed["generation_mode"] == "rapid"

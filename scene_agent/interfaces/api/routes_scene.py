@@ -2,8 +2,10 @@
 import asyncio
 from importlib import import_module
 import os
+import re
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response
@@ -15,17 +17,26 @@ from scene_agent.utils.logging import log_event
 from scene_agent.utils.rendering import process_and_save_render
 
 from .models import (
+    AddPrimitiveRequest,
+    AddPrimitiveResponse,
     BlendFileEntry,
     BlendFileListResponse,
+    DeleteSceneObjectRequest,
+    DeleteSceneObjectResponse,
     SceneArtifactManifestResponse,
+    TransformSceneObjectRequest,
+    TransformSceneObjectResponse,
 )
 from .shared import (
     blend_file_category,
+    build_scene_gltf_export_code,
     load_thread_scene_artifact_manifest,
     build_headless_diagnostics,
     claim_or_proxy_request,
+    ensure_scene_agent_object_metadata_sync,
     execute_headless_export_code,
     headless_timeout_seconds_for_session,
+    persist_thread_scene_artifacts_sync,
     resolve_thread_artifact_gltf_path,
     resolve_thread_artifact_renders_dir,
     render_scene_level_views,
@@ -42,6 +53,94 @@ def resolve_api_module():
 def send_blender_command_sync(command_type, params=None, thread_id=None):
     api_module = resolve_api_module()
     return api_module.send_blender_command_sync(command_type, params, thread_id)
+
+
+_PRIMITIVE_DISPLAY_NAMES: dict[str, str] = {
+    "cube": "Cube",
+    "sphere": "Sphere",
+    "cylinder": "Cylinder",
+    "plane": "Plane",
+    "cone": "Cone",
+    "torus": "Torus",
+    "icosphere": "Icosphere",
+}
+_CREATED_PRIMITIVE_MARKER = re.compile(r"CREATED:(?P<name>[^\n|]+)\|(?P<object_id>[^\n]+)")
+
+
+def _coerce_primitive_location(location: list[float]) -> tuple[float, float, float]:
+    if len(location) != 3:
+        raise HTTPException(status_code=422, detail="Primitive location must contain exactly three coordinates.")
+    return (float(location[0]), float(location[1]), float(location[2]))
+
+
+def _build_primitive_op_call(
+    primitive_type: str,
+    location: tuple[float, float, float],
+    size: float,
+) -> str:
+    location_repr = repr(location)
+    if primitive_type == "cube":
+        return f"bpy.ops.mesh.primitive_cube_add(size={size!r}, location={location_repr})"
+    if primitive_type == "sphere":
+        return f"bpy.ops.mesh.primitive_uv_sphere_add(radius={size!r}, location={location_repr})"
+    if primitive_type == "cylinder":
+        return (
+            "bpy.ops.mesh.primitive_cylinder_add("
+            f"radius={size!r}, depth={(size * 2.0)!r}, location={location_repr})"
+        )
+    if primitive_type == "plane":
+        return f"bpy.ops.mesh.primitive_plane_add(size={size!r}, location={location_repr})"
+    if primitive_type == "cone":
+        return (
+            "bpy.ops.mesh.primitive_cone_add("
+            f"radius1={size!r}, depth={(size * 2.0)!r}, location={location_repr})"
+        )
+    if primitive_type == "torus":
+        return (
+            "bpy.ops.mesh.primitive_torus_add("
+            f"major_radius={size!r}, minor_radius={max(size * 0.3, 0.1)!r}, location={location_repr})"
+        )
+    if primitive_type == "icosphere":
+        return f"bpy.ops.mesh.primitive_ico_sphere_add(radius={size!r}, location={location_repr})"
+    raise HTTPException(status_code=422, detail=f"Unsupported primitive type '{primitive_type}'.")
+
+
+def _build_primitive_code(
+    primitive_type: str,
+    location: list[float],
+    size: float,
+    backend_object_id: str,
+) -> str:
+    display_name = _PRIMITIVE_DISPLAY_NAMES[primitive_type]
+    op_call = _build_primitive_op_call(
+        primitive_type,
+        _coerce_primitive_location(location),
+        float(size),
+    )
+    return "\n".join(
+        [
+            "import bpy",
+            op_call,
+            "_obj = bpy.context.active_object",
+            'if _obj is None: raise RuntimeError("Primitive creation did not produce an active object.")',
+            f"_obj.name = {display_name!r}",
+            f'_obj["scene_agent_object_id"] = {backend_object_id!r}',
+            '_obj["scene_agent_object_name"] = _obj.name',
+            'print("CREATED:" + _obj.name + "|" + str(_obj.get("scene_agent_object_id", "")))',
+            "",
+        ]
+    )
+
+
+def _parse_created_primitive_marker(stdout: str | None) -> tuple[str | None, str | None]:
+    if not isinstance(stdout, str) or not stdout:
+        return None, None
+    match = _CREATED_PRIMITIVE_MARKER.search(stdout)
+    if not match:
+        return None, None
+    name = match.group("name").strip() or None
+    object_id = match.group("object_id").strip() or None
+    return name, object_id
 
 
 router = APIRouter()
@@ -452,12 +551,8 @@ async def get_scene_gltf(thread_id: str, request: Request):
             tempfile.gettempdir(),
             f"scene_{thread_id}_{int(time.time() * 1000)}.glb"
         )
-        # include the lights in the exportation
-        export_code = (
-            "import bpy\n"
-            f"bpy.ops.export_scene.gltf(filepath=r\"{temp_path}\", "
-            "export_format='GLB', export_apply=True, export_lights=True)\n"
-        )
+        ensure_scene_agent_object_metadata_sync(thread_id)
+        export_code = build_scene_gltf_export_code(temp_path)
         if settings.blender_mode == "headless":
             manager = get_session_manager()
             session = manager.ensure(thread_id, "headless")
@@ -465,6 +560,7 @@ async def get_scene_gltf(thread_id: str, request: Request):
             await execute_headless_export_code(
                 thread_id=thread_id,
                 export_code=export_code,
+                execute_code_params={"validate_scene": False},
                 timeout_seconds=request_timeout_seconds,
                 timeout_error_message="Headless GLTF export timed out.",
                 timeout_event_name="headless_gltf_timeout",
@@ -473,7 +569,15 @@ async def get_scene_gltf(thread_id: str, request: Request):
                 restart_on_timeout=True,
             )
         else:
-            await asyncio.to_thread(send_blender_command_sync, "execute_code", {"code": export_code}, thread_id)
+            await asyncio.to_thread(
+                send_blender_command_sync,
+                "execute_code",
+                {
+                    "code": export_code,
+                    "validate_scene": False,
+                },
+                thread_id,
+            )
 
         # Wait for file to be written with retries
         max_retries = 10
@@ -550,6 +654,264 @@ async def get_scene_gltf(thread_id: str, request: Request):
         if isinstance(e, SessionResourceError):
             raise HTTPException(status_code=503, detail=e.detail) from e
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/scene/{thread_id}/objects/add-primitive", response_model=AddPrimitiveResponse)
+async def add_primitive(
+    thread_id: str,
+    payload: AddPrimitiveRequest,
+    request: Request,
+    response: Response,
+):
+    resolution, proxied = await claim_or_proxy_request(request=request, thread_id=thread_id)
+    if proxied is not None:
+        return proxied
+
+    try:
+        settings = get_settings()
+        if settings.blender_mode != "headless":
+            raise HTTPException(
+                status_code=409,
+                detail="Add primitive is only available in headless mode.",
+            )
+
+        manager = get_session_manager()
+        manager.ensure(thread_id, "headless")
+
+        new_id = str(uuid.uuid4())
+        code = _build_primitive_code(
+            payload.primitive_type,
+            payload.location,
+            payload.size,
+            new_id,
+        )
+
+        exec_result = await asyncio.to_thread(
+            send_blender_command_sync,
+            "execute_code",
+            {"code": code},
+            thread_id,
+        )
+        object_name, reported_object_id = _parse_created_primitive_marker((exec_result or {}).get("result"))
+        if reported_object_id and reported_object_id != new_id:
+            raise HTTPException(
+                status_code=500,
+                detail="Add primitive returned an unexpected backend object id.",
+            )
+
+        await asyncio.to_thread(ensure_scene_agent_object_metadata_sync, thread_id)
+
+        manager.persist_session_blend(thread_id, min_interval_seconds=0.0)
+        manifest = await asyncio.to_thread(persist_thread_scene_artifacts_sync, thread_id)
+        if manifest is None:
+            manifest = load_thread_scene_artifact_manifest(thread_id)
+
+        resolved_name = object_name or _PRIMITIVE_DISPLAY_NAMES[payload.primitive_type]
+        result = AddPrimitiveResponse(
+            thread_id=thread_id,
+            primitive_type=payload.primitive_type,
+            object_name=resolved_name,
+            backend_object_id=new_id,
+            backend_object_name=resolved_name,
+            scene_revision=manifest.scene_revision,
+            manifest_generated_at_ms=manifest.generated_at_ms,
+            has_persisted_blend=manifest.has_persisted_blend,
+        )
+        set_owner_headers(response, resolution)
+        return result
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        if isinstance(e, HTTPException):
+            raise
+        if isinstance(e, SessionResourceError):
+            raise HTTPException(status_code=503, detail=e.detail) from e
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/scene/{thread_id}/objects/delete", response_model=DeleteSceneObjectResponse)
+async def delete_scene_object(
+    thread_id: str,
+    payload: DeleteSceneObjectRequest,
+    request: Request,
+    response: Response,
+):
+    resolution, proxied = await claim_or_proxy_request(request=request, thread_id=thread_id)
+    if proxied is not None:
+        return proxied
+
+    try:
+        settings = get_settings()
+        if settings.blender_mode != "headless":
+            raise HTTPException(
+                status_code=409,
+                detail="Hierarchy delete is only available in headless mode.",
+            )
+
+        manager = get_session_manager()
+        manager.ensure(thread_id, "headless")
+
+        resolved = await asyncio.to_thread(
+            send_blender_command_sync,
+            "resolve_scene_agent_object",
+            {
+                "backend_object_id": payload.backend_object_id,
+                "backend_object_name": payload.backend_object_name,
+            },
+            thread_id,
+        )
+        resolved_name = str((resolved or {}).get("object_name") or "").strip()
+        if not resolved_name:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Scene object '{payload.backend_object_id}' was not found.",
+            )
+
+        delete_result = await asyncio.to_thread(
+            send_blender_command_sync,
+            "delete_objects",
+            {
+                "object_names": [resolved_name],
+                "mode": payload.mode,
+                "strict": True,
+                "dry_run": False,
+                "ignore_missing": False,
+                "name_match_mode": "exact",
+            },
+            thread_id,
+        )
+
+        deleted_names_raw = (delete_result or {}).get("deleted")
+        deleted_names = (
+            [name for name in deleted_names_raw if isinstance(name, str) and name.strip()]
+            if isinstance(deleted_names_raw, list)
+            else []
+        )
+
+        manager.persist_session_blend(thread_id, min_interval_seconds=0.0)
+        manifest = await asyncio.to_thread(persist_thread_scene_artifacts_sync, thread_id)
+        if manifest is None:
+            manifest = load_thread_scene_artifact_manifest(thread_id)
+
+        result = DeleteSceneObjectResponse(
+            thread_id=thread_id,
+            backend_object_id=payload.backend_object_id,
+            backend_object_name=str((resolved or {}).get("backend_object_name") or payload.backend_object_name or resolved_name),
+            deleted_names=deleted_names,
+            scene_revision=manifest.scene_revision,
+            manifest_generated_at_ms=manifest.generated_at_ms,
+            has_persisted_blend=manifest.has_persisted_blend,
+        )
+        set_owner_headers(response, resolution)
+        return result
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        if isinstance(e, HTTPException):
+            raise
+        if isinstance(e, SessionResourceError):
+            raise HTTPException(status_code=503, detail=e.detail) from e
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/scene/{thread_id}/objects/transform", response_model=TransformSceneObjectResponse)
+async def transform_scene_object(
+    thread_id: str,
+    payload: TransformSceneObjectRequest,
+    request: Request,
+    response: Response,
+):
+    resolution, proxied = await claim_or_proxy_request(request=request, thread_id=thread_id)
+    if proxied is not None:
+        return proxied
+
+    try:
+        settings = get_settings()
+        if settings.blender_mode != "headless":
+            raise HTTPException(
+                status_code=409,
+                detail="Object transform is only available in headless mode.",
+            )
+
+        manager = get_session_manager()
+        manager.ensure(thread_id, "headless")
+
+        resolved = await asyncio.to_thread(
+            send_blender_command_sync,
+            "resolve_scene_agent_object",
+            {
+                "backend_object_id": payload.backend_object_id,
+                "backend_object_name": payload.backend_object_name,
+            },
+            thread_id,
+        )
+        resolved_name = str((resolved or {}).get("object_name") or "").strip()
+        if not resolved_name:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Scene object '{payload.backend_object_id}' was not found.",
+            )
+
+        transform_result = await asyncio.to_thread(
+            send_blender_command_sync,
+            "set_object_transform",
+            {
+                "backend_object_id": payload.backend_object_id,
+                "backend_object_name": payload.backend_object_name,
+                "world_matrix": payload.world_matrix,
+            },
+            thread_id,
+        )
+
+        manifest = None
+        if payload.refresh_artifacts:
+            manager.persist_session_blend(thread_id, min_interval_seconds=0.0)
+            manifest = await asyncio.to_thread(persist_thread_scene_artifacts_sync, thread_id)
+            if manifest is None:
+                manifest = load_thread_scene_artifact_manifest(thread_id)
+
+        result = TransformSceneObjectResponse(
+            thread_id=thread_id,
+            backend_object_id=payload.backend_object_id,
+            backend_object_name=str(
+                (transform_result or {}).get("backend_object_name")
+                or (resolved or {}).get("backend_object_name")
+                or payload.backend_object_name
+                or resolved_name
+            ),
+            object_name=str((transform_result or {}).get("object_name") or resolved_name),
+            object_type=(transform_result or {}).get("object_type"),
+            world_location=[
+                float(value)
+                for value in ((transform_result or {}).get("world_location") or [])
+                if isinstance(value, (int, float))
+            ],
+            world_rotation_quaternion=[
+                float(value)
+                for value in ((transform_result or {}).get("world_rotation_quaternion") or [])
+                if isinstance(value, (int, float))
+            ],
+            world_scale=[
+                float(value)
+                for value in ((transform_result or {}).get("world_scale") or [])
+                if isinstance(value, (int, float))
+            ],
+            scene_revision=manifest.scene_revision if manifest else None,
+            manifest_generated_at_ms=manifest.generated_at_ms if manifest else None,
+            has_persisted_blend=manifest.has_persisted_blend if manifest else False,
+            artifacts_refreshed=manifest is not None,
+        )
+        set_owner_headers(response, resolution)
+        return result
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        if isinstance(e, HTTPException):
+            raise
+        if isinstance(e, SessionResourceError):
+            raise HTTPException(status_code=503, detail=e.detail) from e
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/scene/{thread_id}/blend")
 async def get_scene_blend(thread_id: str, request: Request):

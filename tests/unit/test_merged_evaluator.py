@@ -17,7 +17,7 @@ def test_direct_mode_stall_finalizes_after_threshold():
         {
             "routed_to_plan": False,
             "request_tool_batches": 2,
-            "overall_stall_count": 5,
+            "overall_stall_count": 4,
             "workflow_topology": "single_agent",
             "verification_result": {
                 "status": "working",
@@ -74,7 +74,7 @@ def test_evaluator_finalizes_when_last_todo_is_skipped():
         "request_tool_batches": 1,
         "workflow_topology": "single_agent",
         "active_todo_id": "todo-1",
-        "current_todo_stall_count": 5,
+        "current_todo_stall_count": 4,
         "todos": [_todo("todo-1", "Adjust chair", "in_progress")],
         "verification_result": {
             "status": "working",

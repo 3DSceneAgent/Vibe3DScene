@@ -288,7 +288,7 @@ def build_asset_creation_strategy_text(
                 "   - Hunyuan3D",
                 "     - Flow: generate_hunyuan3d_model(text_prompt=... or input_image_url=...)",
                 "     - Built-in polling, best for single custom object generation",
-                "     - Default generation_mode='rapid'; set generation_mode='pro' when you need the higher-quality professional mode and extra controls",
+                "     - Always use generation_mode='rapid' for runtime consistency and lower latency",
                 "     - When exactly one image is attached to the current request, the runtime can auto-resolve it for image-to-3D",
                 "     - For remembered thread images, use input_image_name=... or input_image_id=...",
                 "     - Hunyuan often returns the model as Type=OBJ with a .zip bundle plus preview GIFs",
@@ -350,8 +350,9 @@ def build_asset_creation_strategy_text(
                 "     - For remembered thread images, use input_image_name=... or input_image_id=..."
                 " instead of filesystem paths",
                 "     - Do NOT use this tool for text-only requests or single-object generation",
-                "     - The generated .blend is an external scene asset pack; import it first, then refine,"
-                " replace, delete, retarget materials, and verify with existing tools",
+                "     - Default stop condition: reconstruct_full_scene() -> import_blend_contents() -> stop",
+                "     - After import_blend_contents succeeds, do NOT continue with retrieval/generation/refinement"
+                " unless the user explicitly asks to refine, replace, edit, or polish the reconstruction",
                 "     - If reconstruction fails or times out, fall back to retrieval/generation workflows"
                 " and assemble the scene incrementally",
             ]
@@ -424,7 +425,7 @@ def build_asset_creation_strategy_text(
 
     if sam_reconstruct_ready:
         priority_rules.append(
-            "For full-scene reference-image bootstrapping: SAM3D reconstruct first, then refine with import/edit tools"
+            "For full-scene reference-image bootstrapping: SAM3D reconstruct first, import the .blend, then stop by default"
         )
 
     if infinigen_ready:

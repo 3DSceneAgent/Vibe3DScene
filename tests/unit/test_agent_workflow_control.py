@@ -1,9 +1,10 @@
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from scene_agent.agent.graph import (
     _route_after_evaluator,
     _route_after_post_builder,
     _route_after_router,
+    _route_after_scene_observe,
     _route_after_turn_dispatch,
     _route_after_update_memory,
     _route_after_verifier_feedback,
@@ -17,6 +18,7 @@ from scene_agent.agent.nodes import (
     post_builder_node,
     scene_observe_node,
     turn_dispatch_node,
+    update_memory_node,
     verifier_feedback_node,
 )
 
@@ -50,6 +52,19 @@ def test_turn_dispatch_binary_no_calls():
     result = turn_dispatch_node({"messages": [AIMessage(content="No tool needed.")], "request_agent_turns": 1})
     assert result["assistant_turn_kind"] == "no_calls"
     assert result["request_agent_turns"] == 2
+
+
+def test_turn_dispatch_stops_when_agent_turn_budget_reached():
+    result = turn_dispatch_node(
+        {
+            "messages": [AIMessage(content="One more try.")],
+            "request_agent_turns": 1,
+            "max_request_agent_turns": 2,
+        }
+    )
+    assert result["request_stop_reason"] == "max_request_agent_turns_reached"
+    assert result["transition_next"] == "finalize"
+    assert _route_after_turn_dispatch(result) == "finalize"
 
 
 def test_route_after_router_uses_plan_flag():
@@ -105,6 +120,65 @@ def test_verifier_feedback_routes_has_calls_and_no_calls():
 def test_route_after_update_memory_switches_by_topology():
     assert _route_after_update_memory({"workflow_topology": "single_agent"}) == "scene_observe"
     assert _route_after_update_memory({"workflow_topology": "dual_agent"}) == "verifier_agent"
+
+
+def test_route_after_scene_observe_skips_verify_without_fresh_render_in_plan_mode():
+    assert (
+        _route_after_scene_observe(
+            {
+                "task_mode": "plan_mode",
+                "last_render_path": "https://example.com/renders/current.png",
+                "last_verified_path": "https://example.com/renders/current.png",
+            }
+        )
+        == "evaluator"
+    )
+
+
+def test_route_after_scene_observe_keeps_verify_for_fresh_render_in_plan_mode():
+    assert (
+        _route_after_scene_observe(
+            {
+                "task_mode": "plan_mode",
+                "last_render_path": "https://example.com/renders/new.png",
+                "last_verified_path": "https://example.com/renders/old.png",
+            }
+        )
+        == "verify"
+    )
+
+
+def test_route_after_scene_observe_preserves_direct_mode_behavior():
+    assert (
+        _route_after_scene_observe(
+            {
+                "task_mode": "direct_mode",
+                "last_render_path": "https://example.com/renders/current.png",
+                "last_verified_path": "https://example.com/renders/current.png",
+            }
+        )
+        == "verify"
+    )
+
+
+def test_update_memory_stops_when_tool_batch_budget_reached():
+    result = update_memory_node(
+        {
+            "messages": [
+                ToolMessage(
+                    content='{"scene_objects": []}',
+                    name="get_scene_info",
+                    tool_call_id="tc1",
+                )
+            ],
+            "request_tool_batches": 1,
+            "max_request_tool_batches": 2,
+        }
+    )
+    assert result["request_tool_batches"] == 2
+    assert result["request_stop_reason"] == "max_request_tool_batches_reached"
+    assert result["transition_next"] == "finalize"
+    assert _route_after_update_memory(result) == "finalize"
 
 
 def test_finalize_summary_mentions_skipped_todos():
@@ -203,6 +277,19 @@ def test_scene_observe_node_routes_commands_via_api_sender(monkeypatch):
     assert result.get("last_render_source") == "scene_observe"
     assert result.get("last_render_path") == "https://example.com/renders/scene_ne.png"
     assert calls == [("probe", {"foo": "bar"}, "thread-scene-observe")]
+
+
+def test_scene_observe_node_clears_verification_result_when_no_scene_mutation():
+    result = scene_observe_node(
+        {
+            "thread_id": "thread-no-mutation",
+            "last_tool_batch_names": ["render_from_camera"],
+            "verification_result": {"status": "working", "reason": "stale"},
+            "messages": [],
+        }
+    )
+
+    assert result == {"verification_result": None}
 
 
 def test_planner_refresh_node_generates_replan_todos_from_verification_result():

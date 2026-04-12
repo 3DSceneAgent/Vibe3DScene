@@ -94,6 +94,7 @@ def _build_context_summary_helper_model(
     provider_name: str,
     api_key: str,
     settings: Any,
+    provider_thinking: bool | None = None,
 ) -> Any | None:
     try:
         if hasattr(settings, "get_context_summary_helper_model"):
@@ -104,6 +105,7 @@ def _build_context_summary_helper_model(
             provider_name=provider_name,
             api_key=api_key,
             model=helper_model_name,
+            thinking_enabled=provider_thinking,
         )
         helper_model = helper_provider.get_chat_model()
     except Exception:
@@ -158,6 +160,16 @@ def _is_dual_topology(state: AgentState) -> bool:
     return _workflow_topology(state) == "dual_agent"
 
 
+def _has_fresh_render_evidence(state: AgentState) -> bool:
+    render_path = state.get("last_render_path")
+    if not isinstance(render_path, str) or not render_path.strip():
+        return False
+    last_verified_path = state.get("last_verified_path")
+    if isinstance(last_verified_path, str) and last_verified_path.strip() == render_path.strip():
+        return False
+    return True
+
+
 def _route_after_initialize_request(_state: AgentState) -> Literal["sync_reference_catalog"]:
     return "sync_reference_catalog"
 
@@ -184,22 +196,36 @@ def _route_after_plan_node(state: AgentState) -> Literal["agent", "builder_agent
     return "builder_agent" if _is_dual_topology(state) else "agent"
 
 
-def _route_after_turn_dispatch(state: AgentState) -> Literal["tools", "evaluator"]:
+def _route_after_turn_dispatch(state: AgentState) -> Literal["tools", "evaluator", "finalize"]:
+    if isinstance(state.get("request_stop_reason"), str) and str(state.get("request_stop_reason")).strip():
+        return "finalize"
     return "tools" if state.get("assistant_turn_kind") == "has_calls" else "evaluator"
 
 
-def _route_after_post_builder(state: AgentState) -> Literal["tools", "evaluator"]:
+def _route_after_post_builder(state: AgentState) -> Literal["tools", "evaluator", "finalize"]:
+    if isinstance(state.get("request_stop_reason"), str) and str(state.get("request_stop_reason")).strip():
+        return "finalize"
     return "tools" if state.get("assistant_turn_kind") == "has_calls" else "evaluator"
 
 
-def _route_after_verifier_feedback(state: AgentState) -> Literal["tools", "evaluator"]:
+def _route_after_verifier_feedback(state: AgentState) -> Literal["tools", "evaluator", "finalize"]:
+    if isinstance(state.get("request_stop_reason"), str) and str(state.get("request_stop_reason")).strip():
+        return "finalize"
     return "tools" if state.get("assistant_turn_kind") == "has_calls" else "evaluator"
 
 
-def _route_after_update_memory(state: AgentState) -> Literal["scene_observe", "verifier_agent"]:
+def _route_after_update_memory(state: AgentState) -> Literal["scene_observe", "verifier_agent", "finalize"]:
+    if isinstance(state.get("request_stop_reason"), str) and str(state.get("request_stop_reason")).strip():
+        return "finalize"
     if _is_dual_topology(state):
         return "verifier_agent"
     return "scene_observe"
+
+
+def _route_after_scene_observe(state: AgentState) -> Literal["verify", "evaluator"]:
+    if state.get("task_mode") != "plan_mode":
+        return "verify"
+    return "verify" if _has_fresh_render_evidence(state) else "evaluator"
 
 
 def _route_after_evaluator(state: AgentState) -> str:
@@ -894,6 +920,7 @@ async def create_agent_graph(
     provider_name: str | None = None,
     api_key: str | None = None,
     model: str | None = None,
+    provider_thinking: bool | None = None,
 ):
     """
     Create and compile the LangGraph agent.
@@ -913,12 +940,14 @@ async def create_agent_graph(
         provider_name=selected_provider,
         api_key=selected_api_key,
         model=selected_model,
+        thinking_enabled=provider_thinking,
     )
     primary_chat_model = vlm_provider.get_chat_model()
     context_summary_model = _build_context_summary_helper_model(
         provider_name=selected_provider,
         api_key=selected_api_key,
         settings=settings,
+        provider_thinking=provider_thinking,
     )
 
     verifier_provider_name, verifier_model_name, verifier_api_key = _resolve_dual_agent_verifier_runtime(
@@ -939,12 +968,14 @@ async def create_agent_graph(
                 provider_name=verifier_provider_name,
                 api_key=verifier_api_key,
                 model=verifier_model_name,
+                thinking_enabled=provider_thinking,
             )
             verifier_chat_model = verifier_provider.get_chat_model()
             verifier_context_summary_model = _build_context_summary_helper_model(
                 provider_name=verifier_provider_name,
                 api_key=verifier_api_key,
                 settings=settings,
+                provider_thinking=provider_thinking,
             )
         except Exception:
             verifier_provider_name = selected_provider
@@ -1059,6 +1090,7 @@ async def create_agent_graph(
         route_after_post_builder=_route_after_post_builder,
         route_after_verifier_feedback=_route_after_verifier_feedback,
         route_after_update_memory=_route_after_update_memory,
+        route_after_scene_observe=_route_after_scene_observe,
         route_after_evaluator=_route_after_evaluator,
     )
 
@@ -1070,6 +1102,7 @@ async def create_agent_graph(
     setattr(app, "_public_tool_hints", public_tool_hints)
     setattr(app, "_vlm_provider", selected_provider)
     setattr(app, "_vlm_model", selected_model)
+    setattr(app, "_provider_thinking", provider_thinking)
     setattr(app, "_verifier_vlm_provider", verifier_provider_name)
     setattr(app, "_verifier_vlm_model", verifier_model_name)
     return app
