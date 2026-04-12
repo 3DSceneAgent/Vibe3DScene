@@ -10,7 +10,7 @@
   <a href="https://hub.docker.com/r/fishwowater/scene-agent-api">
     <img alt="Docker Hub" src="https://img.shields.io/badge/Docker%20Hub-scene--agent--api-2496ED?style=for-the-badge&logo=docker&logoColor=white" />
   </a>
-  <a href="https://youtu.be/b2nP_OLbf8Y">
+  <a href="https://youtu.be/rnZelKViTbk">
     <img alt="YouTube Demo" src="https://img.shields.io/badge/YouTube-Demo-FF0000?style=for-the-badge&logo=youtube&logoColor=white" />
   </a>
   <a href="https://vibe3dscene.vercel.app">
@@ -18,9 +18,8 @@
   </a>
 </p>
 
-> Note: This project is under active development and may contain bugs or breaking changes.
 
-![Teaser](./assets/image_demo.png)
+![Teaser](./assets/teaser.png)
 
 ## Table of Contents
 - [1. Overview](#1-overview)
@@ -61,6 +60,8 @@ For the exact runtime graph and deployment topologies, see:
 
 - [Runtime Workflow](./docs/architecture/runtime-workflow.md)
 - [System Architecture](./docs/architecture/system-architecture.md)
+- [Roadmap](./docs/roadmap.md)
+- [How This Differs from `blender-mcp + cc`](./docs/differ_from_blendermcp+cc.md)
 - [CHANGELOG](./CHANGELOG.md)
 
 ## 2. Quickstart
@@ -118,6 +119,8 @@ If you want single-agent `verify` to add internal geometry penetration checks on
 - MCP server, tool categories, and gating: [MCP Server and Tools](./docs/integrations/mcp-server-and-tools.md)
 - Environment variables and provider configuration: [Configuration Reference](./docs/reference/configuration.md)
 - Major project version updates: [CHANGELOG](./CHANGELOG.md)
+- Near-term priorities and known issues: [Roadmap](./docs/roadmap.md)
+- Design discussion versus `blender-mcp + cc`: [How This Differs from `blender-mcp + cc`](./docs/differ_from_blendermcp+cc.md)
 
 ## 3. Repository Structure
 
@@ -145,6 +148,10 @@ scripts/         Local helpers, smoke tests, validation, and cleanup tools
   - External `3DAgentTools` stack, expected services, startup options, and host/port coordination.
 - [Configuration Reference](./docs/reference/configuration.md)
   - Provider, API, session, persistence, tool, and frontend-related environment variables.
+- [Roadmap](./docs/roadmap.md)
+  - Near-term workflow improvements, product expansion directions, local-client priorities, and currently known UI/runtime issues.
+- [How This Differs from `blender-mcp + claude code`](./docs/differ_from_blendermcp+cc.md)
+  - Design differences in agent orchestration, headless execution, multimodal tooling, and web-side editing support.
 - [CHANGELOG](./CHANGELOG.md)
   - Date-based summary of major updates.
 
