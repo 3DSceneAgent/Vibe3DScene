@@ -1,0 +1,10 @@
+{
+    "prompt": "Build a cartoon-style Golden Gate Bridge as in the provided image.\nRequired elements:1.  Main subject: A bright red suspension bridge spanning across blue water. \n2.  Background: Light blue sky with white clouds, green rolling hills on both sides of the water. \n3.  Style: Bold black outlines, flat solid colors, clean and simple cartoon art style, no complex details", 
+    "vlm_provider": "qwen",
+    "vlm_model": "qwen3.6-plus",
+    "provider_thinking": true,
+    "fast_mode": true, 
+    "reference_images": [
+        "../example_images/gate.png"
+    ]
+}

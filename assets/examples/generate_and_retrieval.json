@@ -1,0 +1,10 @@
+{
+    "prompt": "Generate a model of the provided image, and then place it onto a white table. Be aware of the scale of them.", 
+    "vlm_provider": "qwen",
+    "vlm_model": "qwen3.6-plus",
+    "provider_thinking": true,
+    "fast_mode": false, 
+    "reference_images": [
+        "../example_images/typical_humanoid_mech.png"
+    ]
+}

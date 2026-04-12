@@ -1,0 +1,10 @@
+{
+    "prompt": "Build  a modern two-story house using primitives, as in the provider image.\nRequired elements:\n1.  Main subject: A geometric, minimalist modern house with a large overhanging roof\n2.  Ground floor: Open patio with a small table and two stools, potted plants along the front\n3.  Upper floor: Large windows, textured wall panels, balcony\n4.  Right side: Small attached gate/entry structure\n5.  Style: Clean black ink line drawing, hand-drawn sketch style, bold outlines, no color, no complex details", 
+    "vlm_provider": "qwen",
+    "vlm_model": "qwen3.6-plus",
+    "provider_thinking": true,
+    "fast_mode": false, 
+    "reference_images": [
+        "../example_images/sketch_room.png"
+    ]
+}

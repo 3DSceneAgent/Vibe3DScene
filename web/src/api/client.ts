@@ -1,5 +1,11 @@
 import type {
+  AddPrimitiveInfo,
+  AddPrimitiveRequest,
   BlendFileEntry,
+  DeleteSceneObjectInfo,
+  DeleteSceneObjectRequest,
+  SceneObjectTransformInfo,
+  SceneObjectTransformRequest,
   HeadlessSessionCapacityInfo,
   HistoryMessage,
   ImageAsset,
@@ -20,8 +26,10 @@ import type {
   TodoItem,
   VlmModelsInfo,
   VlmProviderOption,
-  ThreadVlmSelection
+  ThreadVlmSelection,
+  HistoryReferencedObject
 } from './types'
+import type { SceneObjectReference } from '../state/types'
 
 const FRONTEND_CLIENT_HEADER = 'X-Frontend-Client-Id'
 const FRONTEND_CLIENT_STORAGE_KEY = 'sceneAgentFrontendClientId'
@@ -67,6 +75,10 @@ function buildRequestHeaders(headers?: HeadersInit): Headers {
   const merged = new Headers(headers ?? undefined)
   merged.set(FRONTEND_CLIENT_HEADER, getFrontendClientId())
   return merged
+}
+
+function buildApiUrl(baseUrl: string, pathOrUrl: string): string {
+  return new URL(pathOrUrl, `${baseUrl.replace(/\/+$/, '')}/`).toString()
 }
 
 async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
@@ -158,8 +170,12 @@ type StreamChatArgs = {
   enabledMcpTools?: string[]
   fastMode?: boolean
   attachedImageIds?: string[]
+  referencedObjects?: SceneObjectReference[]
   vlmProvider?: string
   vlmModel?: string
+  providerThinking?: boolean
+  maxRequestAgentTurns?: number
+  maxRequestToolBatches?: number
   onEvent: (event: StreamEvent) => void
   onSessionStateChange?: (state: { streamRequestId: string | null; lastEventId: number }) => void
   signal?: AbortSignal
@@ -173,6 +189,9 @@ type RetryStreamChatArgs = {
   fastMode?: boolean
   vlmProvider?: string
   vlmModel?: string
+  providerThinking?: boolean
+  maxRequestAgentTurns?: number
+  maxRequestToolBatches?: number
   onEvent: (event: StreamEvent) => void
   onSessionStateChange?: (state: { streamRequestId: string | null; lastEventId: number }) => void
   signal?: AbortSignal
@@ -291,6 +310,26 @@ function parseHistoryMessages(payload: unknown): HistoryMessage[] {
           .map((image) => parseImageAsset(image))
           .filter((image): image is ImageAsset => image !== null)
       : []
+    const referencedObjects = Array.isArray(maybe.referenced_objects)
+      ? maybe.referenced_objects.flatMap((reference) => {
+          if (!reference || typeof reference !== 'object') return []
+          const candidate = reference as Partial<HistoryReferencedObject>
+          if (
+            typeof candidate.backend_object_id !== 'string' ||
+            typeof candidate.display_name !== 'string'
+          ) {
+            return []
+          }
+          return [{
+            backend_object_id: candidate.backend_object_id,
+            display_name: candidate.display_name,
+            object_type:
+              typeof candidate.object_type === 'string' || candidate.object_type === null
+                ? candidate.object_type
+                : undefined
+          }]
+        })
+      : []
     return [
       {
         id: maybe.id,
@@ -302,7 +341,8 @@ function parseHistoryMessages(payload: unknown): HistoryMessage[] {
         tool_name: typeof maybe.tool_name === 'string' ? maybe.tool_name : undefined,
         tool_payload: maybe.tool_payload,
         tool_media: toolMedia,
-        attached_images: attachedImages
+        attached_images: attachedImages,
+        referenced_objects: referencedObjects
       }
     ]
   })
@@ -348,6 +388,7 @@ function parseStreamProgress(payload: unknown): StreamProgress | undefined {
   if (typeof payload.tool_events === 'number') progress.tool_events = payload.tool_events
   if (typeof payload.tool_calls_started === 'number') progress.tool_calls_started = payload.tool_calls_started
   if (typeof payload.assistant_chunks === 'number') progress.assistant_chunks = payload.assistant_chunks
+  if (typeof payload.llm_call_count === 'number') progress.llm_call_count = payload.llm_call_count
   if (typeof payload.todo_total === 'number') progress.todo_total = payload.todo_total
   if (typeof payload.todo_completed === 'number') progress.todo_completed = payload.todo_completed
   if (typeof payload.latest_seq === 'number') progress.latest_seq = payload.latest_seq
@@ -578,8 +619,12 @@ export async function streamChat({
   enabledMcpTools,
   fastMode,
   attachedImageIds,
+  referencedObjects,
   vlmProvider,
   vlmModel,
+  providerThinking,
+  maxRequestAgentTurns,
+  maxRequestToolBatches,
   onEvent,
   onSessionStateChange,
   signal
@@ -597,11 +642,27 @@ export async function streamChat({
   if (attachedImageIds && attachedImageIds.length > 0) {
     payload.attached_image_ids = attachedImageIds
   }
+  if (referencedObjects && referencedObjects.length > 0) {
+    payload.referenced_objects = referencedObjects.map((reference) => ({
+      backend_object_id: reference.backendObjectId,
+      display_name: reference.displayName,
+      object_type: reference.objectType ?? null
+    }))
+  }
   if (vlmProvider) {
     payload.vlm_provider = vlmProvider
   }
   if (vlmModel) {
     payload.vlm_model = vlmModel
+  }
+  if (typeof providerThinking === 'boolean') {
+    payload.provider_thinking = providerThinking
+  }
+  if (typeof maxRequestAgentTurns === 'number' && Number.isFinite(maxRequestAgentTurns)) {
+    payload.max_request_agent_turns = Math.round(maxRequestAgentTurns)
+  }
+  if (typeof maxRequestToolBatches === 'number' && Number.isFinite(maxRequestToolBatches)) {
+    payload.max_request_tool_batches = Math.round(maxRequestToolBatches)
   }
   await streamJsonSse({
     url: `${baseUrl}/chat/stream`,
@@ -620,6 +681,9 @@ export async function retryChatStream({
   fastMode,
   vlmProvider,
   vlmModel,
+  providerThinking,
+  maxRequestAgentTurns,
+  maxRequestToolBatches,
   onEvent,
   onSessionStateChange,
   signal
@@ -639,6 +703,15 @@ export async function retryChatStream({
   }
   if (vlmModel) {
     payload.vlm_model = vlmModel
+  }
+  if (typeof providerThinking === 'boolean') {
+    payload.provider_thinking = providerThinking
+  }
+  if (typeof maxRequestAgentTurns === 'number' && Number.isFinite(maxRequestAgentTurns)) {
+    payload.max_request_agent_turns = Math.round(maxRequestAgentTurns)
+  }
+  if (typeof maxRequestToolBatches === 'number' && Number.isFinite(maxRequestToolBatches)) {
+    payload.max_request_tool_batches = Math.round(maxRequestToolBatches)
   }
   await streamJsonSse({
     url: `${baseUrl}/chat/retry/stream`,
@@ -726,10 +799,10 @@ export async function getSceneGltf(
 
 export async function getThreadSceneArtifactGltf(
   baseUrl: string,
-  threadId: string,
+  gltfUrl: string,
   signal?: AbortSignal
 ): Promise<Blob> {
-  const response = await apiFetch(`${baseUrl}/threads/${threadId}/scene-artifacts/latest.glb`, { signal })
+  const response = await apiFetch(buildApiUrl(baseUrl, gltfUrl), { signal })
   if (!response.ok) {
     throw await buildHttpError(response, `Failed to load persisted glTF (${response.status})`)
   }
@@ -843,6 +916,7 @@ export async function getThreadHistory(
     scene_revision: typeof data.scene_revision === 'number' ? data.scene_revision : undefined,
     messages: parseHistoryMessages(data.messages),
     todos: Array.isArray(data.todos) ? (data.todos as TodoItem[]) : [],
+    active_todo_id: typeof data.active_todo_id === 'string' ? data.active_todo_id : null,
     thread_metrics: parseTelemetryMetrics(data.thread_metrics),
     turn_metrics_by_turn_id:
       isRecord(data.turn_metrics_by_turn_id)
@@ -923,6 +997,128 @@ export async function getThreadSceneArtifactManifest(
     generated_at_ms: typeof data.generated_at_ms === 'number' ? data.generated_at_ms : undefined,
     gltf_url: typeof data.gltf_url === 'string' ? data.gltf_url : undefined,
     renders: parseRenderImages({ renders: data.renders })
+  }
+}
+
+export async function addPrimitive(
+  baseUrl: string,
+  threadId: string,
+  payload: AddPrimitiveRequest,
+  signal?: AbortSignal
+): Promise<AddPrimitiveInfo> {
+  const response = await apiFetch(`${baseUrl}/scene/${threadId}/objects/add-primitive`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      primitive_type: payload.primitive_type,
+      location: payload.location ?? [0, 0, 0],
+      size: payload.size ?? 1.0
+    }),
+    signal
+  })
+  if (!response.ok) {
+    throw await buildHttpError(response, `Failed to add primitive (${response.status})`)
+  }
+  const data = (await response.json()) as Partial<AddPrimitiveInfo>
+  return {
+    thread_id: typeof data.thread_id === 'string' ? data.thread_id : threadId,
+    primitive_type: typeof data.primitive_type === 'string' ? data.primitive_type : payload.primitive_type,
+    object_name: typeof data.object_name === 'string' ? data.object_name : payload.primitive_type,
+    backend_object_id: typeof data.backend_object_id === 'string' ? data.backend_object_id : '',
+    backend_object_name:
+      typeof data.backend_object_name === 'string' ? data.backend_object_name : payload.primitive_type,
+    scene_revision: typeof data.scene_revision === 'number' ? data.scene_revision : undefined,
+    manifest_generated_at_ms:
+      typeof data.manifest_generated_at_ms === 'number' ? data.manifest_generated_at_ms : undefined,
+    has_persisted_blend: Boolean(data.has_persisted_blend)
+  }
+}
+
+export async function deleteSceneObject(
+  baseUrl: string,
+  threadId: string,
+  payload: DeleteSceneObjectRequest,
+  signal?: AbortSignal
+): Promise<DeleteSceneObjectInfo> {
+  const response = await apiFetch(`${baseUrl}/scene/${threadId}/objects/delete`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      backend_object_id: payload.backend_object_id,
+      backend_object_name: payload.backend_object_name ?? null,
+      mode: payload.mode ?? 'cascade'
+    }),
+    signal
+  })
+  if (!response.ok) {
+    throw await buildHttpError(response, `Failed to delete scene object (${response.status})`)
+  }
+  const data = (await response.json()) as Partial<DeleteSceneObjectInfo>
+  return {
+    thread_id: typeof data.thread_id === 'string' ? data.thread_id : threadId,
+    backend_object_id:
+      typeof data.backend_object_id === 'string' ? data.backend_object_id : payload.backend_object_id,
+    backend_object_name:
+      typeof data.backend_object_name === 'string' ? data.backend_object_name : payload.backend_object_name,
+    deleted_names: Array.isArray(data.deleted_names)
+      ? data.deleted_names.filter((value): value is string => typeof value === 'string')
+      : [],
+    scene_revision: typeof data.scene_revision === 'number' ? data.scene_revision : undefined,
+    manifest_generated_at_ms:
+      typeof data.manifest_generated_at_ms === 'number' ? data.manifest_generated_at_ms : undefined,
+    has_persisted_blend: Boolean(data.has_persisted_blend)
+  }
+}
+
+export async function transformSceneObject(
+  baseUrl: string,
+  threadId: string,
+  payload: SceneObjectTransformRequest,
+  signal?: AbortSignal
+): Promise<SceneObjectTransformInfo> {
+  const response = await apiFetch(`${baseUrl}/scene/${threadId}/objects/transform`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      backend_object_id: payload.backend_object_id,
+      backend_object_name: payload.backend_object_name ?? null,
+      world_matrix: payload.world_matrix,
+      refresh_artifacts: payload.refresh_artifacts ?? true
+    }),
+    signal
+  })
+  if (!response.ok) {
+    throw await buildHttpError(response, `Failed to transform scene object (${response.status})`)
+  }
+  const data = (await response.json()) as Partial<SceneObjectTransformInfo>
+  return {
+    thread_id: typeof data.thread_id === 'string' ? data.thread_id : threadId,
+    backend_object_id:
+      typeof data.backend_object_id === 'string' ? data.backend_object_id : payload.backend_object_id,
+    backend_object_name:
+      typeof data.backend_object_name === 'string' ? data.backend_object_name : payload.backend_object_name,
+    object_name: typeof data.object_name === 'string' ? data.object_name : null,
+    object_type: typeof data.object_type === 'string' ? data.object_type : null,
+    world_location: Array.isArray(data.world_location)
+      ? data.world_location.filter((value): value is number => typeof value === 'number')
+      : [],
+    world_rotation_quaternion: Array.isArray(data.world_rotation_quaternion)
+      ? data.world_rotation_quaternion.filter((value): value is number => typeof value === 'number')
+      : [],
+    world_scale: Array.isArray(data.world_scale)
+      ? data.world_scale.filter((value): value is number => typeof value === 'number')
+      : [],
+    scene_revision: typeof data.scene_revision === 'number' ? data.scene_revision : undefined,
+    manifest_generated_at_ms:
+      typeof data.manifest_generated_at_ms === 'number' ? data.manifest_generated_at_ms : undefined,
+    has_persisted_blend: Boolean(data.has_persisted_blend),
+    artifacts_refreshed: Boolean(data.artifacts_refreshed)
   }
 }
 

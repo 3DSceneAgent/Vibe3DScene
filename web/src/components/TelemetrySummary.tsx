@@ -87,6 +87,7 @@ export function TelemetrySummary({
   }
 
   const toolCalls = typeof metrics?.tool_call_count === 'number' ? metrics.tool_call_count : 0
+  const llmCalls = typeof metrics?.llm_call_count === 'number' ? metrics.llm_call_count : 0
 
   if (variant === 'inline' && compact) {
     const parts: string[] = []
@@ -95,11 +96,18 @@ export function TelemetrySummary({
     const input = safeNum(metrics?.input_tokens)
     const output = safeNum(metrics?.output_tokens)
     const total = safeNum(metrics?.total_tokens) || (input + output) || 0
+    const hasUnknownTokens =
+      metrics?.input_tokens === null || metrics?.output_tokens === null || metrics?.total_tokens === null
     if (total > 0) {
       parts.push(`${formatTokensShort(total)} tokens`)
+    } else if (hasUnknownTokens || llmCalls > 0) {
+      parts.push('tokens -')
     }
     if (input > 0 || output > 0) {
       parts.push(`in ${formatTokensShort(input)} / out ${formatTokensShort(output)}`)
+    }
+    if (llmCalls > 0) {
+      parts.push(`${llmCalls} model${llmCalls !== 1 ? 's' : ''}`)
     }
     if (toolCalls > 0) {
       parts.push(`${toolCalls} tool${toolCalls !== 1 ? 's' : ''}`)

@@ -10,6 +10,7 @@ type RenderGalleryProps = {
   onIncludeLocalWorkChange: (enabled: boolean) => void
   onFetchRenders?: () => void
   fetchDisabled?: boolean
+  fetchHint?: string | null
   style?: CSSProperties
 }
 
@@ -25,6 +26,7 @@ export function RenderGallery({
   onIncludeLocalWorkChange,
   onFetchRenders,
   fetchDisabled = false,
+  fetchHint = null,
   style
 }: RenderGalleryProps) {
   const hasRenders = renders.length > 0
@@ -69,26 +71,28 @@ export function RenderGallery({
               </svg>
             </button>
             {onFetchRenders && (
-              <button
-                type="button"
-                className="ghost-btn icon-btn viewer-toolbar-btn"
-                onClick={onFetchRenders}
-                disabled={fetchDisabled || isLoading}
-                title="Fetch renders"
-                aria-label="Fetch renders"
-              >
-                {isLoading ? (
-                  <svg className="spin" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
-                    <path d="M14 8a6 6 0 1 1-1.5-4" />
-                    <polyline points="14 2 14 5.5 10.5 5.5" />
-                  </svg>
-                ) : (
-                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
-                    <path d="M14 8a6 6 0 1 1-1.5-4" />
-                    <polyline points="14 2 14 5.5 10.5 5.5" />
-                  </svg>
-                )}
-              </button>
+              <span className="viewer-toolbar-btn-shell" data-hint={fetchHint ?? 'Fetch renders'}>
+                <button
+                  type="button"
+                  className="ghost-btn icon-btn viewer-toolbar-btn"
+                  onClick={onFetchRenders}
+                  disabled={fetchDisabled || isLoading}
+                  title="Fetch renders"
+                  aria-label="Fetch renders"
+                >
+                  {isLoading ? (
+                    <svg className="spin" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+                      <path d="M14 8a6 6 0 1 1-1.5-4" />
+                      <polyline points="14 2 14 5.5 10.5 5.5" />
+                    </svg>
+                  ) : (
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+                      <path d="M14 8a6 6 0 1 1-1.5-4" />
+                      <polyline points="14 2 14 5.5 10.5 5.5" />
+                    </svg>
+                  )}
+                </button>
+              </span>
             )}
           </div>
         </div>

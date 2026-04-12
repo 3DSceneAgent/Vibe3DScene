@@ -8,6 +8,50 @@ type ThreadContextMenuState = {
   top: number
 }
 
+type ThreadIdDialogState = {
+  threadId: string
+  title: string
+}
+
+type DeleteThreadDialogState = {
+  threadId: string
+  title: string
+}
+
+type DeleteAllDialogState = {
+  count: number
+}
+
+const THREAD_CONTEXT_MENU_WIDTH = 124
+
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    // Fall back to a hidden textarea below.
+  }
+
+  try {
+    const textarea = document.createElement('textarea')
+    textarea.value = text
+    textarea.setAttribute('readonly', 'true')
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    textarea.style.pointerEvents = 'none'
+    document.body.appendChild(textarea)
+    textarea.select()
+    textarea.setSelectionRange(0, text.length)
+    const copied = document.execCommand('copy')
+    document.body.removeChild(textarea)
+    return copied
+  } catch {
+    return false
+  }
+}
+
 type ThreadListProps = {
   threads: Thread[]
   activeId: string | null
@@ -15,10 +59,12 @@ type ThreadListProps = {
   onDelete: (threadId: string) => void
   onRename: (threadId: string, title: string) => void
   onDeleteAll?: () => void
+  onClaimRuntime?: (threadId: string) => void
   onReleaseRuntime?: (threadId: string) => void
   onNew: () => void
   creating?: boolean
   createDisabled?: boolean
+  claimingThreadId?: string | null
   releasingThreadId?: string | null
   createError?: string | null
   createHint?: string | null
@@ -46,8 +92,8 @@ function formatThreadLastActivity(timestampMs: number): string {
 }
 
 function clampMenuPosition(clientX: number, clientY: number, itemCount: number) {
-  const menuWidth = 188
-  const menuHeight = itemCount * 36 + 16
+  const menuWidth = THREAD_CONTEXT_MENU_WIDTH
+  const menuHeight = itemCount * 30 + 12
   const viewportPadding = 12
   const left = Math.min(
     Math.max(viewportPadding, clientX),
@@ -67,35 +113,37 @@ export function ThreadList({
   onDelete,
   onRename,
   onDeleteAll,
+  onClaimRuntime,
   onReleaseRuntime,
   onNew,
   creating = false,
   createDisabled = false,
+  claimingThreadId = null,
   releasingThreadId = null,
   createError = null,
   createHint = null,
   quotaHint = null,
   collapsed = false
 }: ThreadListProps) {
-  const [confirmDeleteAll, setConfirmDeleteAll] = useState(false)
+  const [showQuotaHelp, setShowQuotaHelp] = useState(false)
   const [menuState, setMenuState] = useState<ThreadContextMenuState | null>(null)
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null)
   const [editingTitle, setEditingTitle] = useState('')
-  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [threadIdDialog, setThreadIdDialog] = useState<ThreadIdDialogState | null>(null)
+  const [deleteThreadDialog, setDeleteThreadDialog] = useState<DeleteThreadDialogState | null>(null)
+  const [deleteAllDialog, setDeleteAllDialog] = useState<DeleteAllDialogState | null>(null)
+  const [threadIdCopied, setThreadIdCopied] = useState(false)
   const renameInputRef = useRef<HTMLInputElement | null>(null)
   const skipRenameBlurCommitRef = useRef(false)
+  const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const handleDeleteAllClick = useCallback(() => {
-    if (!confirmDeleteAll) {
-      setConfirmDeleteAll(true)
-      if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current)
-      confirmTimerRef.current = setTimeout(() => setConfirmDeleteAll(false), 3000)
-      return
-    }
-    if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current)
-    setConfirmDeleteAll(false)
-    onDeleteAll?.()
-  }, [confirmDeleteAll, onDeleteAll])
+  const openDeleteAllDialog = useCallback(() => {
+    setDeleteAllDialog({ count: threads.length })
+  }, [threads.length])
+
+  const closeDeleteAllDialog = useCallback(() => {
+    setDeleteAllDialog(null)
+  }, [])
 
   const visibleThreads = [...threads].sort((a, b) => {
     const activityDiff = getThreadLastActivityMs(b) - getThreadLastActivityMs(a)
@@ -119,7 +167,7 @@ export function ThreadList({
   }, [editingThreadId])
 
   useEffect(() => {
-    if (!menuState && !editingThreadId) {
+    if (!menuState && !editingThreadId && !threadIdDialog && !deleteThreadDialog && !deleteAllDialog) {
       return
     }
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -134,16 +182,34 @@ export function ThreadList({
       if (menuState) {
         setMenuState(null)
       }
+      if (threadIdDialog) {
+        setThreadIdDialog(null)
+      }
+      if (deleteThreadDialog) {
+        setDeleteThreadDialog(null)
+      }
+      if (deleteAllDialog) {
+        setDeleteAllDialog(null)
+      }
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => {
       window.removeEventListener('keydown', handleKeyDown)
     }
-  }, [editingThreadId, menuState])
+  }, [deleteAllDialog, deleteThreadDialog, editingThreadId, menuState, threadIdDialog])
+
+  useEffect(() => {
+    return () => {
+      if (copyResetTimerRef.current) {
+        clearTimeout(copyResetTimerRef.current)
+      }
+    }
+  }, [])
 
   const openThreadMenu = useCallback(
     (thread: Thread, clientX: number, clientY: number) => {
-      const menuItemCount = onReleaseRuntime && thread.occupyingResources ? 3 : 2
+      const hasRuntimeAction = Boolean(onClaimRuntime) || Boolean(onReleaseRuntime)
+      const menuItemCount = hasRuntimeAction ? 4 : 3
       const position = clampMenuPosition(clientX, clientY, menuItemCount)
       setMenuState({
         threadId: thread.id,
@@ -151,12 +217,60 @@ export function ThreadList({
         top: position.top
       })
     },
-    [onReleaseRuntime]
+    [onClaimRuntime, onReleaseRuntime]
   )
 
   const closeThreadMenu = useCallback(() => {
     setMenuState(null)
   }, [])
+
+  const openThreadIdDialog = useCallback((thread: Thread) => {
+    setMenuState(null)
+    setThreadIdCopied(false)
+    if (copyResetTimerRef.current) {
+      clearTimeout(copyResetTimerRef.current)
+      copyResetTimerRef.current = null
+    }
+    setThreadIdDialog({
+      threadId: thread.id,
+      title: thread.title || 'Untitled'
+    })
+  }, [])
+
+  const closeThreadIdDialog = useCallback(() => {
+    setThreadIdDialog(null)
+  }, [])
+
+  const openDeleteThreadDialog = useCallback((thread: Thread) => {
+    setMenuState(null)
+    setDeleteThreadDialog({
+      threadId: thread.id,
+      title: thread.title || 'Untitled'
+    })
+  }, [])
+
+  const closeDeleteThreadDialog = useCallback(() => {
+    setDeleteThreadDialog(null)
+  }, [])
+
+  const handleCopyThreadId = useCallback(async () => {
+    if (!threadIdDialog) {
+      return
+    }
+    const copied = await copyText(threadIdDialog.threadId)
+    if (copied) {
+      closeThreadIdDialog()
+      return
+    }
+    setThreadIdCopied(copied)
+    if (copyResetTimerRef.current) {
+      clearTimeout(copyResetTimerRef.current)
+    }
+    copyResetTimerRef.current = setTimeout(() => {
+      setThreadIdCopied(false)
+      copyResetTimerRef.current = null
+    }, 1800)
+  }, [closeThreadIdDialog, threadIdDialog])
 
   const cancelRename = useCallback(() => {
     skipRenameBlurCommitRef.current = false
@@ -201,15 +315,40 @@ export function ThreadList({
         </button>
         {!collapsed && onDeleteAll && threads.length > 0 && (
           <button
-            className={`ghost-btn thread-delete-all-btn ${confirmDeleteAll ? 'is-confirming' : ''}`}
-            onClick={handleDeleteAllClick}
-            title={confirmDeleteAll ? 'Click again to confirm' : 'Delete all conversations'}
+            className="ghost-btn thread-delete-all-btn"
+            onClick={openDeleteAllDialog}
+            title="Delete all conversations"
           >
-            {confirmDeleteAll ? 'Confirm?' : '✕ Clear'}
+            ✕ Clear
           </button>
         )}
       </div>
-      {!collapsed && quotaHint && <div className="thread-create-hint">{quotaHint}</div>}
+      {!collapsed && quotaHint && (
+        <div className="thread-create-hint thread-quota-hint">
+          <span>{quotaHint}</span>
+          <div className="thread-quota-help-anchor">
+            <button
+              type="button"
+              className={`thread-quota-help ${showQuotaHelp ? 'is-active' : ''}`}
+              onClick={() => setShowQuotaHelp((v) => !v)}
+              aria-label="What are runtime slots?"
+            >
+              ?
+            </button>
+            {showQuotaHelp && (
+              <>
+                <div className="thread-quota-help-backdrop" onClick={() => setShowQuotaHelp(false)} />
+                <div className="thread-quota-help-popover">
+                  Each conversation can claim one Blender runtime slot.
+                  When all slots are in use, sending a message in a new
+                  conversation will auto-release the oldest idle slot.
+                  You can also manually claim or release via the right-click menu.
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
       {!collapsed && createHint && <div className="thread-create-hint action">{createHint}</div>}
       {!collapsed && createError && <div className="thread-create-error">{createError}</div>}
       <div className={`thread-items ${collapsed ? 'collapsed' : ''}`}>
@@ -330,7 +469,7 @@ export function ThreadList({
         <>
           <div className="thread-context-menu-backdrop" onClick={closeThreadMenu} aria-hidden="true" />
           <div
-            className="thread-context-menu"
+            className="thread-context-menu thread-context-menu--thread-list"
             role="menu"
             aria-label={`Actions for ${menuThread.title || 'Untitled'}`}
             style={{ left: menuState.left, top: menuState.top }}
@@ -345,12 +484,23 @@ export function ThreadList({
             >
               Rename
             </button>
-            {onReleaseRuntime && menuThread.occupyingResources && (
+            <button
+              type="button"
+              className="thread-context-menu-item"
+              role="menuitem"
+              onClick={() => {
+                openThreadIdDialog(menuThread)
+              }}
+            >
+              View chat ID
+            </button>
+            {menuThread.occupyingResources && onReleaseRuntime && (
               <button
                 type="button"
                 className="thread-context-menu-item"
                 role="menuitem"
                 disabled={releasingThreadId === menuThread.id}
+                title="Free the Blender slot so another session can use it"
                 onClick={() => {
                   closeThreadMenu()
                   onReleaseRuntime(menuThread.id)
@@ -359,19 +509,144 @@ export function ThreadList({
                 {releasingThreadId === menuThread.id ? 'Releasing...' : 'Release runtime'}
               </button>
             )}
+            {!menuThread.occupyingResources && onClaimRuntime && (
+              <button
+                type="button"
+                className="thread-context-menu-item"
+                role="menuitem"
+                disabled={claimingThreadId === menuThread.id}
+                title="Connect this session to a Blender instance"
+                onClick={() => {
+                  closeThreadMenu()
+                  onClaimRuntime(menuThread.id)
+                }}
+              >
+                {claimingThreadId === menuThread.id ? 'Claiming...' : 'Claim runtime'}
+              </button>
+            )}
             <button
               type="button"
               className="thread-context-menu-item danger"
               role="menuitem"
               onClick={() => {
-                closeThreadMenu()
-                onDelete(menuThread.id)
+                openDeleteThreadDialog(menuThread)
               }}
             >
               Delete
             </button>
           </div>
         </>
+      )}
+      {threadIdDialog && (
+        <div className="thread-id-dialog-overlay" onClick={closeThreadIdDialog}>
+          <div className="thread-id-dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="thread-id-dialog-header">
+              <div>
+                <div className="thread-id-dialog-title">Chat ID</div>
+                <div className="thread-id-dialog-subtitle" title={threadIdDialog.title}>
+                  {threadIdDialog.title}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="ghost-btn thread-id-dialog-close"
+                onClick={closeThreadIdDialog}
+              >
+                Close
+              </button>
+            </div>
+            <div className="thread-id-dialog-value" title={threadIdDialog.threadId}>
+              {threadIdDialog.threadId}
+            </div>
+            <div className="thread-id-dialog-actions">
+              <button
+                type="button"
+                className="primary-btn thread-id-dialog-copy"
+                onClick={() => void handleCopyThreadId()}
+              >
+                {threadIdCopied ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {deleteThreadDialog && (
+        <div className="thread-id-dialog-overlay" onClick={closeDeleteThreadDialog}>
+          <div className="thread-id-dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="thread-id-dialog-header">
+              <div>
+                <div className="thread-id-dialog-title">Delete conversation?</div>
+                <div className="thread-id-dialog-subtitle" title={deleteThreadDialog.title}>
+                  {deleteThreadDialog.title}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="ghost-btn thread-id-dialog-close"
+                onClick={closeDeleteThreadDialog}
+              >
+                Cancel
+              </button>
+            </div>
+            <div className="thread-id-dialog-body">
+              This removes the conversation history for this chat from the app. This action cannot be undone.
+            </div>
+            <div className="thread-id-dialog-actions">
+              <button type="button" className="ghost-btn" onClick={closeDeleteThreadDialog}>
+                Keep Chat
+              </button>
+              <button
+                type="button"
+                className="primary-btn danger"
+                onClick={() => {
+                  onDelete(deleteThreadDialog.threadId)
+                  closeDeleteThreadDialog()
+                }}
+              >
+                Delete Chat
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {deleteAllDialog && (
+        <div className="thread-id-dialog-overlay" onClick={closeDeleteAllDialog}>
+          <div className="thread-id-dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="thread-id-dialog-header">
+              <div>
+                <div className="thread-id-dialog-title">Delete all conversations?</div>
+                <div className="thread-id-dialog-subtitle">
+                  {deleteAllDialog.count} {deleteAllDialog.count === 1 ? 'chat' : 'chats'}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="ghost-btn thread-id-dialog-close"
+                onClick={closeDeleteAllDialog}
+              >
+                Cancel
+              </button>
+            </div>
+            <div className="thread-id-dialog-body">
+              This removes every conversation history entry from the app. This action cannot be undone.
+            </div>
+            <div className="thread-id-dialog-actions">
+              <button type="button" className="ghost-btn" onClick={closeDeleteAllDialog}>
+                Keep Chats
+              </button>
+              <button
+                type="button"
+                className="primary-btn danger"
+                onClick={() => {
+                  onDeleteAll?.()
+                  closeDeleteAllDialog()
+                }}
+              >
+                Delete All
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

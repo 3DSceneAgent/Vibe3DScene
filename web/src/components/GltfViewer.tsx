@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useEffectEvent, useMemo, useRef, useState, type ReactNode } from 'react'
 // @ts-expect-error project does not include three type declarations in this workspace.
 import * as THREE from 'three'
 // @ts-expect-error project does not include three example type declarations in this workspace.
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader'
 // @ts-expect-error project does not include three example type declarations in this workspace.
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls'
+// @ts-expect-error project does not include three example type declarations in this workspace.
+import { TransformControls } from 'three/examples/jsm/controls/TransformControls'
 // @ts-expect-error project does not include three example type declarations in this workspace.
 import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader'
 // @ts-expect-error project does not include three example type declarations in this workspace.
@@ -21,13 +23,19 @@ import {
   type EnvironmentPresetConfig,
   type ProceduralSkyVisualConfig
 } from '../constants/environmentPresets'
-import type { SceneHierarchyNode } from '../state/types'
+import type {
+  SceneHierarchyNode,
+  SceneObjectTransformMode,
+  SceneObjectTransformUpdate
+} from '../state/types'
 
 type ViewportTheme = 'auto' | 'dark' | 'light'
 type UiTheme = 'dark' | 'light'
+type ShadingMode = 'lit' | 'unlit' | 'wireframe'
 type ProceduralSkyConfig = NonNullable<EnvironmentPresetConfig['proceduralSky']>
 const PROCEDURAL_SKY_RADIUS = 450
 const WIREFRAME_OVERLAY_LINEWIDTH = 1.85
+const CLICK_SELECTION_TOLERANCE_PX = 8
 type ViewportPalette = {
   background: number
   defaultGridMajor: number
@@ -35,6 +43,15 @@ type ViewportPalette = {
   modelGridMajor: number
   modelGridMinor: number
   wireframe: number
+  selectionBox: number
+  selectionFill: number
+}
+
+type TransformUndoEntry = {
+  backendObjectId: string
+  position: [number, number, number]
+  quaternion: [number, number, number, number]
+  scale: [number, number, number]
 }
 
 type GltfViewerProps = {
@@ -48,13 +65,29 @@ type GltfViewerProps = {
   showHdriBackground?: boolean
   twoSidedRendering?: boolean
   showWireframeOverlay?: boolean
+  shadingMode?: ShadingMode
+  selectedBackendObjectId?: string | null
+  transformEnabled?: boolean
+  canRequestTransform?: boolean
+  transformMode?: SceneObjectTransformMode
   onHierarchyChange?: (nodes: SceneHierarchyNode[]) => void
+  onSelectBackendObject?: (backendObjectId: string | null) => void
+  hiddenBackendObjectIds?: string[]
+  onTransformModeChange?: (mode: SceneObjectTransformMode) => void
+  onTransformObject?: (transform: SceneObjectTransformUpdate) => Promise<boolean>
+  onTransformDragChange?: (dragging: boolean) => void
+  onAddToChat?: (backendObjectId: string, backendObjectName: string | null) => void
+  onRequestDeleteSelected?: (backendObjectId: string) => void
+  undoRef?: React.MutableRefObject<(() => boolean) | null>
+  onUndoCountChange?: (count: number) => void
   isFullscreen?: boolean
   onToggleFullscreen?: () => void
   showFullscreenButton?: boolean
   headerControls?: ReactNode
   headerTrailingControls?: ReactNode
+  footerControls?: ReactNode
   alwaysAutoFrameCamera?: boolean
+  focusViewportRequest?: number
 }
 
 const viewportPalettes: Record<UiTheme, ViewportPalette> = {
@@ -64,7 +97,9 @@ const viewportPalettes: Record<UiTheme, ViewportPalette> = {
     defaultGridMinor: 0x1e2534,
     modelGridMajor: 0x3a4865,
     modelGridMinor: 0x1e2534,
-    wireframe: 0xffffff
+    wireframe: 0xffffff,
+    selectionBox: 0x7ed0ff,
+    selectionFill: 0x5fa4ff
   },
   light: {
     background: 0xf3f6fb,
@@ -72,7 +107,9 @@ const viewportPalettes: Record<UiTheme, ViewportPalette> = {
     defaultGridMinor: 0xd6dfeb,
     modelGridMajor: 0xa8bad2,
     modelGridMinor: 0xd6dfeb,
-    wireframe: 0x101820
+    wireframe: 0x101820,
+    selectionBox: 0x216ad4,
+    selectionFill: 0x4d7be8
   }
 }
 
@@ -112,12 +149,175 @@ function frameCameraToBox(
   controls.update()
 }
 
+function focusCameraOnObject(
+  camera: THREE.PerspectiveCamera,
+  controls: OrbitControls,
+  object: THREE.Object3D
+): boolean {
+  object.updateWorldMatrix(true, true)
+  const box = new THREE.Box3().setFromObject(object)
+  if (box.isEmpty()) {
+    return false
+  }
+
+  const size = box.getSize(new THREE.Vector3())
+  const center = box.getCenter(new THREE.Vector3())
+  const sphere = box.getBoundingSphere(new THREE.Sphere())
+  const radius = Math.max(sphere.radius, 0.1)
+  const verticalFov = (camera.fov * Math.PI) / 180
+  const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * Math.max(camera.aspect, 0.1))
+  const limitingFov = Math.max(Math.PI / 18, Math.min(verticalFov, horizontalFov))
+  const distance = (radius / Math.sin(limitingFov / 2)) * 1.18
+
+  const viewDirection = camera.position.clone().sub(controls.target)
+  const fallbackDirection = getAutoFrameDirection(size)
+  const direction =
+    viewDirection.lengthSq() > 1e-6 ? viewDirection.normalize() : fallbackDirection
+  const focus = center.clone()
+  if (size.y > 0) {
+    focus.y = box.min.y + size.y * 0.45
+  }
+
+  camera.position.copy(focus).addScaledVector(direction, distance)
+  camera.near = Math.max(distance / 1000, radius / 200, 0.01)
+  camera.far = Math.max(distance + radius * 10, 1000)
+  camera.updateProjectionMatrix()
+  controls.target.copy(focus)
+  controls.update()
+  return true
+}
+
 function buildHierarchy(object: THREE.Object3D): SceneHierarchyNode {
+  const backendObjectId =
+    typeof object.userData?.scene_agent_object_id === 'string' && object.userData.scene_agent_object_id.trim()
+      ? object.userData.scene_agent_object_id.trim()
+      : null
+  const backendObjectName =
+    typeof object.userData?.scene_agent_object_name === 'string' && object.userData.scene_agent_object_name.trim()
+      ? object.userData.scene_agent_object_name.trim()
+      : null
   return {
-    id: object.uuid,
+    nodeId: object.uuid,
     name: object.name.trim() || object.type,
     type: object.type,
-    children: object.children.map((child: THREE.Object3D) => buildHierarchy(child))
+    children: object.children.map((child: THREE.Object3D) => buildHierarchy(child)),
+    backendObjectId,
+    backendObjectName,
+    deletable: Boolean(backendObjectId),
+    transformable: Boolean(backendObjectId),
+    referencable: Boolean(backendObjectId)
+  }
+}
+
+function buildBackendObjectLookup(object: THREE.Object3D): Map<string, THREE.Object3D> {
+  const lookup = new Map<string, THREE.Object3D>()
+  object.traverse((entry: THREE.Object3D) => {
+    const backendObjectId =
+      typeof entry.userData?.scene_agent_object_id === 'string' && entry.userData.scene_agent_object_id.trim()
+        ? entry.userData.scene_agent_object_id.trim()
+        : null
+    if (backendObjectId && !lookup.has(backendObjectId)) {
+      lookup.set(backendObjectId, entry)
+    }
+  })
+  return lookup
+}
+
+function getBackendObjectId(object: THREE.Object3D | null | undefined): string | null {
+  if (!object) return null
+  const candidate = object.userData?.scene_agent_object_id
+  if (typeof candidate !== 'string') {
+    return null
+  }
+  const normalized = candidate.trim()
+  return normalized || null
+}
+
+function getBackendObjectName(object: THREE.Object3D | null | undefined): string | null {
+  if (!object) return null
+  const candidate = object.userData?.scene_agent_object_name
+  if (typeof candidate === 'string' && candidate.trim()) {
+    return candidate.trim()
+  }
+  const fallback = object.name.trim()
+  return fallback || null
+}
+
+function resolveBackendSelectableObject(
+  object: THREE.Object3D | null,
+  model: THREE.Object3D | null
+): THREE.Object3D | null {
+  if (!object || !model) {
+    return null
+  }
+
+  let current: THREE.Object3D | null = object
+  while (current) {
+    if (getBackendObjectId(current)) {
+      return current
+    }
+    if (current === model) {
+      break
+    }
+    current = current.parent
+  }
+
+  return null
+}
+
+function serializeWorldMatrix(matrix: THREE.Matrix4): number[][] {
+  const elements = matrix.elements
+  return [
+    [elements[0], elements[4], elements[8], elements[12]],
+    [elements[1], elements[5], elements[9], elements[13]],
+    [elements[2], elements[6], elements[10], elements[14]],
+    [elements[3], elements[7], elements[11], elements[15]]
+  ].map((row) => row.map((value) => Number(value.toFixed(6))))
+}
+
+function computeTransformGizmoSize(target: THREE.Object3D, camera: THREE.PerspectiveCamera): number {
+  const box = new THREE.Box3().setFromObject(target)
+  if (box.isEmpty()) {
+    return 0.5
+  }
+  const size = new THREE.Vector3()
+  const center = new THREE.Vector3()
+  box.getSize(size)
+  box.getCenter(center)
+  const maxDimension = Math.max(size.x, size.y, size.z, 0.001)
+  const distance = Math.max(camera.position.distanceTo(center), 0.001)
+  const ratio = maxDimension / distance
+  return THREE.MathUtils.clamp(0.35 + ratio * 1.5, 0.3, 1.0)
+}
+
+function suppressNegativeAxisHandles(helper: THREE.Object3D | null): void {
+  if (!helper) return
+  const center = new THREE.Vector3()
+  const toRemove: THREE.Object3D[] = []
+
+  helper.traverse((child: THREE.Object3D) => {
+    const mesh = child as THREE.Mesh & { isMesh?: boolean; geometry?: THREE.BufferGeometry }
+    if (!mesh.isMesh || !mesh.geometry?.attributes?.position) return
+    const name = mesh.name
+    if (name !== 'X' && name !== 'Y' && name !== 'Z') return
+
+    const bbox = new THREE.Box3()
+    bbox.setFromBufferAttribute(mesh.geometry.attributes.position)
+    bbox.getCenter(center)
+
+    if (
+      (name === 'X' && center.x < -0.1) ||
+      (name === 'Y' && center.y < -0.1) ||
+      (name === 'Z' && center.z < -0.1)
+    ) {
+      toRemove.push(mesh)
+    }
+  })
+
+  for (const obj of toRemove) {
+    obj.parent?.remove(obj)
+    const m = obj as THREE.Mesh
+    m.geometry?.dispose()
   }
 }
 
@@ -249,6 +449,14 @@ function disposeMaterial(material: THREE.Material | THREE.Material[]): void {
   material.dispose()
 }
 
+function disposeEphemeralMaterial(material: THREE.Material | THREE.Material[]): void {
+  if (Array.isArray(material)) {
+    material.forEach((entry) => disposeEphemeralMaterial(entry))
+    return
+  }
+  material.dispose()
+}
+
 function disposeObject3D(object: THREE.Object3D | null): void {
   if (!object) return
   object.traverse((entry: THREE.Object3D) => {
@@ -273,6 +481,98 @@ function visitMaterials(
     return
   }
   visitor(material)
+}
+
+function createUnlitMaterial(sourceMaterial: THREE.Material): THREE.MeshBasicMaterial {
+  const source = sourceMaterial as THREE.Material & {
+    alphaMap?: THREE.Texture | null
+    alphaTest?: number
+    color?: THREE.Color
+    map?: THREE.Texture | null
+    opacity?: number
+    side?: THREE.Side
+    transparent?: boolean
+    vertexColors?: boolean
+    wireframe?: boolean
+    depthTest?: boolean
+    depthWrite?: boolean
+    name?: string
+  }
+  const material = new THREE.MeshBasicMaterial({
+    color: source.color?.clone() ?? new THREE.Color(0xffffff),
+    map: source.map ?? null,
+    opacity: typeof source.opacity === 'number' ? source.opacity : 1,
+    transparent: Boolean(source.transparent),
+    alphaMap: source.alphaMap ?? null,
+    alphaTest: typeof source.alphaTest === 'number' ? source.alphaTest : 0,
+    side: source.side ?? THREE.FrontSide,
+    vertexColors: Boolean(source.vertexColors),
+    wireframe: Boolean(source.wireframe)
+  })
+  material.name = source.name ? `${source.name}__scene_agent_unlit` : 'scene_agent_unlit'
+  material.depthTest = source.depthTest ?? true
+  material.depthWrite = source.depthWrite ?? true
+  material.toneMapped = false
+  return material
+}
+
+function applyShadingModeToModel(
+  object: THREE.Object3D | null,
+  shadingMode: ShadingMode,
+  originalMaterials: WeakMap<THREE.Object3D, THREE.Material | THREE.Material[]>,
+  unlitMaterials: WeakMap<THREE.Object3D, THREE.Material | THREE.Material[]>
+): void {
+  if (!object) return
+
+  object.traverse((entry: THREE.Object3D) => {
+    const mesh = entry as THREE.Mesh & {
+      isMesh?: boolean
+      material?: THREE.Material | THREE.Material[]
+    }
+    if (!mesh.isMesh || !mesh.material) {
+      return
+    }
+
+    if (shadingMode === 'unlit') {
+      if (!originalMaterials.has(mesh)) {
+        originalMaterials.set(mesh, mesh.material)
+      }
+      const originalMaterial = originalMaterials.get(mesh)
+      if (!originalMaterial) {
+        return
+      }
+      const replacement = Array.isArray(originalMaterial)
+        ? originalMaterial.map((material) => createUnlitMaterial(material))
+        : createUnlitMaterial(originalMaterial)
+      const previousReplacement = unlitMaterials.get(mesh)
+      if (previousReplacement) {
+        disposeEphemeralMaterial(previousReplacement)
+      }
+      mesh.material = replacement
+      unlitMaterials.set(mesh, replacement)
+      return
+    }
+
+    const originalMaterial = originalMaterials.get(mesh)
+    if (!originalMaterial) {
+      return
+    }
+    const replacement = unlitMaterials.get(mesh)
+    mesh.material = originalMaterial
+    if (replacement) {
+      disposeEphemeralMaterial(replacement)
+      unlitMaterials.delete(mesh)
+    }
+    originalMaterials.delete(mesh)
+  })
+}
+
+function restoreOriginalMaterials(
+  object: THREE.Object3D | null,
+  originalMaterials: WeakMap<THREE.Object3D, THREE.Material | THREE.Material[]>,
+  unlitMaterials: WeakMap<THREE.Object3D, THREE.Material | THREE.Material[]>
+): void {
+  applyShadingModeToModel(object, 'lit', originalMaterials, unlitMaterials)
 }
 
 function getProceduralSunPosition(config: ProceduralSkyVisualConfig): THREE.Vector3 {
@@ -381,29 +681,51 @@ function buildViewportGrid(
   model: THREE.Object3D | null,
   palette: ViewportPalette
 ): THREE.GridHelper {
+  const configureGrid = (
+    grid: THREE.GridHelper,
+    majorOpacity: number,
+    minorOpacity: number
+  ): THREE.GridHelper => {
+    const materials = Array.isArray(grid.material) ? grid.material : [grid.material]
+    const [majorMaterial, minorMaterial] = materials as Array<
+      THREE.Material & { transparent?: boolean; opacity?: number; depthWrite?: boolean }
+    >
+    if (majorMaterial) {
+      majorMaterial.transparent = true
+      majorMaterial.opacity = majorOpacity
+      majorMaterial.depthWrite = false
+    }
+    if (minorMaterial) {
+      minorMaterial.transparent = true
+      minorMaterial.opacity = minorOpacity
+      minorMaterial.depthWrite = false
+    }
+    return grid
+  }
+
   if (model) {
     const box = new THREE.Box3().setFromObject(model)
     const size = new THREE.Vector3()
     box.getSize(size)
     const maxDim = Math.max(size.x, size.y, size.z, 0.1)
-    const gridSize = Math.max(20, Math.ceil(maxDim * 2))
-    const divisions = Math.max(20, Math.min(160, gridSize * 2))
-    const grid = new THREE.GridHelper(
+    const gridSize = Math.max(200, Math.ceil((maxDim * 20) / 20) * 20)
+    const divisions = Math.max(60, Math.min(320, gridSize))
+    const grid = configureGrid(new THREE.GridHelper(
       gridSize,
       divisions,
       palette.modelGridMajor,
       palette.modelGridMinor
-    )
+    ), 0.52, 0.18)
     grid.position.y = box.min.y - 0.001
     return grid
   }
 
-  const grid = new THREE.GridHelper(
+  const grid = configureGrid(new THREE.GridHelper(
     20,
     40,
     palette.defaultGridMajor,
     palette.defaultGridMinor
-  )
+  ), 0.46, 0.16)
   grid.position.y = -0.01
   return grid
 }
@@ -487,6 +809,63 @@ function replaceWireframeOverlay(
   overlayRef.current = nextOverlay
 }
 
+function formatDebugVector(vector: THREE.Vector3 | null | undefined): [number, number, number] | null {
+  if (!vector) return null
+  return [vector.x, vector.y, vector.z].map((value) => Number(value.toFixed(3))) as [number, number, number]
+}
+
+function buildSelectionOverlay(
+  target: THREE.Object3D,
+  fillColor: number
+): THREE.Group | null {
+  const overlay = new THREE.Group()
+  target.updateWorldMatrix(true, true)
+
+  target.traverse((entry: THREE.Object3D) => {
+    const mesh = entry as THREE.Mesh & {
+      isMesh?: boolean
+      geometry?: THREE.BufferGeometry
+    }
+    if (!mesh.isMesh || !mesh.geometry) {
+      return
+    }
+
+    const highlight = new THREE.Mesh(
+      mesh.geometry.clone(),
+      new THREE.MeshBasicMaterial({
+        color: fillColor,
+        transparent: true,
+        opacity: 0.16,
+        depthTest: false,
+        depthWrite: false,
+        side: THREE.DoubleSide
+      })
+    )
+    highlight.matrixAutoUpdate = false
+    highlight.matrix.copy(mesh.matrixWorld)
+    highlight.frustumCulled = false
+    highlight.renderOrder = 18
+    overlay.add(highlight)
+  })
+
+  return overlay.children.length > 0 ? overlay : null
+}
+
+function replaceSelectionOverlay(
+  scene: THREE.Scene,
+  overlayRef: { current: THREE.Group | null },
+  nextOverlay: THREE.Group | null
+): void {
+  if (overlayRef.current) {
+    scene.remove(overlayRef.current)
+    disposeObject3D(overlayRef.current)
+  }
+  if (nextOverlay) {
+    scene.add(nextOverlay)
+  }
+  overlayRef.current = nextOverlay
+}
+
 export function GltfViewer({
   gltfUrl,
   environment,
@@ -498,22 +877,43 @@ export function GltfViewer({
   showHdriBackground = false,
   twoSidedRendering = false,
   showWireframeOverlay = false,
+  shadingMode = 'lit',
+  selectedBackendObjectId = null,
+  transformEnabled = false,
+  canRequestTransform = false,
+  transformMode = 'translate',
   onHierarchyChange,
+  onSelectBackendObject,
+  hiddenBackendObjectIds = [],
+  onTransformModeChange,
+  onTransformObject,
+  onTransformDragChange,
+  onAddToChat,
+  onRequestDeleteSelected,
+  undoRef,
+  onUndoCountChange,
   isFullscreen = false,
   onToggleFullscreen,
   showFullscreenButton = true,
   headerControls,
   headerTrailingControls,
-  alwaysAutoFrameCamera = false
+  footerControls,
+  alwaysAutoFrameCamera = false,
+  focusViewportRequest = 0
 }: GltfViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null)
   const controlsRef = useRef<OrbitControls | null>(null)
+  const transformControlsRef = useRef<TransformControls | null>(null)
+  const transformControlsHelperRef = useRef<THREE.Object3D | null>(null)
   const modelRef = useRef<THREE.Object3D | null>(null)
+  const backendObjectLookupRef = useRef<Map<string, THREE.Object3D>>(new Map())
+  const backendObjectVisibilityRef = useRef<WeakMap<THREE.Object3D, boolean>>(new WeakMap())
   const gridRef = useRef<THREE.GridHelper | null>(null)
   const wireframeOverlayRef = useRef<THREE.Group | null>(null)
+  const selectionOverlayRef = useRef<THREE.Group | null>(null)
   const lightRef = useRef<{
     ambient: THREE.AmbientLight
     hemisphere: THREE.HemisphereLight
@@ -530,9 +930,57 @@ export function GltfViewer({
   const hasUserCameraOverrideRef = useRef(false)
   const resizeRendererRef = useRef<(() => void) | null>(null)
   const originalMaterialSidesRef = useRef<WeakMap<THREE.Material, number>>(new WeakMap())
+  const originalMeshMaterialsRef = useRef<WeakMap<THREE.Object3D, THREE.Material | THREE.Material[]>>(new WeakMap())
+  const unlitMeshMaterialsRef = useRef<WeakMap<THREE.Object3D, THREE.Material | THREE.Material[]>>(new WeakMap())
   const twoSidedRenderingRef = useRef(twoSidedRendering)
+  const shadingModeRef = useRef<ShadingMode>(shadingMode)
+  const selectedBackendObjectIdRef = useRef<string | null>(selectedBackendObjectId)
+  const focusViewportRequestRef = useRef(focusViewportRequest)
+  const appliedFocusViewportRequestRef = useRef(focusViewportRequest)
+  const transformEnabledRef = useRef(transformEnabled)
+  const canRequestTransformRef = useRef(canRequestTransform)
+  const transformModeRef = useRef<SceneObjectTransformMode>(transformMode)
+  const onSelectBackendObjectRef = useRef(onSelectBackendObject)
+  const onTransformModeChangeRef = useRef(onTransformModeChange)
+  const onTransformObjectRef = useRef(onTransformObject)
+  const onTransformDragChangeRef = useRef(onTransformDragChange)
+  const transformSyncTimerRef = useRef<number | null>(null)
+  const pendingTransformUpdateRef = useRef<SceneObjectTransformUpdate | null>(null)
+  const transformSyncInFlightRef = useRef(false)
+  const dragPointerDownRef = useRef<{ x: number; y: number } | null>(null)
+  const draggingTransformRef = useRef(false)
+  const suppressSelectionUntilRef = useRef(0)
+  const undoStackRef = useRef<TransformUndoEntry[]>([])
+  const onUndoCountChangeRef = useRef(onUndoCountChange)
+  const onAddToChatRef = useRef(onAddToChat)
+  const onRequestDeleteSelectedRef = useRef(onRequestDeleteSelected)
+  const lastQPressRef = useRef(0)
   const [useFallbackLighting, setUseFallbackLighting] = useState(true)
   const [viewerResetToken, setViewerResetToken] = useState(0)
+  const debugCameraReload = useEffectEvent(
+    (
+      phase: 'load-start' | 'restore-preserved-view',
+      details: {
+        hasLoadedModel: boolean
+        hasUserCameraOverride: boolean
+        usedPreservedView: boolean
+        cameraPosition?: THREE.Vector3 | null
+        cameraTarget?: THREE.Vector3 | null
+      }
+    ) => {
+      if (!import.meta.env.DEV) return
+      console.debug('[GltfViewer] camera reload', {
+        phase,
+        gltfUrl,
+        alwaysAutoFrameCamera,
+        hasLoadedModel: details.hasLoadedModel,
+        hasUserCameraOverride: details.hasUserCameraOverride,
+        usedPreservedView: details.usedPreservedView,
+        cameraPosition: formatDebugVector(details.cameraPosition),
+        cameraTarget: formatDebugVector(details.cameraTarget)
+      })
+    }
+  )
 
   const preset = useMemo(() => environmentPresets[environment], [environment])
   const resolvedEnvironmentLightIntensity = useMemo(
@@ -555,13 +1003,263 @@ export function GltfViewer({
   const showGridRef = useRef(showGrid)
   const showWireframeOverlayRef = useRef(showWireframeOverlay)
 
+  const refreshSelectionOverlay = useEffectEvent(() => {
+    const scene = sceneRef.current
+    const model = modelRef.current
+    if (!scene || !model || !selectedBackendObjectIdRef.current) {
+      if (scene) {
+        replaceSelectionOverlay(scene, selectionOverlayRef, null)
+      }
+      return
+    }
+
+    const selectedObject = backendObjectLookupRef.current.get(selectedBackendObjectIdRef.current) ?? null
+    const nextOverlay = selectedObject
+      ? buildSelectionOverlay(
+          selectedObject,
+          viewportPaletteRef.current.selectionFill
+        )
+      : null
+    replaceSelectionOverlay(scene, selectionOverlayRef, nextOverlay)
+  })
+
+  const focusSelectedObject = useEffectEvent(() => {
+    const camera = cameraRef.current
+    const controls = controlsRef.current
+    const scene = sceneRef.current
+    const backendObjectId = selectedBackendObjectIdRef.current
+    if (!camera || !controls || !scene || !backendObjectId) {
+      return false
+    }
+
+    const selectedObject = backendObjectLookupRef.current.get(backendObjectId) ?? null
+    if (!selectedObject || !focusCameraOnObject(camera, controls, selectedObject)) {
+      return false
+    }
+
+    hasUserCameraOverrideRef.current = true
+    cameraViewRef.current = {
+      position: camera.position.clone(),
+      target: controls.target.clone()
+    }
+    appliedFocusViewportRequestRef.current = focusViewportRequestRef.current
+    rendererRef.current?.render(scene, camera)
+    return true
+  })
+
+  const refreshTransformControls = useEffectEvent(() => {
+    const transformControls = transformControlsRef.current
+    const transformControlsHelper = transformControlsHelperRef.current
+    const camera = cameraRef.current
+    const model = modelRef.current
+    if (!transformControls || !camera) {
+      return
+    }
+
+    const activeMode = transformModeRef.current
+    const isSelectOnly = activeMode === 'select'
+    const threeMode = isSelectOnly ? 'translate' : activeMode
+    transformControls.setMode(threeMode)
+    transformControls.enabled = transformEnabledRef.current && !isSelectOnly
+
+    if (!transformEnabledRef.current || isSelectOnly || !model || !selectedBackendObjectIdRef.current) {
+      transformControls.detach()
+      transformControls.visible = false
+      if (transformControlsHelper) {
+        transformControlsHelper.visible = false
+      }
+      return
+    }
+
+    const targetObject =
+      backendObjectLookupRef.current.get(selectedBackendObjectIdRef.current) ?? null
+    if (!targetObject) {
+      transformControls.detach()
+      transformControls.visible = false
+      if (transformControlsHelper) {
+        transformControlsHelper.visible = false
+      }
+      return
+    }
+
+    transformControls.visible = true
+    if (transformControlsHelper) {
+      transformControlsHelper.visible = true
+    }
+    transformControls.attach(targetObject)
+    transformControls.size = computeTransformGizmoSize(targetObject, camera)
+    suppressNegativeAxisHandles(transformControlsHelper)
+  })
+
+  const collectTransformUpdate = useEffectEvent(
+    (commit: boolean): SceneObjectTransformUpdate | null => {
+      const model = modelRef.current
+      const backendObjectId = selectedBackendObjectIdRef.current
+      if (!model || !backendObjectId) {
+        return null
+      }
+      const targetObject = backendObjectLookupRef.current.get(backendObjectId) ?? null
+      if (!targetObject) {
+        return null
+      }
+      targetObject.updateWorldMatrix(true, true)
+      return {
+        backendObjectId,
+        backendObjectName: getBackendObjectName(targetObject),
+        worldMatrix: serializeWorldMatrix(targetObject.matrixWorld),
+        commit
+      }
+    }
+  )
+
+  const flushPendingTransformUpdate = useEffectEvent(function flushPendingTransformUpdateImpl() {
+    if (transformSyncTimerRef.current !== null) {
+      window.clearTimeout(transformSyncTimerRef.current)
+      transformSyncTimerRef.current = null
+    }
+    if (transformSyncInFlightRef.current) {
+      return
+    }
+    const pending = pendingTransformUpdateRef.current
+    const handler = onTransformObjectRef.current
+    if (!pending || !handler) {
+      pendingTransformUpdateRef.current = null
+      return
+    }
+
+    pendingTransformUpdateRef.current = null
+    transformSyncInFlightRef.current = true
+    void handler(pending)
+      .catch((error) => {
+        console.error('Failed to sync object transform', error)
+      })
+      .finally(() => {
+        transformSyncInFlightRef.current = false
+        if (pendingTransformUpdateRef.current) {
+          if (pendingTransformUpdateRef.current.commit) {
+            flushPendingTransformUpdateImpl()
+            return
+          }
+          transformSyncTimerRef.current = window.setTimeout(() => {
+            transformSyncTimerRef.current = null
+            flushPendingTransformUpdateImpl()
+          }, 220)
+        }
+      })
+  })
+
+  const enqueueTransformUpdate = useEffectEvent((commit: boolean) => {
+    const update = collectTransformUpdate(commit)
+    if (!update) {
+      return
+    }
+    if (pendingTransformUpdateRef.current) {
+      pendingTransformUpdateRef.current = {
+        ...update,
+        commit: pendingTransformUpdateRef.current.commit || update.commit
+      }
+    } else {
+      pendingTransformUpdateRef.current = update
+    }
+
+    if (commit) {
+      flushPendingTransformUpdate()
+      return
+    }
+
+    if (transformSyncTimerRef.current !== null || transformSyncInFlightRef.current) {
+      return
+    }
+    transformSyncTimerRef.current = window.setTimeout(() => {
+      transformSyncTimerRef.current = null
+      flushPendingTransformUpdate()
+    }, 220)
+  })
+
+  const captureUndoSnapshot = useEffectEvent((): TransformUndoEntry | null => {
+    const backendObjectId = selectedBackendObjectIdRef.current
+    if (!backendObjectId) return null
+    const target = backendObjectLookupRef.current.get(backendObjectId) ?? null
+    if (!target) return null
+    return {
+      backendObjectId,
+      position: [target.position.x, target.position.y, target.position.z],
+      quaternion: [target.quaternion.x, target.quaternion.y, target.quaternion.z, target.quaternion.w],
+      scale: [target.scale.x, target.scale.y, target.scale.z]
+    }
+  })
+
+  const pushUndoSnapshot = useEffectEvent((entry: TransformUndoEntry) => {
+    undoStackRef.current = [...undoStackRef.current.slice(-49), entry]
+    onUndoCountChangeRef.current?.(undoStackRef.current.length)
+  })
+
+  const performUndo = useEffectEvent((): boolean => {
+    const stack = undoStackRef.current
+    if (stack.length === 0) return false
+    const entry = stack[stack.length - 1]
+    undoStackRef.current = stack.slice(0, -1)
+    onUndoCountChangeRef.current?.(undoStackRef.current.length)
+    const target = backendObjectLookupRef.current.get(entry.backendObjectId) ?? null
+    if (!target) return false
+    target.position.set(...entry.position)
+    target.quaternion.set(...entry.quaternion)
+    target.scale.set(...entry.scale)
+    target.updateWorldMatrix(true, true)
+    if (selectedBackendObjectIdRef.current !== entry.backendObjectId) {
+      onSelectBackendObjectRef.current?.(entry.backendObjectId)
+    }
+    refreshSelectionOverlay()
+    refreshTransformControls()
+    onTransformDragChangeRef.current?.(true)
+    onTransformDragChangeRef.current?.(false)
+    enqueueTransformUpdate(true)
+    return true
+  })
+
+  const applyShadingMode = useEffectEvent(() => {
+    const materialMode = shadingModeRef.current === 'wireframe' ? 'lit' : shadingModeRef.current
+    applyShadingModeToModel(
+      modelRef.current,
+      materialMode,
+      originalMeshMaterialsRef.current,
+      unlitMeshMaterialsRef.current
+    )
+    applyTwoSidedRenderingState(modelRef.current, twoSidedRenderingRef.current, originalMaterialSidesRef.current)
+  })
+
   useEffect(() => {
     viewportPaletteRef.current = viewportPalette
+    refreshSelectionOverlay()
   }, [viewportPalette])
 
   useEffect(() => {
     onHierarchyChangeRef.current = onHierarchyChange
   }, [onHierarchyChange])
+
+  useEffect(() => {
+    onSelectBackendObjectRef.current = onSelectBackendObject
+  }, [onSelectBackendObject])
+
+  useEffect(() => {
+    onTransformModeChangeRef.current = onTransformModeChange
+  }, [onTransformModeChange])
+
+  useEffect(() => {
+    onTransformObjectRef.current = onTransformObject
+  }, [onTransformObject])
+
+  useEffect(() => {
+    onTransformDragChangeRef.current = onTransformDragChange
+  }, [onTransformDragChange])
+
+  useEffect(() => {
+    onUndoCountChangeRef.current = onUndoCountChange
+  }, [onUndoCountChange])
+
+  useEffect(() => {
+    onAddToChatRef.current = onAddToChat
+  }, [onAddToChat])
 
   useEffect(() => {
     alwaysAutoFrameCameraRef.current = alwaysAutoFrameCamera
@@ -571,14 +1269,70 @@ export function GltfViewer({
     showGridRef.current = showGrid
   }, [showGrid])
 
+  const effectiveWireframe = showWireframeOverlay || shadingMode === 'wireframe'
+
   useEffect(() => {
-    showWireframeOverlayRef.current = showWireframeOverlay
-  }, [showWireframeOverlay])
+    showWireframeOverlayRef.current = effectiveWireframe
+  }, [effectiveWireframe])
 
   useEffect(() => {
     twoSidedRenderingRef.current = twoSidedRendering
     applyTwoSidedRenderingState(modelRef.current, twoSidedRendering, originalMaterialSidesRef.current)
   }, [twoSidedRendering])
+
+  useEffect(() => {
+    shadingModeRef.current = shadingMode
+    applyShadingMode()
+  }, [shadingMode])
+
+  useEffect(() => {
+    transformEnabledRef.current = transformEnabled
+    refreshTransformControls()
+  }, [transformEnabled])
+
+  useEffect(() => {
+    canRequestTransformRef.current = canRequestTransform
+  }, [canRequestTransform])
+
+  useEffect(() => {
+    onRequestDeleteSelectedRef.current = onRequestDeleteSelected
+  }, [onRequestDeleteSelected])
+
+  useEffect(() => {
+    transformModeRef.current = transformMode
+    refreshTransformControls()
+  }, [transformMode])
+
+  useEffect(() => {
+    selectedBackendObjectIdRef.current = selectedBackendObjectId
+    refreshSelectionOverlay()
+    refreshTransformControls()
+    if (
+      appliedFocusViewportRequestRef.current < focusViewportRequestRef.current &&
+      selectedBackendObjectId
+    ) {
+      focusSelectedObject()
+    }
+  }, [selectedBackendObjectId])
+
+  useEffect(() => {
+    const hiddenIds = new Set(hiddenBackendObjectIds)
+    for (const [backendObjectId, object] of backendObjectLookupRef.current.entries()) {
+      if (!backendObjectVisibilityRef.current.has(object)) {
+        backendObjectVisibilityRef.current.set(object, object.visible)
+      }
+      const originalVisible = backendObjectVisibilityRef.current.get(object)
+      object.visible = hiddenIds.has(backendObjectId) ? false : (originalVisible ?? true)
+    }
+    refreshSelectionOverlay()
+    refreshTransformControls()
+    const renderer = rendererRef.current
+    const scene = sceneRef.current
+    const camera = cameraRef.current
+    if (renderer && scene && camera) {
+      renderer.render(scene, camera)
+    }
+  }, [gltfUrl, hiddenBackendObjectIds])
 
   useEffect(() => {
     if (alwaysAutoFrameCamera) {
@@ -587,9 +1341,17 @@ export function GltfViewer({
   }, [alwaysAutoFrameCamera])
 
   useEffect(() => {
+    focusViewportRequestRef.current = focusViewportRequest
+    containerRef.current?.focus({ preventScroll: true })
+    focusSelectedObject()
+  }, [focusViewportRequest])
+
+  useEffect(() => {
     if (!containerRef.current) return
 
     const container = containerRef.current
+    const originalMeshMaterials = originalMeshMaterialsRef.current
+    const unlitMeshMaterials = unlitMeshMaterialsRef.current
     const scene = new THREE.Scene()
     const palette = viewportPaletteRef.current
     scene.background = new THREE.Color(palette.background)
@@ -621,6 +1383,22 @@ export function GltfViewer({
     controls.dampingFactor = 0.08
     controls.target.set(0, 0.5, 0)
     controls.update()
+    const transformControls = new TransformControls(camera, renderer.domElement)
+    const transformControlsHelper =
+      typeof (transformControls as { getHelper?: () => THREE.Object3D }).getHelper === 'function'
+        ? (transformControls as { getHelper: () => THREE.Object3D }).getHelper()
+        : null
+    transformControls.enabled = transformEnabledRef.current
+    transformControls.setMode(transformModeRef.current === 'select' ? 'translate' : transformModeRef.current)
+    transformControls.visible = false
+    if (transformControlsHelper) {
+      transformControlsHelper.visible = false
+      scene.add(transformControlsHelper)
+      suppressNegativeAxisHandles(transformControlsHelper)
+    }
+    if (undoRef) {
+      undoRef.current = performUndo
+    }
     const syncViewState = () => {
       cameraViewRef.current = {
         position: camera.position.clone(),
@@ -633,6 +1411,31 @@ export function GltfViewer({
     syncViewState()
     controls.addEventListener('start', markUserCameraOverride)
     controls.addEventListener('change', syncViewState)
+    controls.addEventListener('change', refreshTransformControls)
+
+    const handleTransformDraggingChanged = (event: { value?: boolean }) => {
+      const isDragging = Boolean(event?.value)
+      draggingTransformRef.current = isDragging
+      controls.enabled = !isDragging
+      onTransformDragChangeRef.current?.(isDragging)
+      if (isDragging) {
+        const snapshot = captureUndoSnapshot()
+        if (snapshot) {
+          pushUndoSnapshot(snapshot)
+        }
+      }
+      if (!isDragging) {
+        suppressSelectionUntilRef.current = Date.now() + 160
+        enqueueTransformUpdate(true)
+      }
+    }
+    const handleTransformObjectChange = () => {
+      refreshSelectionOverlay()
+      refreshTransformControls()
+      enqueueTransformUpdate(false)
+    }
+    transformControls.addEventListener('dragging-changed', handleTransformDraggingChanged)
+    transformControls.addEventListener('objectChange', handleTransformObjectChange)
 
     const resizeRenderer = () => {
       const width = container.clientWidth
@@ -667,9 +1470,137 @@ export function GltfViewer({
     rendererRef.current = renderer
     cameraRef.current = camera
     controlsRef.current = controls
+    transformControlsRef.current = transformControls
+    transformControlsHelperRef.current = transformControlsHelper
     gridRef.current = defaultGrid
     lightRef.current = { ambient, hemisphere, directional }
     pmremGeneratorRef.current = pmremGenerator
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.button !== 0) {
+        return
+      }
+      container.focus({ preventScroll: true })
+      dragPointerDownRef.current = { x: event.clientX, y: event.clientY }
+    }
+
+    const handlePointerUp = (event: PointerEvent) => {
+      if (event.button !== 0) {
+        return
+      }
+      const pointerDown = dragPointerDownRef.current
+      dragPointerDownRef.current = null
+      if (!pointerDown) {
+        return
+      }
+      if (draggingTransformRef.current || Date.now() < suppressSelectionUntilRef.current) {
+        return
+      }
+      const activeAxis = (transformControlsRef.current as { axis?: string | null } | null)?.axis
+      if (typeof activeAxis === 'string' && activeAxis.length > 0) {
+        return
+      }
+      const moved =
+        Math.abs(event.clientX - pointerDown.x) > CLICK_SELECTION_TOLERANCE_PX ||
+        Math.abs(event.clientY - pointerDown.y) > CLICK_SELECTION_TOLERANCE_PX
+      if (moved) {
+        return
+      }
+
+      const model = modelRef.current
+      if (!model) {
+        onSelectBackendObjectRef.current?.(null)
+        return
+      }
+
+      const rect = renderer.domElement.getBoundingClientRect()
+      const pointer = new THREE.Vector2(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1
+      )
+      const raycaster = new THREE.Raycaster()
+      raycaster.setFromCamera(pointer, camera)
+      const intersections = raycaster.intersectObject(model, true)
+      const match =
+        intersections
+          .map((hit: THREE.Intersection<THREE.Object3D>) =>
+            resolveBackendSelectableObject(hit.object, model)
+          )
+          .find((entry: THREE.Object3D | null): entry is THREE.Object3D => entry !== null) ?? null
+      onSelectBackendObjectRef.current?.(getBackendObjectId(match))
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      if (
+        target &&
+        (target.closest('input, textarea, select') ||
+          target.isContentEditable)
+      ) {
+        return
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z' && !event.shiftKey) {
+        event.preventDefault()
+        performUndo()
+        return
+      }
+
+      if (event.metaKey || event.ctrlKey || event.altKey) {
+        return
+      }
+
+      const key = event.key.toLowerCase()
+      if (key === 'f' && selectedBackendObjectIdRef.current) {
+        const selectedObject =
+          backendObjectLookupRef.current.get(selectedBackendObjectIdRef.current) ?? null
+        if (selectedObject && focusCameraOnObject(camera, controls, selectedObject)) {
+          event.preventDefault()
+          hasUserCameraOverrideRef.current = true
+        }
+        return
+      } else if (key === 'x' && selectedBackendObjectIdRef.current) {
+        event.preventDefault()
+        onRequestDeleteSelectedRef.current?.(selectedBackendObjectIdRef.current)
+        return
+      }
+
+      if (!canRequestTransformRef.current) {
+        return
+      }
+
+      if (key === 'q') {
+        event.preventDefault()
+        const now = Date.now()
+        if (now - lastQPressRef.current < 400) {
+          onSelectBackendObjectRef.current?.(null)
+          lastQPressRef.current = 0
+        } else {
+          onTransformModeChangeRef.current?.('select')
+          lastQPressRef.current = now
+        }
+      } else if (key === 'w' && selectedBackendObjectIdRef.current) {
+        event.preventDefault()
+        onTransformModeChangeRef.current?.('translate')
+      } else if (key === 'e' && selectedBackendObjectIdRef.current) {
+        event.preventDefault()
+        onTransformModeChangeRef.current?.('rotate')
+      } else if (key === 'r' && selectedBackendObjectIdRef.current) {
+        event.preventDefault()
+        onTransformModeChangeRef.current?.('scale')
+      } else if (key === 'a' && selectedBackendObjectIdRef.current) {
+        event.preventDefault()
+        const obj = backendObjectLookupRef.current.get(selectedBackendObjectIdRef.current) ?? null
+        onAddToChatRef.current?.(
+          selectedBackendObjectIdRef.current,
+          getBackendObjectName(obj)
+        )
+      }
+    }
+
+    renderer.domElement.addEventListener('pointerdown', handlePointerDown)
+    renderer.domElement.addEventListener('pointerup', handlePointerUp)
+    window.addEventListener('keydown', handleKeyDown)
 
     let animationFrame = 0
     const animate = () => {
@@ -690,7 +1621,26 @@ export function GltfViewer({
       loadTokenRef.current += 1
       controls.removeEventListener('change', syncViewState)
       controls.removeEventListener('start', markUserCameraOverride)
+      controls.removeEventListener('change', refreshTransformControls)
+      transformControls.removeEventListener('dragging-changed', handleTransformDraggingChanged)
+      transformControls.removeEventListener('objectChange', handleTransformObjectChange)
+      if (transformSyncTimerRef.current !== null) {
+        window.clearTimeout(transformSyncTimerRef.current)
+        transformSyncTimerRef.current = null
+      }
+      pendingTransformUpdateRef.current = null
+      transformSyncInFlightRef.current = false
+      renderer.domElement.removeEventListener('pointerdown', handlePointerDown)
+      renderer.domElement.removeEventListener('pointerup', handlePointerUp)
+      window.removeEventListener('keydown', handleKeyDown)
       controls.dispose()
+      transformControls.detach()
+      if (transformControlsHelperRef.current) {
+        scene.remove(transformControlsHelperRef.current)
+      }
+      if (typeof (transformControls as { dispose?: () => void }).dispose === 'function') {
+        ;(transformControls as { dispose: () => void }).dispose()
+      }
       if (environmentRenderTargetRef.current) {
         environmentRenderTargetRef.current.dispose()
         environmentRenderTargetRef.current = null
@@ -706,9 +1656,17 @@ export function GltfViewer({
       }
       pmremGenerator.dispose()
       pmremGeneratorRef.current = null
+      replaceSelectionOverlay(scene, selectionOverlayRef, null)
       replaceWireframeOverlay(scene, wireframeOverlayRef, null)
+      restoreOriginalMaterials(
+        modelRef.current,
+        originalMeshMaterials,
+        unlitMeshMaterials
+      )
       disposeObject3D(modelRef.current)
       modelRef.current = null
+      backendObjectLookupRef.current = new Map()
+      backendObjectVisibilityRef.current = new WeakMap()
       disposeObject3D(gridRef.current)
       gridRef.current = null
       renderer.dispose()
@@ -720,13 +1678,20 @@ export function GltfViewer({
       rendererRef.current = null
       cameraRef.current = null
       controlsRef.current = null
+      transformControlsRef.current = null
+      transformControlsHelperRef.current = null
       lightRef.current = null
       resizeRendererRef.current = null
       hasLoadedModelRef.current = false
       cameraViewRef.current = null
       hasUserCameraOverrideRef.current = false
+      undoStackRef.current = []
+      onUndoCountChangeRef.current?.(0)
+      if (undoRef) {
+        undoRef.current = null
+      }
     }
-  }, [viewerResetToken])
+  }, [viewerResetToken, undoRef])
 
   useEffect(() => {
     const resize = resizeRendererRef.current
@@ -960,11 +1925,11 @@ export function GltfViewer({
     replaceWireframeOverlay(
       scene,
       wireframeOverlayRef,
-      showWireframeOverlay && modelRef.current
+      effectiveWireframe && modelRef.current
         ? buildWireframeOverlay(modelRef.current, viewportPalette.wireframe)
         : null
     )
-  }, [showWireframeOverlay, viewportPalette])
+  }, [effectiveWireframe, viewportPalette])
 
   useEffect(() => {
     const scene = sceneRef.current
@@ -974,11 +1939,26 @@ export function GltfViewer({
 
     const resetToDefault = () => {
       if (modelRef.current) {
+        restoreOriginalMaterials(
+          modelRef.current,
+          originalMeshMaterialsRef.current,
+          unlitMeshMaterialsRef.current
+        )
         disposeObject3D(modelRef.current)
         scene.remove(modelRef.current)
         modelRef.current = null
       }
+      backendObjectLookupRef.current = new Map()
+      backendObjectVisibilityRef.current = new WeakMap()
+      replaceSelectionOverlay(scene, selectionOverlayRef, null)
       replaceWireframeOverlay(scene, wireframeOverlayRef, null)
+      if (transformControlsRef.current) {
+        transformControlsRef.current.detach()
+        transformControlsRef.current.visible = false
+      }
+      if (transformControlsHelperRef.current) {
+        transformControlsHelperRef.current.visible = false
+      }
       const palette = viewportPaletteRef.current
       replaceViewportGrid(
         scene,
@@ -999,6 +1979,7 @@ export function GltfViewer({
         target: controls.target.clone()
       }
       onHierarchyChangeRef.current?.([])
+      refreshTransformControls()
     }
 
     if (!gltfUrl) {
@@ -1009,12 +1990,21 @@ export function GltfViewer({
     const loader = new GLTFLoader()
     const loadToken = loadTokenRef.current + 1
     loadTokenRef.current = loadToken
+    const hasLoadedModel = hasLoadedModelRef.current
+    const hasUserCameraOverride = hasUserCameraOverrideRef.current
     const preservedView =
-      hasLoadedModelRef.current &&
+      hasLoadedModel &&
       !alwaysAutoFrameCameraRef.current &&
-      hasUserCameraOverrideRef.current
+      hasUserCameraOverride
         ? cameraViewRef.current
         : null
+    debugCameraReload('load-start', {
+      hasLoadedModel,
+      hasUserCameraOverride,
+      usedPreservedView: Boolean(preservedView),
+      cameraPosition: camera.position,
+      cameraTarget: controls.target
+    })
 
     loader.load(
       gltfUrl,
@@ -1022,21 +2012,25 @@ export function GltfViewer({
         if (loadTokenRef.current !== loadToken) return
 
         if (modelRef.current) {
+          restoreOriginalMaterials(
+            modelRef.current,
+            originalMeshMaterialsRef.current,
+            unlitMeshMaterialsRef.current
+          )
           disposeObject3D(modelRef.current)
           scene.remove(modelRef.current)
         }
+        replaceSelectionOverlay(scene, selectionOverlayRef, null)
 
         const hasEmbeddedLights = sceneContainsLights(gltf.scene)
         if (hasEmbeddedLights) {
           normalizeEmbeddedLightIntensities(gltf.scene)
         }
         setUseFallbackLighting(!hasEmbeddedLights)
-        applyTwoSidedRenderingState(
-          gltf.scene,
-          twoSidedRenderingRef.current,
-          originalMaterialSidesRef.current
-        )
         modelRef.current = gltf.scene
+        backendObjectLookupRef.current = buildBackendObjectLookup(gltf.scene)
+        backendObjectVisibilityRef.current = new WeakMap()
+        applyShadingMode()
         scene.add(gltf.scene)
 
         const box = new THREE.Box3().setFromObject(gltf.scene)
@@ -1066,6 +2060,13 @@ export function GltfViewer({
           camera.far = Math.max(distance * 25, 1000)
           camera.updateProjectionMatrix()
           controls.update()
+          debugCameraReload('restore-preserved-view', {
+            hasLoadedModel,
+            hasUserCameraOverride,
+            usedPreservedView: true,
+            cameraPosition: camera.position,
+            cameraTarget: controls.target
+          })
         } else {
           const preferredCamera = pickPreferredSceneCamera(collectSceneCameras(gltf.scene))
           if (preferredCamera) {
@@ -1082,6 +2083,14 @@ export function GltfViewer({
         }
         resizeRendererRef.current?.()
         rendererRef.current?.render(scene, camera)
+        refreshSelectionOverlay()
+        refreshTransformControls()
+        if (
+          appliedFocusViewportRequestRef.current < focusViewportRequestRef.current &&
+          selectedBackendObjectIdRef.current
+        ) {
+          focusSelectedObject()
+        }
 
         const roots =
           gltf.scene.children.length > 0
@@ -1108,20 +2117,24 @@ export function GltfViewer({
           {headerControls}
           {showFullscreenButton && onToggleFullscreen && (
             <button
-              className="ghost-btn viewer-fullscreen-btn"
+              className="ghost-btn icon-btn viewer-fullscreen-btn"
               onClick={onToggleFullscreen}
               title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
               aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
             >
               {isFullscreen ? (
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="4 14 4 10 0 10" /><polyline points="12 2 12 6 16 6" />
-                  <line x1="0" y1="16" x2="6" y2="10" /><line x1="16" y1="0" x2="10" y2="6" />
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="5.5 1 5.5 5.5 1 5.5" />
+                  <polyline points="10.5 15 10.5 10.5 15 10.5" />
+                  <polyline points="15 5.5 10.5 5.5 10.5 1" />
+                  <polyline points="1 10.5 5.5 10.5 5.5 15" />
                 </svg>
               ) : (
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="10 0 10 4 14 4" /><polyline points="6 16 6 12 2 12" />
-                  <line x1="16" y1="0" x2="10" y2="6" /><line x1="0" y1="16" x2="6" y2="10" />
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="1 5.5 1 1 5.5 1" />
+                  <polyline points="15 10.5 15 15 10.5 15" />
+                  <polyline points="10.5 1 15 1 15 5.5" />
+                  <polyline points="5.5 15 1 15 1 10.5" />
                 </svg>
               )}
             </button>
@@ -1131,7 +2144,8 @@ export function GltfViewer({
       </div>
       <div className={`viewer viewport-${resolvedViewportTheme}`}>
         {!gltfUrl && <div className="viewer-placeholder">No model loaded</div>}
-        <div className="viewer-canvas" ref={containerRef} />
+        <div className="viewer-canvas" ref={containerRef} tabIndex={0} />
+        {footerControls ? <div className="viewer-bottom-bar">{footerControls}</div> : null}
       </div>
     </div>
   )

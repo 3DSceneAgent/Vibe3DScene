@@ -23,11 +23,36 @@ export type PendingImageAttachment = {
   previewUrl: string
 }
 
+export type SceneObjectReference = {
+  backendObjectId: string
+  displayName: string
+  objectType?: string | null
+}
+
+export type SceneObjectReferenceInsertion = {
+  key: string
+  reference: SceneObjectReference
+}
+
+export type SceneObjectTransformMode = 'select' | 'translate' | 'rotate' | 'scale'
+
+export type SceneObjectTransformUpdate = {
+  backendObjectId: string
+  backendObjectName?: string | null
+  worldMatrix: number[][]
+  commit: boolean
+}
+
 export type SceneHierarchyNode = {
-  id: string
+  nodeId: string
   name: string
   type: string
   children: SceneHierarchyNode[]
+  backendObjectId?: string | null
+  backendObjectName?: string | null
+  deletable?: boolean
+  transformable?: boolean
+  referencable?: boolean
 }
 
 export type Message = {
@@ -47,6 +72,7 @@ export type Message = {
   toolPayload?: unknown
   toolMedia?: ToolMedia[]
   attachedImages?: ImageAsset[]
+  referencedObjects?: SceneObjectReference[]
   collapsed?: boolean
 }
 
@@ -68,8 +94,10 @@ export type Thread = {
   fastMode?: boolean
   vlmProvider?: string
   vlmModel?: string
+  providerThinking?: boolean | null
   vlmLocked?: boolean
   todos: TodoItem[]
+  activeTodoId?: string | null
   scene?: SceneInfo | null
   renders?: RenderImage[]
   gltfUrl?: string | null
@@ -95,6 +123,9 @@ export type Settings = {
   theme: ThemeId
   autoRefreshScene: boolean
   autoFetchIntervalSeconds: number
+  providerThinkingDefault: boolean
+  maxRequestAgentTurns: number
+  maxRequestToolBatches: number
   viewportTheme: ViewportThemeId
   viewportEnvironment: EnvironmentPreset
   environmentLightIntensity: number

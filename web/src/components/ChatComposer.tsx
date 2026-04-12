@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import type { PendingImageAttachment } from '../state/types'
+import type {
+  PendingImageAttachment,
+  SceneObjectReference,
+  SceneObjectReferenceInsertion
+} from '../state/types'
+import { SceneObjectIcon } from './SceneObjectIcon'
 
 type ModelOption = {
   value: string
@@ -8,7 +13,11 @@ type ModelOption = {
 
 type ChatComposerProps = {
   disabled?: boolean
-  onSend: (message: string, images: PendingImageAttachment[]) => Promise<boolean>
+  onSend: (
+    message: string,
+    images: PendingImageAttachment[],
+    referencedObjects: SceneObjectReference[]
+  ) => Promise<boolean>
   onStop?: () => void
   referenceImagesCount?: number
   examplePrompts?: string[]
@@ -22,6 +31,9 @@ type ChatComposerProps = {
   modelOptions?: ModelOption[]
   selectedModelValue?: string
   onModelSelectionChange?: (value: string) => void
+  providerThinking?: boolean
+  providerThinkingAvailable?: boolean
+  onProviderThinkingToggle?: (enabled: boolean) => void
   fastMode?: boolean
   onFastModeToggle?: (enabled: boolean) => void
   fastModeAvailable?: boolean
@@ -32,11 +44,72 @@ type ChatComposerProps = {
   showMcpTools?: boolean
   showFastMode?: boolean
   runtimeHint?: string | null
+  availableReferences?: SceneObjectReference[]
+  pendingReferenceInsertion?: SceneObjectReferenceInsertion | null
+  onPendingReferenceInsertionHandled?: (key: string) => void
 }
 
 const MAX_REFERENCE_IMAGES = 3
 const MAX_EXAMPLE_PROMPTS = 10
 const MAX_HISTORY_PROMPTS = 8
+const MAX_MENTION_RESULTS = 8
+
+type ReferencedObjectEntry = SceneObjectReference & {
+  instanceKey: string
+}
+
+type MentionContext = {
+  start: number
+  end: number
+  query: string
+}
+
+function createReferencedObjectEntry(reference: SceneObjectReference): ReferencedObjectEntry {
+  return {
+    ...reference,
+    instanceKey: `${reference.backendObjectId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  }
+}
+
+function findActiveMention(input: string, caretPosition: number): MentionContext | null {
+  if (caretPosition < 0 || caretPosition > input.length) {
+    return null
+  }
+
+  const prefix = input.slice(0, caretPosition)
+  const match = prefix.match(/(?:^|[\s([{])@([^\s@]*)$/)
+  if (!match) {
+    return null
+  }
+
+  const query = match[1] ?? ''
+  return {
+    start: caretPosition - query.length - 1,
+    end: caretPosition,
+    query
+  }
+}
+
+function rankReferenceMatch(reference: SceneObjectReference, query: string): number {
+  const loweredQuery = query.trim().toLowerCase()
+  if (!loweredQuery) {
+    return 0
+  }
+  const displayName = reference.displayName.toLowerCase()
+  if (displayName === loweredQuery) {
+    return 0
+  }
+  if (displayName.startsWith(loweredQuery)) {
+    return 1
+  }
+  if (displayName.includes(loweredQuery)) {
+    return 2
+  }
+  if (reference.backendObjectId.toLowerCase().includes(loweredQuery)) {
+    return 3
+  }
+  return Number.POSITIVE_INFINITY
+}
 
 export function ChatComposer({
   disabled,
@@ -54,6 +127,9 @@ export function ChatComposer({
   modelOptions = [],
   selectedModelValue = '',
   onModelSelectionChange,
+  providerThinking = false,
+  providerThinkingAvailable = false,
+  onProviderThinkingToggle,
   fastMode = false,
   onFastModeToggle,
   fastModeAvailable = false,
@@ -63,18 +139,65 @@ export function ChatComposer({
   showModelSelector = true,
   showMcpTools = true,
   showFastMode = true,
-  runtimeHint = null
+  runtimeHint = null,
+  availableReferences = [],
+  pendingReferenceInsertion = null,
+  onPendingReferenceInsertionHandled
 }: ChatComposerProps) {
   const [input, setInput] = useState('')
+  const [caretPosition, setCaretPosition] = useState(0)
   const [dragActive, setDragActive] = useState(false)
   const [isInputFocused, setIsInputFocused] = useState(false)
   const [isToolsOpen, setIsToolsOpen] = useState(false)
+  const [toolSearchQuery, setToolSearchQuery] = useState('')
   const [pendingImages, setPendingImages] = useState<PendingImageAttachment[]>([])
+  const [referencedObjects, setReferencedObjects] = useState<ReferencedObjectEntry[]>([])
+  const [mentionActiveIndex, setMentionActiveIndex] = useState(0)
+  const [dismissedMentionSignature, setDismissedMentionSignature] = useState<string | null>(null)
   const blurTimeoutRef = useRef<number | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const toolsPanelRef = useRef<HTMLDivElement | null>(null)
   const pendingImagesRef = useRef<PendingImageAttachment[]>([])
+  const lastReferenceInsertionKeyRef = useRef<string | null>(null)
+  const pendingReferenceFrameRef = useRef<number | null>(null)
+
+  const insertReferenceAtCursor = (
+    reference: SceneObjectReference,
+    mentionContext: MentionContext | null
+  ) => {
+    const textarea = textareaRef.current
+    const selectionStart = textarea?.selectionStart ?? caretPosition
+    const selectionEnd = textarea?.selectionEnd ?? selectionStart
+    const replacementStart = mentionContext?.start ?? selectionStart
+    const replacementEnd = mentionContext?.end ?? selectionEnd
+    const insertionText = `@${reference.displayName} `
+    const nextInput =
+      input.slice(0, replacementStart) +
+      insertionText +
+      input.slice(replacementEnd)
+    const nextCaretPosition = replacementStart + insertionText.length
+    setInput(nextInput)
+    setCaretPosition(nextCaretPosition)
+    setDismissedMentionSignature(null)
+    window.requestAnimationFrame(() => {
+      textareaRef.current?.focus()
+      textareaRef.current?.setSelectionRange(nextCaretPosition, nextCaretPosition)
+    })
+  }
+
+  const handleReferenceSelected = (
+    reference: SceneObjectReference,
+    mentionContext: MentionContext | null
+  ) => {
+    setReferencedObjects((current) => [...current, createReferencedObjectEntry(reference)])
+    insertReferenceAtCursor(reference, mentionContext)
+  }
+
+  const closeToolsPanel = () => {
+    setIsToolsOpen(false)
+    setToolSearchQuery('')
+  }
 
   useEffect(() => {
     pendingImagesRef.current = pendingImages
@@ -83,11 +206,47 @@ export function ChatComposer({
   useEffect(() => {
     return () => {
       pendingImagesRef.current.forEach((image) => URL.revokeObjectURL(image.previewUrl))
+      if (pendingReferenceFrameRef.current !== null) {
+        window.cancelAnimationFrame(pendingReferenceFrameRef.current)
+      }
       if (blurTimeoutRef.current !== null) {
         window.clearTimeout(blurTimeoutRef.current)
       }
     }
   }, [])
+
+  useEffect(() => {
+    if (!pendingReferenceInsertion) {
+      return
+    }
+    if (lastReferenceInsertionKeyRef.current === pendingReferenceInsertion.key) {
+      return
+    }
+    lastReferenceInsertionKeyRef.current = pendingReferenceInsertion.key
+    const reference = pendingReferenceInsertion.reference
+    pendingReferenceFrameRef.current = window.requestAnimationFrame(() => {
+      pendingReferenceFrameRef.current = null
+      setReferencedObjects((current) => [...current, createReferencedObjectEntry(reference)])
+      const textarea = textareaRef.current
+      const selectionStart = textarea?.selectionStart ?? caretPosition
+      const selectionEnd = textarea?.selectionEnd ?? selectionStart
+      const insertionText = `@${reference.displayName} `
+      const nextInput = input.slice(0, selectionStart) + insertionText + input.slice(selectionEnd)
+      const nextCaretPosition = selectionStart + insertionText.length
+      setInput(nextInput)
+      setCaretPosition(nextCaretPosition)
+      setDismissedMentionSignature(null)
+      textareaRef.current?.focus()
+      textareaRef.current?.setSelectionRange(nextCaretPosition, nextCaretPosition)
+      onPendingReferenceInsertionHandled?.(pendingReferenceInsertion.key)
+    })
+    return () => {
+      if (pendingReferenceFrameRef.current !== null) {
+        window.cancelAnimationFrame(pendingReferenceFrameRef.current)
+        pendingReferenceFrameRef.current = null
+      }
+    }
+  }, [caretPosition, input, onPendingReferenceInsertionHandled, pendingReferenceInsertion])
 
   useEffect(() => {
     if (!isToolsOpen) return
@@ -97,12 +256,12 @@ export function ChatComposer({
       if (toolsPanelRef.current?.contains(target)) {
         return
       }
-      setIsToolsOpen(false)
+      closeToolsPanel()
     }
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        setIsToolsOpen(false)
+        closeToolsPanel()
       }
     }
 
@@ -118,12 +277,20 @@ export function ChatComposer({
     const text = input.trim()
     if (!text) return
     const submittedImages = pendingImages
+    const submittedReferences = referencedObjects.map((reference) => ({
+      backendObjectId: reference.backendObjectId,
+      displayName: reference.displayName,
+      objectType: reference.objectType
+    }))
     setInput('')
+    setCaretPosition(0)
     setPendingImages([])
+    setReferencedObjects([])
+    setDismissedMentionSignature(null)
     if (fileInputRef.current) {
       fileInputRef.current.value = ''
     }
-    const success = await onSend(text, submittedImages)
+    const success = await onSend(text, submittedImages, submittedReferences)
     if (success) {
       return
     }
@@ -190,7 +357,12 @@ export function ChatComposer({
 
   const handleSelectPrompt = (prompt: string) => {
     setInput(prompt)
+    setCaretPosition(prompt.length)
     textareaRef.current?.focus()
+  }
+
+  const handleRemoveReferencedObject = (instanceKey: string) => {
+    setReferencedObjects((current) => current.filter((entry) => entry.instanceKey !== instanceKey))
   }
 
   const handleInputFocus = () => {
@@ -199,6 +371,7 @@ export function ChatComposer({
       blurTimeoutRef.current = null
     }
     setIsInputFocused(true)
+    setCaretPosition(textareaRef.current?.selectionStart ?? input.length)
   }
 
   const handleInputBlur = () => {
@@ -216,15 +389,53 @@ export function ChatComposer({
   const promptOptions = examplePrompts
     .filter((prompt) => !historyPromptSet.has(prompt))
     .slice(0, MAX_EXAMPLE_PROMPTS)
+  const hasPendingImages = pendingImages.length > 0
+  const hasReferencedObjects = referencedObjects.length > 0
+  const mentionContext = findActiveMention(input, caretPosition)
+  const mentionSignature = mentionContext
+    ? `${mentionContext.start}:${mentionContext.end}:${mentionContext.query}`
+    : null
+  const mentionOptions = mentionContext
+    ? availableReferences
+        .map((reference) => ({
+          reference,
+          rank: rankReferenceMatch(reference, mentionContext.query)
+        }))
+        .filter((entry) => Number.isFinite(entry.rank))
+        .sort((left, right) => {
+          if (left.rank !== right.rank) {
+            return left.rank - right.rank
+          }
+          return left.reference.displayName.localeCompare(right.reference.displayName)
+        })
+        .slice(0, MAX_MENTION_RESULTS)
+        .map((entry) => entry.reference)
+    : []
+  const showMentionPopover =
+    isInputFocused &&
+    Boolean(mentionContext) &&
+    mentionOptions.length > 0 &&
+    mentionSignature !== dismissedMentionSignature
   const showPromptPopover =
     isInputFocused &&
+    !showMentionPopover &&
+    !hasReferencedObjects &&
     input.trim().length === 0 &&
     (historyOptions.length > 0 || promptOptions.length > 0)
   const modelSelectDisabled = modelLocked || modelLoading || modelOptions.length === 0
-  const hasPendingImages = pendingImages.length > 0
+  const activeModelOption =
+    modelOptions.find((option) => option.value === selectedModelValue) ??
+    (modelOptions.length > 0 ? modelOptions[0] : null)
+  const activeModelLabel = activeModelOption?.label ?? 'No model available'
+  const modelSelectWidthCh = Math.max(10, activeModelLabel.length)
   const canSend = input.trim().length > 0
   const enabledToolCount = mcpTools.filter((toolName) => mcpToolEnabled[toolName] !== false).length
+  const normalizedToolSearchQuery = toolSearchQuery.trim().toLowerCase()
+  const filteredMcpTools = normalizedToolSearchQuery
+    ? mcpTools.filter((toolName) => toolName.toLowerCase().includes(normalizedToolSearchQuery))
+    : mcpTools
   const fastModeDisabled = Boolean(disabled)
+  const resolvedMentionActiveIndex = mentionOptions[mentionActiveIndex] ? mentionActiveIndex : 0
 
   const modelMetaTitle = modelLoading
     ? 'Loading model options...'
@@ -248,11 +459,35 @@ export function ChatComposer({
   return (
     <div className="composer-shell">
       <div
-        className={`composer-input-panel ${dragActive ? 'drag-active' : ''} ${hasPendingImages ? 'has-images' : ''}`}
+        className={`composer-input-panel ${dragActive ? 'drag-active' : ''} ${hasPendingImages ? 'has-images' : ''} ${hasReferencedObjects ? 'has-object-refs' : ''}`}
         onDrop={handleDrop}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
       >
+        {showMentionPopover && mentionContext && (
+          <div className="composer-mention-popover" role="listbox" aria-label="Scene object suggestions">
+            <div className="composer-mention-section-label">Scene objects</div>
+            {mentionOptions.map((reference, index) => (
+              <button
+                key={reference.backendObjectId}
+                type="button"
+                className={`composer-mention-option ${index === resolvedMentionActiveIndex ? 'is-active' : ''}`}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => handleReferenceSelected(reference, mentionContext)}
+                title={reference.displayName}
+                disabled={disabled}
+              >
+                <span className="composer-mention-option-icon" aria-hidden="true">
+                  <SceneObjectIcon
+                    type={reference.objectType ?? 'OBJECT3D'}
+                    className="composer-object-ref-icon-svg"
+                  />
+                </span>
+                <span className="composer-mention-option-label">{reference.displayName}</span>
+              </button>
+            ))}
+          </div>
+        )}
         {showPromptPopover && (
           <div className="composer-prompt-popover" role="listbox" aria-label="Prompt suggestions">
             {historyOptions.length > 0 && (
@@ -313,6 +548,31 @@ export function ChatComposer({
             ))}
           </div>
         )}
+        {hasReferencedObjects && (
+          <div className="composer-object-refs" aria-label="Referenced scene objects">
+            {referencedObjects.map((reference) => (
+              <div key={reference.instanceKey} className="composer-object-ref-chip">
+                <span className="composer-object-ref-icon" aria-hidden="true">
+                  <SceneObjectIcon
+                    type={reference.objectType ?? 'OBJECT3D'}
+                    className="composer-object-ref-icon-svg"
+                  />
+                </span>
+                <span className="composer-object-ref-label" title={reference.displayName}>
+                  {reference.displayName}
+                </span>
+                <button
+                  className="composer-object-ref-remove"
+                  type="button"
+                  onClick={() => handleRemoveReferencedObject(reference.instanceKey)}
+                  aria-label={`Remove ${reference.displayName}`}
+                >
+                  x
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <textarea
           ref={textareaRef}
           className="composer-input"
@@ -322,8 +582,39 @@ export function ChatComposer({
           onFocus={handleInputFocus}
           onBlur={handleInputBlur}
           onPaste={handlePaste}
-          onChange={(event) => setInput(event.target.value)}
+          onSelect={(event) => setCaretPosition(event.currentTarget.selectionStart ?? 0)}
+          onChange={(event) => {
+            setInput(event.target.value)
+            setCaretPosition(event.target.selectionStart ?? event.target.value.length)
+          }}
           onKeyDown={(event) => {
+            if (showMentionPopover) {
+              if (event.key === 'ArrowDown') {
+                event.preventDefault()
+                setMentionActiveIndex((current) => (current + 1) % mentionOptions.length)
+                return
+              }
+              if (event.key === 'ArrowUp') {
+                event.preventDefault()
+                setMentionActiveIndex((current) =>
+                  (current - 1 + mentionOptions.length) % mentionOptions.length
+                )
+                return
+              }
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                setDismissedMentionSignature(mentionSignature)
+                return
+              }
+              if (event.key === 'Enter' && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+                event.preventDefault()
+                const selection = mentionOptions[resolvedMentionActiveIndex] ?? mentionOptions[0]
+                if (selection) {
+                  handleReferenceSelected(selection, mentionContext)
+                }
+                return
+              }
+            }
             if (event.key !== 'Enter') return
             if (event.ctrlKey || event.metaKey || event.shiftKey) {
               return
@@ -366,6 +657,7 @@ export function ChatComposer({
                 disabled={modelSelectDisabled}
                 onChange={(event) => onModelSelectionChange?.(event.target.value)}
                 title={runtimeHint ?? modelMetaTitle}
+                style={{ width: `${modelSelectWidthCh}ch` }}
               >
                 {modelOptions.length === 0 && <option value="">No model available</option>}
                 {modelOptions.map((option) => (
@@ -375,20 +667,49 @@ export function ChatComposer({
                 ))}
               </select>
             )}
+            {providerThinkingAvailable && (
+              <div
+                className={`composer-fast-mode-chip ${disabled ? 'is-disabled' : ''}`}
+                title="Provider thinking: include hidden reasoning summaries when supported"
+              >
+                <div className="composer-fast-mode-chip-copy">
+                  <div className="composer-fast-mode-chip-title">Thinking</div>
+                </div>
+                <label
+                  className="toggle-switch compact composer-fast-mode-toggle"
+                  aria-label="Toggle provider thinking"
+                  title="Provider thinking: include hidden reasoning summaries when supported"
+                >
+                  <input
+                    type="checkbox"
+                    checked={providerThinking}
+                    onChange={(event) => onProviderThinkingToggle?.(event.target.checked)}
+                    disabled={Boolean(disabled)}
+                  />
+                  <span className="toggle-slider" />
+                </label>
+              </div>
+            )}
             {showMcpTools && (
               <div
                 ref={toolsPanelRef}
                 className={`composer-tools-panel ${isToolsOpen ? 'open' : ''}`}
                 onBlur={(event) => {
                   if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-                    setIsToolsOpen(false)
+                    closeToolsPanel()
                   }
                 }}
               >
                 <button
                   type="button"
                   className="composer-tools-summary"
-                  onClick={() => setIsToolsOpen((prev) => !prev)}
+                  onClick={() => {
+                    if (isToolsOpen) {
+                      closeToolsPanel()
+                      return
+                    }
+                    setIsToolsOpen(true)
+                  }}
                   aria-expanded={isToolsOpen}
                   aria-haspopup="true"
                 >
@@ -408,31 +729,49 @@ export function ChatComposer({
                   <div className="composer-tools-body">
                     <div className="composer-tools-body-header">
                       <div className="composer-tools-body-title">Per-thread tool access</div>
+                      {mcpTools.length > 0 && (
+                        <input
+                          type="search"
+                          className="composer-tools-search"
+                          placeholder="Search tools"
+                          value={toolSearchQuery}
+                          onChange={(event) => setToolSearchQuery(event.target.value)}
+                          autoFocus
+                          spellCheck={false}
+                          aria-label="Search per-thread tools"
+                        />
+                      )}
                     </div>
                     {mcpTools.length > 0 ? (
-                      <ul className="composer-tools-list">
-                        {mcpTools.map((toolName) => {
-                          const hint = resolveToolHint(toolName)
-                          return (
-                            <li key={toolName} className="composer-tools-item">
-                              <label className="composer-tools-toggle" title={hint ?? undefined}>
-                                <span className="composer-tools-name">{toolName}</span>
-                                <span className="toggle-switch compact composer-tools-switch">
-                                  <input
-                                    type="checkbox"
-                                    checked={mcpToolEnabled[toolName] !== false}
-                                    onChange={(event) =>
-                                      onMcpToolToggle?.(toolName, event.target.checked)
-                                    }
-                                    disabled={disabled || mcpToolsLoading}
-                                  />
-                                  <span className="toggle-slider" />
-                                </span>
-                              </label>
-                            </li>
-                          )
-                        })}
-                      </ul>
+                      filteredMcpTools.length > 0 ? (
+                        <ul className="composer-tools-list">
+                          {filteredMcpTools.map((toolName) => {
+                            const hint = resolveToolHint(toolName)
+                            return (
+                              <li key={toolName} className="composer-tools-item">
+                                <label className="composer-tools-toggle" title={hint ?? undefined}>
+                                  <span className="composer-tools-name">{toolName}</span>
+                                  <span className="toggle-switch compact composer-tools-switch">
+                                    <input
+                                      type="checkbox"
+                                      checked={mcpToolEnabled[toolName] !== false}
+                                      onChange={(event) =>
+                                        onMcpToolToggle?.(toolName, event.target.checked)
+                                      }
+                                      disabled={disabled || mcpToolsLoading}
+                                    />
+                                    <span className="toggle-slider" />
+                                  </span>
+                                </label>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      ) : (
+                        <div className="composer-tools-empty muted">
+                          No tools match "{toolSearchQuery.trim()}".
+                        </div>
+                      )
                     ) : (
                       <div className="composer-tools-empty muted">
                         {mcpToolsLoading

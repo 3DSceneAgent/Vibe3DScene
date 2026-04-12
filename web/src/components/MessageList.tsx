@@ -4,6 +4,7 @@ import { ToolResultBlock } from './ToolResultBlock'
 import { MarkdownMessage } from './MarkdownMessage'
 import { parseTodos } from '../utils/message'
 import { resolveMediaUrl } from '../utils/url'
+import { SceneObjectIcon } from './SceneObjectIcon'
 
 const VIBE3D_SCENE_ICON_URL = '/vibe3dscene_icon.png'
 
@@ -26,10 +27,11 @@ function UserChatAvatar() {
       role="img"
       aria-label="You"
     >
-      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+        <circle cx="12" cy="9" r="3.5" fill="currentColor" />
         <path
           fill="currentColor"
-          d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"
+          d="M4.5 19.5v-1C4.5 16.01 7.86 14 12 14s7.5 2.01 7.5 4.5v1a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1Z"
         />
       </svg>
     </div>
@@ -203,6 +205,7 @@ const ConversationTurnItem = memo(
 const UserMessageItem = memo(
   function UserMessageItem({ message, backendUrl }: { message: Message; backendUrl: string }) {
     const attachedImages = message.attachedImages ?? []
+    const referencedObjects = message.referencedObjects ?? []
 
     return (
       <div className="message-row user">
@@ -220,6 +223,23 @@ const UserMessageItem = memo(
                     ) : (
                       <div className="message-attachment-placeholder">{image.filename}</div>
                     )}
+                  </div>
+                ))}
+              </div>
+            )}
+            {referencedObjects.length > 0 && (
+              <div className="message-object-refs" aria-label="Referenced scene objects">
+                {referencedObjects.map((reference, index) => (
+                  <div key={`${reference.backendObjectId}-${index}`} className="message-object-ref-chip">
+                    <span className="message-object-ref-icon" aria-hidden="true">
+                      <SceneObjectIcon
+                        type={reference.objectType ?? 'OBJECT3D'}
+                        className="message-object-ref-icon-svg"
+                      />
+                    </span>
+                    <span className="message-object-ref-label" title={reference.displayName}>
+                      {reference.displayName}
+                    </span>
                   </div>
                 ))}
               </div>

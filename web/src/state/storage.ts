@@ -39,6 +39,9 @@ export const defaultSettings: Settings = {
   theme: 'dark',
   autoRefreshScene: true,
   autoFetchIntervalSeconds: 10,
+  providerThinkingDefault: true,
+  maxRequestAgentTurns: 50,
+  maxRequestToolBatches: 40,
   viewportTheme: 'auto',
   viewportEnvironment: DEFAULT_ENVIRONMENT_PRESET,
   environmentLightIntensity: 1,
@@ -61,6 +64,18 @@ const viewportEnvironments = new Set<EnvironmentPreset>([
 ])
 const uiModes = new Set<Settings['uiMode']>(['default', 'minimal'])
 const useIndexedDB = isIndexedDBSupported()
+
+function normalizeBudgetSetting(value: unknown, fallback: number): number {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) {
+    return fallback
+  }
+  const rounded = Math.round(numeric)
+  if (rounded === -1) {
+    return -1
+  }
+  return Math.max(1, rounded)
+}
 
 function sanitizeMessageContent(content: string): string {
   if (!content) return ''
@@ -137,7 +152,6 @@ function sanitizeThreads(threads: Thread[]): Thread[] {
       messages,
       renders: persistedThread.renders ?? [],
       gltfUrl: null,
-      sceneHierarchy: [],
       sceneHasChange: false,
       graphEvents: [],
       streamSession: null,
@@ -348,6 +362,14 @@ function normalizeSettings(settings: Partial<Settings> | null | undefined): Sett
     Number.isFinite(rawAutoFetchIntervalSeconds) && rawAutoFetchIntervalSeconds > 0
       ? Math.min(300, Math.max(1, Math.round(rawAutoFetchIntervalSeconds)))
       : defaultSettings.autoFetchIntervalSeconds
+  const nextMaxRequestAgentTurns = normalizeBudgetSetting(
+    settings?.maxRequestAgentTurns,
+    defaultSettings.maxRequestAgentTurns
+  )
+  const nextMaxRequestToolBatches = normalizeBudgetSetting(
+    settings?.maxRequestToolBatches,
+    defaultSettings.maxRequestToolBatches
+  )
   const rawEnvironmentLightIntensity = Number(
     settings?.environmentLightIntensity ?? legacySettings?.skylightIntensity
   )
@@ -367,6 +389,12 @@ function normalizeSettings(settings: Partial<Settings> | null | undefined): Sett
     theme: nextTheme,
     autoRefreshScene: settings?.autoRefreshScene ?? defaultSettings.autoRefreshScene,
     autoFetchIntervalSeconds: nextAutoFetchIntervalSeconds,
+    providerThinkingDefault:
+      typeof settings?.providerThinkingDefault === 'boolean'
+        ? settings.providerThinkingDefault
+        : defaultSettings.providerThinkingDefault,
+    maxRequestAgentTurns: nextMaxRequestAgentTurns,
+    maxRequestToolBatches: nextMaxRequestToolBatches,
     viewportTheme: nextViewportTheme,
     viewportEnvironment: nextViewportEnvironment,
     environmentLightIntensity: nextEnvironmentLightIntensity,

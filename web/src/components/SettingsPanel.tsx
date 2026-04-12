@@ -24,6 +24,19 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
     onChange({ ...settings, autoFetchIntervalSeconds: nextInterval })
   }
 
+  const updateProviderThinkingDefault = (enabled: boolean) => {
+    onChange({ ...settings, providerThinkingDefault: enabled })
+  }
+
+  const updateBudget = (
+    key: 'maxRequestAgentTurns' | 'maxRequestToolBatches',
+    value: string
+  ) => {
+    const parsed = Number.parseInt(value, 10)
+    const nextValue = Number.isFinite(parsed) ? (parsed === -1 ? -1 : Math.max(1, parsed)) : settings[key]
+    onChange({ ...settings, [key]: nextValue })
+  }
+
   return (
     <div className="settings-panel">
       <div className="panel">
@@ -65,6 +78,22 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
       <div className="panel">
         <div className="panel-header">
           <div className="panel-title">Interface</div>
+        </div>
+        <label className="field checkbox-field">
+          Default Thinking
+          <label className="toggle-switch compact">
+            <input
+              type="checkbox"
+              checked={settings.providerThinkingDefault}
+              onChange={(event) => updateProviderThinkingDefault(event.target.checked)}
+            />
+            <span className="toggle-slider" />
+          </label>
+        </label>
+        <div className="field">
+          <span className="ui-mode-meta">
+            New chats inherit this value. Changing the in-chat Thinking toggle also updates this default.
+          </span>
         </div>
         <div className="ui-mode-options" role="radiogroup" aria-label="UI Mode">
           <button
@@ -167,6 +196,35 @@ export function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
             />
             <span className="toggle-slider" />
           </label>
+        </label>
+      </div>
+
+      <div className="panel">
+        <div className="panel-header">
+          <div className="panel-title">Plan Mode</div>
+        </div>
+        <div className="field">
+          <span className="ui-mode-meta">These limits are used for plan mode requests only.</span>
+        </div>
+        <label className="field">
+          Plan Mode Max Agent Turns
+          <input
+            type="number"
+            min={-1}
+            step={1}
+            value={settings.maxRequestAgentTurns}
+            onChange={(event) => updateBudget('maxRequestAgentTurns', event.target.value)}
+          />
+        </label>
+        <label className="field">
+          Plan Mode Max Tool Batches
+          <input
+            type="number"
+            min={-1}
+            step={1}
+            value={settings.maxRequestToolBatches}
+            onChange={(event) => updateBudget('maxRequestToolBatches', event.target.value)}
+          />
         </label>
       </div>
     </div>

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ApiRequestError,
+  addPrimitive as addPrimitiveApi,
   getThreadStreamSession,
   retryChatStream,
   resumeChatStream,
@@ -13,6 +14,8 @@ import {
   getSceneBlend,
   listSceneBlendFiles,
   getSceneBlendFile,
+  deleteSceneObject as deleteSceneObjectApi,
+  transformSceneObject as transformSceneObjectApi,
   deleteThread as deleteThreadApi,
   deleteAllThreads as deleteAllThreadsApi,
   getHealth,
@@ -22,14 +25,16 @@ import {
   renameThreadTitle as renameThreadTitleApi,
   uploadThreadImages,
   listThreadImages,
-  getExamplePrompts,
   getMcpTools,
   getVlmModels,
   getHeadlessSessionCapacity,
   releaseThreadRuntime
 } from './api/client'
 import type {
+  AddPrimitiveInfo,
+  AddPrimitiveRequest,
   BlendFileEntry,
+  DeleteSceneObjectInfo,
   GraphNodeStream,
   HeadlessSessionCapacityInfo,
   HistoryMessage,
@@ -61,7 +66,16 @@ import {
   saveSettings,
   saveThreads
 } from './state/storage'
-import type { Message, PendingImageAttachment, SceneHierarchyNode, Thread } from './state/types'
+import type {
+  Message,
+  PendingImageAttachment,
+  SceneHierarchyNode,
+  SceneObjectReference,
+  SceneObjectReferenceInsertion,
+  SceneObjectTransformUpdate,
+  Settings,
+  Thread
+} from './state/types'
 import {
   applyStreamingDeltaWithId,
   extractAssistantToolCalls,
@@ -74,6 +88,7 @@ import {
 } from './utils/message'
 import type { AssistantToolCall } from './utils/message'
 import { downloadBlob } from './utils/download'
+import { CONSOLE_EXAMPLES, EXAMPLE_PROMPTS, type ConsoleExample } from './data/examples'
 import './App.css'
 
 type ThreadLoadingState = {
@@ -93,6 +108,34 @@ type StartThreadStreamRunArgs = {
     signal: AbortSignal,
     handleSessionStateChange: (state: { streamRequestId: string | null; lastEventId: number }) => void
   ) => Promise<void>
+}
+
+type WelcomeExampleLaunch = {
+  prompt: string
+  fastMode?: boolean
+  referenceImageUrls?: string[]
+  vlmProvider?: string
+  vlmModel?: string
+  providerThinking?: boolean
+}
+
+type RequestBudgetOverrides = {
+  maxRequestAgentTurns?: number
+  maxRequestToolBatches?: number
+}
+
+type AgentTurnLimitNotice = {
+  threadId: string
+  turnId: string
+  limit: number | null
+}
+
+type ContinueTurnLimitDialogState = {
+  threadId: string
+  turnId: string
+  proposedTurns: string
+  currentLimit: number | null
+  error: string | null
 }
 
 function hasLocalStreamingMessages(thread: Thread | null | undefined): boolean {
@@ -124,6 +167,120 @@ function createThreadLoadingState(): ThreadLoadingState {
     gltf: false,
     download: false
   }
+}
+
+function providerSupportsThinking(provider: string | null | undefined): boolean {
+  const normalized = (provider ?? '').trim().toLowerCase()
+  return normalized === 'gemini' || normalized === 'qwen'
+}
+
+function resolveProviderThinkingDefault(
+  provider: string | null | undefined,
+  settings: Settings | null | undefined
+): boolean | null {
+  if (!providerSupportsThinking(provider)) {
+    return null
+  }
+  return settings?.providerThinkingDefault ?? true
+}
+
+function normalizeOptionalString(value: string | null | undefined, { lower = false }: { lower?: boolean } = {}) {
+  if (typeof value !== 'string') {
+    return undefined
+  }
+  const normalized = value.trim()
+  if (!normalized) {
+    return undefined
+  }
+  return lower ? normalized.toLowerCase() : normalized
+}
+
+function isOpenTodoStatus(status: TodoItem['status']): boolean {
+  return status === 'pending' || status === 'in_progress'
+}
+
+function normalizeActiveTodoId(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+function coerceTodoItems(value: unknown): TodoItem[] | null {
+  if (!Array.isArray(value)) {
+    return null
+  }
+  const todos: TodoItem[] = []
+  value.forEach((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return
+    }
+    const maybe = entry as Record<string, unknown>
+    const id = typeof maybe.id === 'string' ? maybe.id.trim() : ''
+    const description = typeof maybe.description === 'string' ? maybe.description.trim() : ''
+    const status = typeof maybe.status === 'string' ? maybe.status.trim() : ''
+    if (!id || !description || !status) {
+      return
+    }
+    todos.push({
+      id,
+      description,
+      status: status as TodoItem['status'],
+      created_at: typeof maybe.created_at === 'string' ? maybe.created_at : undefined,
+      completed_at:
+        typeof maybe.completed_at === 'string' || maybe.completed_at === null
+          ? maybe.completed_at
+          : undefined
+    })
+  })
+  return todos
+}
+
+function resolveThreadActiveTodoId(
+  todos: TodoItem[],
+  preferred: string | null | undefined
+): string | null {
+  if (preferred) {
+    const matched = todos.find((todo) => todo.id === preferred)
+    if (matched) {
+      return preferred
+    }
+  }
+  const firstOpen = todos.find((todo) => isOpenTodoStatus(todo.status))
+  return firstOpen?.id ?? null
+}
+
+function resolveNextActiveThreadId(current: string | null, threads: Thread[]): string | null {
+  if (current === null) {
+    return null
+  }
+  if (current && threads.some((thread) => thread.id === current)) {
+    return current
+  }
+  return getDefaultActiveThreadId(threads)
+}
+
+async function createPendingAttachmentsFromExample(
+  example: WelcomeExampleLaunch
+): Promise<PendingImageAttachment[]> {
+  const imageUrls = example.referenceImageUrls?.filter((url) => url.trim().length > 0) ?? []
+  if (imageUrls.length === 0) {
+    return []
+  }
+  const attachments = await Promise.all(
+    imageUrls.map(async (url, index) => {
+      const response = await fetch(url)
+      if (!response.ok) {
+        throw new Error(`Failed to load example image (${response.status})`)
+      }
+      const blob = await response.blob()
+      const filename = decodeURIComponent(url.split('/').pop() ?? `example-${index + 1}`)
+      return {
+        file: new File([blob], filename, {
+          type: blob.type || 'application/octet-stream'
+        }),
+        previewUrl: url
+      }
+    })
+  )
+  return attachments
 }
 
 function formatSceneActionError(error: unknown, actionLabel: string): string {
@@ -168,6 +325,61 @@ function formatStreamFailureMessage(error: unknown): string {
     '',
     `Details: ${detail}`
   ].join('\n')
+}
+
+function normalizeBudgetOverride(value: number | undefined, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return fallback
+  }
+  const rounded = Math.round(value)
+  if (rounded === -1) {
+    return -1
+  }
+  return Math.max(1, rounded)
+}
+
+function findLatestAgentTurnLimitNotice(
+  thread: Thread | null,
+  isStreaming: boolean
+): AgentTurnLimitNotice | null {
+  if (!thread || isStreaming) {
+    return null
+  }
+  let limit: number | null = null
+  let matched = false
+  for (let index = (thread.graphEvents ?? []).length - 1; index >= 0; index -= 1) {
+    const patch = thread.graphEvents?.[index]?.state_patch
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+      continue
+    }
+    const reason = typeof patch.request_stop_reason === 'string' ? patch.request_stop_reason.trim() : ''
+    if (!reason) {
+      continue
+    }
+    if (reason !== 'max_request_agent_turns_reached') {
+      return null
+    }
+    matched = true
+    if (typeof patch.max_request_agent_turns === 'number' && Number.isFinite(patch.max_request_agent_turns)) {
+      limit = patch.max_request_agent_turns
+    }
+    break
+  }
+  if (!matched) {
+    return null
+  }
+  const lastUserTurnId = thread.messages
+    .slice()
+    .reverse()
+    .find((message) => message.role === 'user' && typeof message.turnId === 'string' && message.turnId.trim())?.turnId
+  if (!lastUserTurnId) {
+    return null
+  }
+  return {
+    threadId: thread.id,
+    turnId: lastUserTurnId,
+    limit
+  }
 }
 
 function formatThreadCreateError(error: unknown): string {
@@ -340,6 +552,11 @@ function historyMessageToUiMessage(message: HistoryMessage): Message {
     toolPayload: message.tool_payload,
     toolMedia: message.tool_media?.map((media) => ({ kind: 'url' as const, value: media.value })) ?? [],
     attachedImages: message.attached_images ?? [],
+    referencedObjects: message.referenced_objects?.map((reference) => ({
+      backendObjectId: reference.backend_object_id,
+      displayName: reference.display_name,
+      objectType: reference.object_type ?? null
+    })) ?? [],
     status: 'final'
   }
 }
@@ -358,6 +575,7 @@ function applyThreadSummary(current: Thread | undefined, summary: ThreadSummaryI
       updatedAtMs: summaryUpdatedAtMs || undefined,
       messages: [],
       todos: [],
+      activeTodoId: null,
       renders: [],
       gltfUrl: null,
       sceneManifest: null,
@@ -393,12 +611,18 @@ function applyThreadHistory(current: Thread, history: ThreadHistoryInfo): Thread
   const pendingStreamingMessages = current.messages.filter(
     (message) => message.status === 'streaming' && !historyMessageIds.has(message.id)
   )
+  const historyTodos = history.todos ?? current.todos
+  const preferredActiveTodoId =
+    typeof history.active_todo_id === 'string' && history.active_todo_id.trim()
+      ? history.active_todo_id.trim()
+      : (current.activeTodoId ?? null)
   return {
     ...current,
     title: current.titleEditedManually ? current.title : history.title || current.title,
     updatedAtMs: historyUpdatedAtMs || current.updatedAtMs,
     messages: [...historyMessages, ...pendingStreamingMessages],
-    todos: history.todos ?? current.todos,
+    todos: historyTodos,
+    activeTodoId: resolveThreadActiveTodoId(historyTodos, preferredActiveTodoId),
     sceneRevision: history.scene_revision ?? current.sceneRevision ?? null,
     threadMetrics: history.thread_metrics ?? current.threadMetrics ?? null,
     turnMetricsByTurnId: history.turn_metrics_by_turn_id ?? current.turnMetricsByTurnId ?? {}
@@ -653,21 +877,24 @@ function App() {
   const MCP_REQUEST_TIMEOUT_MS = 30000
   const VLM_REQUEST_TIMEOUT_MS = 10000
   const MIN_TOOL_SHIMMER_MS = 400
-  const MAX_EXAMPLE_PROMPTS = 10
   const [threads, setThreads] = useState<Thread[]>(() => loadThreads())
   const [activeThreadId, setActiveThreadId] = useState<string | null>(() => loadActiveThreadId())
   const [settings, setSettings] = useState(() => loadSettings())
   const [isStreaming, setIsStreaming] = useState(false)
   const [isSending, setIsSending] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [continueTurnLimitDialog, setContinueTurnLimitDialog] = useState<ContinueTurnLimitDialogState | null>(null)
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
   const [isStorageHydrated, setIsStorageHydrated] = useState(false)
   const [backendStatus, setBackendStatus] = useState<'online' | 'offline' | 'checking'>('checking')
   const [backendMode, setBackendMode] = useState<'headless' | 'local-client' | null>(null)
   const [fastModeAvailable, setFastModeAvailable] = useState(false)
   const [fastModeDefault, setFastModeDefault] = useState(false)
-  const [examplePrompts, setExamplePrompts] = useState<string[]>([])
   const [promptHistory, setPromptHistory] = useState<string[]>(() => loadPromptHistory())
+  const [pendingReferenceInsertion, setPendingReferenceInsertion] = useState<{
+    threadId: string
+    insertion: SceneObjectReferenceInsertion
+  } | null>(null)
   const [mcpToolsByThread, setMcpToolsByThread] = useState<Record<string, string[]>>({})
   const [mcpToolHintsByThread, setMcpToolHintsByThread] = useState<Record<string, Record<string, string>>>({})
   const [mcpToolsErrorByThread, setMcpToolsErrorByThread] = useState<Record<string, string | null>>({})
@@ -682,9 +909,11 @@ function App() {
   const [streamStatusByThread, setStreamStatusByThread] = useState<Record<string, 'streaming' | 'complete'>>({})
   const [creatingThread, setCreatingThread] = useState(false)
   const [releasingThreadId, setReleasingThreadId] = useState<string | null>(null)
+  const [claimingThreadId, setClaimingThreadId] = useState<string | null>(null)
   const [threadCreateError, setThreadCreateError] = useState<string | null>(null)
   const [threadCreateHint, setThreadCreateHint] = useState<string | null>(null)
-  const [pendingWelcomePrompt, setPendingWelcomePrompt] = useState<string | null>(null)
+  const hintDismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [pendingWelcomeExample, setPendingWelcomeExample] = useState<WelcomeExampleLaunch | null>(null)
   const [headlessQuotaInfo, setHeadlessQuotaInfo] = useState<{ inUse: number; quota: number } | null>(null)
   const streamAbortRef = useRef<AbortController | null>(null)
   const healthAbortRef = useRef<AbortController | null>(null)
@@ -706,7 +935,10 @@ function App() {
   const saveThreadsTimerRef = useRef<number | null>(null)
   const threadsRef = useRef(threads)
   const loadingRef = useRef<Record<string, ThreadLoadingState>>({})
+  const [sceneFetchCooldownUntilByThread, setSceneFetchCooldownUntilByThread] = useState<Record<string, number>>({})
   const autoFetchLastRunRef = useRef<Record<string, number>>({})
+  const autoFetchSuppressedUntilRef = useRef<Record<string, number>>({})
+  const autoFetchCooldownTimerRef = useRef<Record<string, number>>({})
   const runtimeOccupancyRef = useRef<Record<string, boolean>>({})
   const resumingThreadIdRef = useRef<string | null>(null)
   const stopRequestedThreadsRef = useRef<Set<string>>(new Set())
@@ -744,6 +976,12 @@ function App() {
     () => (activeThread ? sceneActionErrorByThread[activeThread.id] ?? null : null),
     [activeThread, sceneActionErrorByThread]
   )
+  const activeThreadAgentTurnLimitNotice = useMemo(
+    () => findLatestAgentTurnLimitNotice(activeThread, activeThreadIsStreaming),
+    [activeThread, activeThreadIsStreaming]
+  )
+  const examplePrompts = EXAMPLE_PROMPTS
+  const consoleExamples = CONSOLE_EXAMPLES.slice(0, 4)
   const updateThread = useCallback(
     (
       threadId: string,
@@ -869,6 +1107,19 @@ function App() {
     [updateThread]
   )
 
+  useEffect(() => {
+    if (!continueTurnLimitDialog) {
+      return
+    }
+    if (
+      !activeThreadAgentTurnLimitNotice ||
+      continueTurnLimitDialog.threadId !== activeThreadAgentTurnLimitNotice.threadId ||
+      continueTurnLimitDialog.turnId !== activeThreadAgentTurnLimitNotice.turnId
+    ) {
+      setContinueTurnLimitDialog(null)
+    }
+  }, [activeThreadAgentTurnLimitNotice, continueTurnLimitDialog])
+
   const applyHeadlessCapacity = useCallback((capacity: HeadlessSessionCapacityInfo) => {
     const occupancyByThread = new Map(
       capacity.occupying_threads.map((entry) => [entry.thread_id, entry] as const)
@@ -926,12 +1177,7 @@ function App() {
       const nextThreads = reconcileThreadsWithBackend(threadsRef.current, threadList.summaries)
       setThreads(nextThreads)
       saveThreads(nextThreads)
-      setActiveThreadId((current) => {
-        if (current && nextThreads.some((thread) => thread.id === current)) {
-          return current
-        }
-        return getDefaultActiveThreadId(nextThreads)
-      })
+      setActiveThreadId((current) => resolveNextActiveThreadId(current, nextThreads))
       return threadList
     },
     [backendStatus, isStorageHydrated, settings.backendUrl]
@@ -949,7 +1195,8 @@ function App() {
       }
       setReleasingThreadId(threadId)
       if (!options?.silent) {
-        setThreadCreateHint('Releasing runtime resources for this conversation...')
+        if (hintDismissTimerRef.current) clearTimeout(hintDismissTimerRef.current)
+        setThreadCreateHint('Releasing...')
       }
       try {
         await releaseThreadRuntime(settings.backendUrl, threadId)
@@ -962,7 +1209,13 @@ function App() {
           await refreshHeadlessCapacity()
         }
         if (!options?.silent) {
-          setThreadCreateHint('Runtime resources released. You can create a new chat now.')
+          setThreadCreateHint('Runtime released.')
+          if (hintDismissTimerRef.current) clearTimeout(hintDismissTimerRef.current)
+          hintDismissTimerRef.current = setTimeout(() => {
+            setThreadCreateHint((current) =>
+              current === 'Runtime released.' ? null : current
+            )
+          }, 3000)
         }
         return true
       } catch (error) {
@@ -981,6 +1234,61 @@ function App() {
     [refreshHeadlessCapacity, settings.backendUrl, updateThread]
   )
 
+  const claimRuntimeForThread = useCallback(
+    async (threadId: string): Promise<boolean> => {
+      if (!settings.backendUrl || backendMode !== 'headless') {
+        return false
+      }
+      if (runtimeOccupancyRef.current[threadId]) {
+        return true
+      }
+      setClaimingThreadId(threadId)
+      try {
+        const capacity = await getHeadlessSessionCapacity(settings.backendUrl)
+        applyHeadlessCapacity(capacity)
+        const alreadyOccupying = capacity.occupying_threads.some(
+          (entry) => entry.thread_id === threadId && entry.occupying_resources
+        )
+        if (!alreadyOccupying && capacity.in_use >= capacity.quota) {
+          const oldest = [...capacity.occupying_threads]
+            .filter((entry) => entry.thread_id !== threadId)
+            .sort((a, b) => a.last_active_ms - b.last_active_ms)[0]
+          if (oldest) {
+            await releaseThreadRuntimeForThread(oldest.thread_id, { silent: true })
+          }
+        }
+        const controller = new AbortController()
+        const timerId = window.setTimeout(() => controller.abort(), MCP_REQUEST_TIMEOUT_MS)
+        try {
+          const toolInfo = await getMcpTools(settings.backendUrl, threadId, controller.signal)
+          runtimeOccupancyRef.current[threadId] = true
+          setMcpToolsByThread((prev) => ({ ...prev, [threadId]: toolInfo.tools }))
+          setMcpToolHintsByThread((prev) => ({ ...prev, [threadId]: toolInfo.tool_hints }))
+          setMcpToolsErrorByThread((prev) => ({ ...prev, [threadId]: null }))
+        } finally {
+          window.clearTimeout(timerId)
+        }
+        const latest = await getHeadlessSessionCapacity(settings.backendUrl)
+        applyHeadlessCapacity(latest)
+        const entry = latest.occupying_threads.find((e) => e.thread_id === threadId)
+        const occupying = entry ? Boolean(entry.occupying_resources) : true
+        runtimeOccupancyRef.current[threadId] = occupying
+        updateThread(threadId, (thread) => ({
+          ...thread,
+          occupyingResources: occupying,
+          lastRuntimeActiveMs:
+            typeof entry?.last_active_ms === 'number' ? entry.last_active_ms : thread.lastRuntimeActiveMs
+        }))
+        return true
+      } catch {
+        return false
+      } finally {
+        setClaimingThreadId((current) => (current === threadId ? null : current))
+      }
+    },
+    [applyHeadlessCapacity, backendMode, releaseThreadRuntimeForThread, settings.backendUrl, updateThread]
+  )
+
   // Load data from IndexedDB on mount
   useEffect(() => {
     let mounted = true
@@ -992,11 +1300,7 @@ function App() {
         ])
         if (mounted) {
           setThreads(loadedThreads)
-          setActiveThreadId((current) =>
-            current && loadedThreads.some((thread) => thread.id === current)
-              ? current
-              : getDefaultActiveThreadId(loadedThreads)
-          )
+          setActiveThreadId((current) => resolveNextActiveThreadId(current, loadedThreads))
           setSettings(loadedSettings)
         }
       } finally {
@@ -1188,37 +1492,6 @@ function App() {
 
   useEffect(() => {
     let cancelled = false
-    if (!settings.backendUrl) {
-      setExamplePrompts([])
-      return () => {
-        cancelled = true
-      }
-    }
-    if (backendStatus !== 'online') {
-      return () => {
-        cancelled = true
-      }
-    }
-    const fetchPrompts = async () => {
-      try {
-        const prompts = await getExamplePrompts(settings.backendUrl)
-        if (!cancelled) {
-          setExamplePrompts(prompts.slice(0, MAX_EXAMPLE_PROMPTS))
-        }
-      } catch {
-        if (!cancelled) {
-          setExamplePrompts([])
-        }
-      }
-    }
-    void fetchPrompts()
-    return () => {
-      cancelled = true
-    }
-  }, [backendStatus, settings.backendUrl, MAX_EXAMPLE_PROMPTS])
-
-  useEffect(() => {
-    let cancelled = false
     if (!settings.backendUrl || backendStatus !== 'online' || backendMode !== 'headless') {
       setHeadlessQuotaInfo(null)
       setThreadCreateHint(null)
@@ -1407,8 +1680,10 @@ function App() {
         fastMode: fastModeAvailable ? fastModeDefault : undefined,
         vlmProvider: initialProvider,
         vlmModel: initialModel,
+        providerThinking: resolveProviderThinkingDefault(initialProvider, settingsRef.current),
         vlmLocked: false,
         todos: [],
+        activeTodoId: null,
         scene: null,
         renders: [],
         gltfUrl: null,
@@ -1433,6 +1708,20 @@ function App() {
     }
   }
 
+  const launchConsoleExample = (example: ConsoleExample) => {
+    setPendingWelcomeExample({
+      prompt: example.prompt,
+      fastMode: example.fastMode,
+      vlmProvider: example.vlmProvider,
+      vlmModel: example.vlmModel,
+      providerThinking: example.providerThinking,
+      referenceImageUrls: example.referenceImages
+        .map((image) => image.url)
+        .filter((url): url is string => typeof url === 'string' && url.length > 0)
+    })
+    void createThread()
+  }
+
   const deleteThread = async (threadId: string) => {
     setThreadCreateError(null)
     const target = threadsRef.current.find((thread) => thread.id === threadId)
@@ -1444,6 +1733,17 @@ function App() {
     saveThreads(nextThreads)
     loadedThreadImagesRef.current.delete(threadId)
     delete autoFetchLastRunRef.current[threadId]
+    if (autoFetchCooldownTimerRef.current[threadId]) {
+      window.clearTimeout(autoFetchCooldownTimerRef.current[threadId])
+      delete autoFetchCooldownTimerRef.current[threadId]
+    }
+    delete autoFetchSuppressedUntilRef.current[threadId]
+    setSceneFetchCooldownUntilByThread((current) => {
+      if (!(threadId in current)) return current
+      const next = { ...current }
+      delete next[threadId]
+      return next
+    })
     delete sceneChangeRef.current[threadId]
     if (rendersAbortRef.current[threadId]) {
       rendersAbortRef.current[threadId].abort()
@@ -1541,6 +1841,10 @@ function App() {
 
     loadedThreadImagesRef.current.clear()
     autoFetchLastRunRef.current = {}
+    for (const timer of Object.values(autoFetchCooldownTimerRef.current)) window.clearTimeout(timer)
+    autoFetchCooldownTimerRef.current = {}
+    autoFetchSuppressedUntilRef.current = {}
+    setSceneFetchCooldownUntilByThread({})
     sceneChangeRef.current = {}
     for (const ctrl of Object.values(rendersAbortRef.current)) ctrl.abort()
     rendersAbortRef.current = {}
@@ -1632,7 +1936,11 @@ function App() {
         return {
           ...thread,
           vlmProvider: providerOption.provider,
-          vlmModel: model
+          vlmModel: model,
+          providerThinking:
+            typeof thread.providerThinking === 'boolean'
+              ? thread.providerThinking
+              : resolveProviderThinkingDefault(providerOption.provider, settingsRef.current)
         }
       })
     },
@@ -1653,6 +1961,18 @@ function App() {
     [activeThreadId, updateThread]
   )
 
+  const handleProviderThinkingToggle = useCallback(
+    (enabled: boolean) => {
+      if (!activeThreadId) return
+      setSettings((current) => ({ ...current, providerThinkingDefault: enabled }))
+      updateThread(activeThreadId, (thread) => ({
+        ...thread,
+        providerThinking: enabled
+      }))
+    },
+    [activeThreadId, updateThread]
+  )
+
   const handleFastModeToggle = useCallback(
     (enabled: boolean) => {
       if (!activeThreadId) return
@@ -1664,6 +1984,19 @@ function App() {
     [activeThreadId, updateThread]
   )
 
+  const openContinueTurnLimitDialog = useCallback(() => {
+    if (!activeThreadAgentTurnLimitNotice) {
+      return
+    }
+    setContinueTurnLimitDialog({
+      threadId: activeThreadAgentTurnLimitNotice.threadId,
+      turnId: activeThreadAgentTurnLimitNotice.turnId,
+      proposedTurns: String(settings.maxRequestAgentTurns),
+      currentLimit: activeThreadAgentTurnLimitNotice.limit,
+      error: null
+    })
+  }, [activeThreadAgentTurnLimitNotice, settings.maxRequestAgentTurns])
+
   const handleSceneHierarchyChange = useCallback(
     (threadId: string, hierarchy: SceneHierarchyNode[]) => {
       updateThread(threadId, (thread) => ({
@@ -1672,6 +2005,27 @@ function App() {
       }))
     },
     [updateThread]
+  )
+
+  const handleRefSceneObjectInChat = useCallback(
+    (threadId: string, node: SceneHierarchyNode) => {
+      if (!node.backendObjectId) {
+        return
+      }
+      const reference: SceneObjectReference = {
+        backendObjectId: node.backendObjectId,
+        displayName: node.backendObjectName ?? node.name,
+        objectType: node.type
+      }
+      setPendingReferenceInsertion({
+        threadId,
+        insertion: {
+          key: `${threadId}:${node.backendObjectId}:${Date.now()}`,
+          reference
+        }
+      })
+    },
+    []
   )
 
   const renameThread = useCallback(
@@ -1762,6 +2116,80 @@ function App() {
     return {
       selectedProvider,
       selectedModel
+    }
+  }
+
+  function resolveExampleSelection(example: WelcomeExampleLaunch, thread: Thread) {
+    const fallbackSelection = resolveThreadSelection(thread)
+    const normalizedProvider = normalizeOptionalString(example.vlmProvider, { lower: true })
+    const normalizedModel = normalizeOptionalString(example.vlmModel)
+
+    const getProviderOption = (provider: string | undefined) =>
+      provider ? vlmProviders.find((item) => item.provider === provider) : undefined
+
+    const getAllowedModels = (provider: string | undefined) => {
+      const providerOption = getProviderOption(provider)
+      if (!providerOption) {
+        return []
+      }
+      return providerOption.models.length > 0
+        ? providerOption.models
+        : [providerOption.default_model]
+    }
+
+    const findProviderForModel = (model: string | undefined) => {
+      if (!model) {
+        return undefined
+      }
+      return vlmProviders.find((item) => {
+        const models = item.models.length > 0 ? item.models : [item.default_model]
+        return models.includes(model)
+      })
+    }
+
+    let selectedProvider = normalizedProvider
+    let selectedModel = normalizedModel
+
+    if (!selectedProvider && selectedModel) {
+      selectedProvider = findProviderForModel(selectedModel)?.provider
+    }
+
+    if (!selectedProvider) {
+      selectedProvider = fallbackSelection.selectedProvider
+    }
+
+    const providerOption = getProviderOption(selectedProvider)
+    const allowedModels = getAllowedModels(selectedProvider)
+
+    if (!selectedModel) {
+      selectedModel = providerOption?.default_model ?? fallbackSelection.selectedModel
+    } else if (allowedModels.length > 0 && !allowedModels.includes(selectedModel)) {
+      if (!normalizedProvider) {
+        const matchedProvider = findProviderForModel(selectedModel)
+        if (matchedProvider) {
+          selectedProvider = matchedProvider.provider
+        } else {
+          selectedModel = providerOption?.default_model ?? fallbackSelection.selectedModel
+        }
+      } else {
+        selectedModel = providerOption?.default_model ?? fallbackSelection.selectedModel
+      }
+    }
+
+    if (selectedProvider && selectedModel) {
+      return {
+        selectedProvider,
+        selectedModel,
+        providerThinking:
+          typeof example.providerThinking === 'boolean' ? example.providerThinking : undefined
+      }
+    }
+
+    return {
+      selectedProvider: fallbackSelection.selectedProvider,
+      selectedModel: fallbackSelection.selectedModel,
+      providerThinking:
+        typeof example.providerThinking === 'boolean' ? example.providerThinking : undefined
     }
   }
 
@@ -1935,6 +2363,20 @@ function App() {
     }
   }
 
+  const resolveRequestBudgets = useCallback(
+    (overrides?: RequestBudgetOverrides) => ({
+      maxRequestAgentTurns: normalizeBudgetOverride(
+        overrides?.maxRequestAgentTurns,
+        settings.maxRequestAgentTurns
+      ),
+      maxRequestToolBatches: normalizeBudgetOverride(
+        overrides?.maxRequestToolBatches,
+        settings.maxRequestToolBatches
+      )
+    }),
+    [settings.maxRequestAgentTurns, settings.maxRequestToolBatches]
+  )
+
   function startThreadStreamRun({
     threadId,
     turnId,
@@ -2038,9 +2480,27 @@ function App() {
         const graphEvent: GraphNodeStream = event.graph_node
         updateThread(threadId, (thread) => {
           const nextEvents = [...(thread.graphEvents ?? []), graphEvent]
+          const patchRaw = graphEvent.state_patch
+          const patch =
+            patchRaw && typeof patchRaw === 'object' && !Array.isArray(patchRaw)
+              ? (patchRaw as Record<string, unknown>)
+              : null
+          const patchTodos = patch ? coerceTodoItems(patch.todos) : null
+          const nextTodos = patchTodos ? mergeTodos(thread.todos, patchTodos) : thread.todos
+          const patchHasActiveTodoId = Boolean(
+            patch && Object.prototype.hasOwnProperty.call(patch, 'active_todo_id')
+          )
+          const patchActiveTodoId = patchHasActiveTodoId
+            ? normalizeActiveTodoId(patch?.active_todo_id)
+            : undefined
           return {
             ...thread,
-            graphEvents: nextEvents.slice(-200)
+            graphEvents: nextEvents.slice(-200),
+            todos: nextTodos,
+            activeTodoId: resolveThreadActiveTodoId(
+              nextTodos,
+              patchHasActiveTodoId ? (patchActiveTodoId ?? null) : thread.activeTodoId
+            )
           }
         })
       }
@@ -2159,10 +2619,14 @@ function App() {
       }
 
       if (event.todos && event.todos.length > 0) {
-        updateThread(threadId, (thread) => ({
-          ...thread,
-          todos: mergeTodos(thread.todos, event.todos || [])
-        }))
+        updateThread(threadId, (thread) => {
+          const nextTodos = mergeTodos(thread.todos, event.todos || [])
+          return {
+            ...thread,
+            todos: nextTodos,
+            activeTodoId: resolveThreadActiveTodoId(nextTodos, thread.activeTodoId)
+          }
+        })
       }
 
       if (typeof event.scene_has_change === 'boolean') {
@@ -2641,7 +3105,17 @@ function App() {
     settings.backendUrl
   ])
 
-  const handleSend = async (text: string, pendingImages: PendingImageAttachment[] = []) => {
+  const handleSend = async (
+    text: string,
+    pendingImages: PendingImageAttachment[] = [],
+    referencedObjects: SceneObjectReference[] = [],
+    options?: {
+      fastModeOverride?: boolean
+      vlmProviderOverride?: string
+      vlmModelOverride?: string
+      providerThinkingOverride?: boolean
+    }
+  ) => {
     if (!activeThread) {
       return false
     }
@@ -2680,7 +3154,16 @@ function App() {
       }
     }
     const files = pendingImages.map((image) => image.file)
-    const { selectedProvider, selectedModel } = resolveThreadSelection(activeThread)
+    const baseSelection = resolveThreadSelection(activeThread)
+    const selectedProvider =
+      normalizeOptionalString(options?.vlmProviderOverride, { lower: true }) ?? baseSelection.selectedProvider
+    const selectedModel = normalizeOptionalString(options?.vlmModelOverride) ?? baseSelection.selectedModel
+    const selectedProviderThinking =
+      typeof options?.providerThinkingOverride === 'boolean'
+        ? options.providerThinkingOverride
+        : typeof activeThread.providerThinking === 'boolean'
+          ? activeThread.providerThinking
+          : resolveProviderThinkingDefault(selectedProvider || activeThread.vlmProvider, settingsRef.current)
     let attachedImageIds: string[] | undefined
     const now = Date.now()
     const turnId = `msg-${now}-user`
@@ -2692,7 +3175,8 @@ function App() {
       role: 'user',
       content: text,
       createdAt: now,
-      attachedImages: userAttachedImages
+      attachedImages: userAttachedImages,
+      referencedObjects
     }
     const assistantId = `msg-${now}-assistant`
     const assistantMessage = createAssistantPlaceholder(assistantId, now, turnId)
@@ -2714,8 +3198,13 @@ function App() {
         return {
           ...thread,
           ...(titleUpdate ?? {}),
+          fastMode:
+            typeof options?.fastModeOverride === 'boolean'
+              ? options.fastModeOverride
+              : thread.fastMode,
           vlmProvider: selectedProvider || thread.vlmProvider,
           vlmModel: selectedModel || thread.vlmModel,
+          providerThinking: selectedProviderThinking,
           vlmLocked: thread.vlmLocked ?? false,
           updatedAtMs: now,
           graphEvents: [],
@@ -2783,10 +3272,16 @@ function App() {
           threadId,
           turnId,
           enabledMcpTools: execution.enabledMcpTools,
-          fastMode: execution.requestedFastMode,
+          fastMode:
+            typeof options?.fastModeOverride === 'boolean'
+              ? options.fastModeOverride
+              : execution.requestedFastMode,
           attachedImageIds,
+          referencedObjects,
           vlmProvider: execution.selectedProvider,
           vlmModel: execution.selectedModel,
+          providerThinking: selectedProviderThinking ?? undefined,
+          ...resolveRequestBudgets(),
           signal,
           onEvent: handleEvent,
           onSessionStateChange: handleSessionStateChange
@@ -2796,7 +3291,7 @@ function App() {
     return true
   }
 
-  const handleRetryTurn = async (turnId: string) => {
+  const handleRetryTurn = async (turnId: string, budgetOverrides?: RequestBudgetOverrides) => {
     if (!activeThread || activeThreadIsStreaming) {
       return
     }
@@ -2855,12 +3350,45 @@ function App() {
           fastMode: execution.requestedFastMode,
           vlmProvider: execution.selectedProvider,
           vlmModel: execution.selectedModel,
+          providerThinking:
+            typeof activeThread.providerThinking === 'boolean'
+              ? activeThread.providerThinking
+              : undefined,
+          ...resolveRequestBudgets(budgetOverrides),
           signal,
           onEvent: handleEvent,
           onSessionStateChange: handleSessionStateChange
         })
     })
   }
+
+  const handleSaveAndContinueAfterTurnLimit = useCallback(async () => {
+    if (!continueTurnLimitDialog) {
+      return
+    }
+    const parsed = Number.parseInt(continueTurnLimitDialog.proposedTurns, 10)
+    if (!Number.isFinite(parsed) || parsed === 0 || parsed < -1) {
+      setContinueTurnLimitDialog((current) =>
+        current ? { ...current, error: 'Enter -1 for unlimited or a positive integer.' } : current
+      )
+      return
+    }
+    const nextMaxRequestAgentTurns = parsed === -1 ? -1 : Math.max(1, parsed)
+    const nextSettings: Settings = {
+      ...settingsRef.current,
+      maxRequestAgentTurns: nextMaxRequestAgentTurns
+    }
+    setSettings(nextSettings)
+    const { threadId, turnId } = continueTurnLimitDialog
+    setContinueTurnLimitDialog(null)
+    if (activeThreadId !== threadId) {
+      return
+    }
+    await handleRetryTurn(turnId, {
+      maxRequestAgentTurns: nextMaxRequestAgentTurns,
+      maxRequestToolBatches: nextSettings.maxRequestToolBatches
+    })
+  }, [activeThreadId, continueTurnLimitDialog, handleRetryTurn])
 
   const isHeadlessRuntimeClaimed = useCallback(
     (threadId: string): boolean => {
@@ -2888,12 +3416,46 @@ function App() {
   )
 
   useEffect(() => {
-    if (pendingWelcomePrompt && activeThread && activeThread.messages.length === 0 && !creatingThread) {
-      const prompt = pendingWelcomePrompt
-      setPendingWelcomePrompt(null)
-      void handleSend(prompt)
+    if (!pendingWelcomeExample || !activeThread || activeThread.messages.length > 0 || creatingThread) {
+      return
     }
-  }, [pendingWelcomePrompt, activeThread, creatingThread]) // eslint-disable-line react-hooks/exhaustive-deps
+    let cancelled = false
+    const launch = async () => {
+      const exampleSelection = resolveExampleSelection(pendingWelcomeExample, activeThread)
+      try {
+        const attachments = await createPendingAttachmentsFromExample(pendingWelcomeExample)
+        if (cancelled) {
+          return
+        }
+        setPendingWelcomeExample(null)
+        await handleSend(pendingWelcomeExample.prompt, attachments, [], {
+          fastModeOverride: pendingWelcomeExample.fastMode,
+          vlmProviderOverride: exampleSelection.selectedProvider,
+          vlmModelOverride: exampleSelection.selectedModel,
+          providerThinkingOverride: exampleSelection.providerThinking
+        })
+      } catch (error) {
+        console.warn('Failed to prepare example assets', error)
+        if (cancelled) {
+          return
+        }
+        setPendingWelcomeExample(null)
+        await handleSend(pendingWelcomeExample.prompt, [], [], {
+          fastModeOverride: pendingWelcomeExample.fastMode,
+          vlmProviderOverride: exampleSelection.selectedProvider,
+          vlmModelOverride: exampleSelection.selectedModel,
+          providerThinkingOverride: exampleSelection.providerThinking
+        })
+      }
+    }
+    void launch()
+    return () => {
+      cancelled = true
+    }
+    // `handleSend` is intentionally omitted here. This launch effect only reacts to a queued
+    // welcome example binding to a freshly created empty thread.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeThread, creatingThread, pendingWelcomeExample])
 
   const fetchRenders = useCallback(async (threadId?: string, includeLocalWork: boolean = false) => {
     const targetId = threadId ?? activeThread?.id
@@ -2962,10 +3524,21 @@ function App() {
     }
   }, [activeThread?.id, requireHeadlessRuntimeForAction, settings.backendUrl, setSceneActionError, setThreadLoading, updateThread])
 
+  const refreshSceneManifest = useCallback(
+    async (threadId: string, signal?: AbortSignal) => {
+      const manifest = await getThreadSceneArtifactManifest(settings.backendUrl, threadId, signal)
+      updateThread(threadId, (thread) => applySceneManifest(thread, manifest))
+      return manifest
+    },
+    [settings.backendUrl, updateThread]
+  )
+
   const triggerAutoFetch = useCallback(
     (threadId: string, force: boolean = false) => {
       if (!settingsRef.current.autoRefreshScene || backendStatus !== 'online') return false
       if (!isHeadlessRuntimeClaimed(threadId)) return false
+      const suppressedUntil = autoFetchSuppressedUntilRef.current[threadId]
+      if (suppressedUntil && Date.now() < suppressedUntil) return false
       const currentLoading = loadingRef.current[threadId] ?? createThreadLoadingState()
       if (currentLoading.renders || currentLoading.gltf) return false
 
@@ -2983,6 +3556,39 @@ function App() {
       return true
     },
     [backendStatus, fetchRenders, fetchGltf, isHeadlessRuntimeClaimed]
+  )
+
+  const AUTO_FETCH_TRANSFORM_COOLDOWN_MS = 3000
+
+  const handleTransformDragChange = useCallback(
+    (threadId: string, dragging: boolean) => {
+      if (dragging) {
+        if (gltfAbortRef.current[threadId]) {
+          gltfAbortRef.current[threadId].abort()
+        }
+        autoFetchSuppressedUntilRef.current[threadId] = Infinity
+        setSceneFetchCooldownUntilByThread((current) => ({ ...current, [threadId]: Infinity }))
+        if (autoFetchCooldownTimerRef.current[threadId]) {
+          window.clearTimeout(autoFetchCooldownTimerRef.current[threadId])
+          delete autoFetchCooldownTimerRef.current[threadId]
+        }
+      } else {
+        const suppressedUntil = Date.now() + AUTO_FETCH_TRANSFORM_COOLDOWN_MS
+        autoFetchSuppressedUntilRef.current[threadId] = suppressedUntil
+        setSceneFetchCooldownUntilByThread((current) => ({ ...current, [threadId]: suppressedUntil }))
+        autoFetchCooldownTimerRef.current[threadId] = window.setTimeout(() => {
+          delete autoFetchSuppressedUntilRef.current[threadId]
+          delete autoFetchCooldownTimerRef.current[threadId]
+          setSceneFetchCooldownUntilByThread((current) => {
+            if (!(threadId in current)) return current
+            const next = { ...current }
+            delete next[threadId]
+            return next
+          })
+        }, AUTO_FETCH_TRANSFORM_COOLDOWN_MS)
+      }
+    },
+    []
   )
 
   const refreshThreadImages = useCallback(
@@ -3008,7 +3614,7 @@ function App() {
     try {
       let blob: Blob
       if (activeThread.sceneManifest?.gltf_url) {
-        blob = await getThreadSceneArtifactGltf(settings.backendUrl, activeThread.id)
+        blob = await getThreadSceneArtifactGltf(settings.backendUrl, activeThread.sceneManifest.gltf_url)
       } else {
         if (!requireHeadlessRuntimeForAction(activeThread.id, 'downloading GLTF')) {
           return
@@ -3023,6 +3629,188 @@ function App() {
       setThreadLoading(activeThread.id, { download: false })
     }
   }, [activeThread, requireHeadlessRuntimeForAction, setSceneActionError, setThreadLoading, settings.backendUrl])
+
+  const deleteSceneObjectForThread = useCallback(
+    async (
+      threadId: string,
+      backendObjectId: string,
+      backendObjectName?: string | null
+    ): Promise<DeleteSceneObjectInfo | null> => {
+      if (backendMode !== 'headless') {
+        setSceneActionError(threadId, 'Hierarchy delete is only available in headless mode.')
+        return null
+      }
+      if (!requireHeadlessRuntimeForAction(threadId, 'deleting scene objects')) {
+        return null
+      }
+
+      setThreadLoading(threadId, { scene: true })
+      setSceneActionError(threadId, null)
+      try {
+        const deleteResult = await deleteSceneObjectApi(settings.backendUrl, threadId, {
+          backend_object_id: backendObjectId,
+          backend_object_name: backendObjectName ?? null,
+          mode: 'cascade'
+        })
+        const refreshResults = await Promise.allSettled([
+          refreshSceneManifest(threadId),
+          fetchGltf(threadId)
+        ])
+        const refreshError = refreshResults.find(
+          (result): result is PromiseRejectedResult => result.status === 'rejected'
+        )?.reason
+        if (refreshError) {
+          console.error('Deleted scene object but failed to refresh scene state', refreshError)
+          setSceneActionError(threadId, formatSceneActionError(refreshError, 'Refresh scene after delete'))
+          window.setTimeout(() => {
+            void Promise.allSettled([
+              refreshSceneManifest(threadId),
+              fetchGltf(threadId)
+            ])
+          }, 1200)
+        }
+        updateThread(threadId, (thread) => ({
+          ...thread,
+          sceneRevision: deleteResult.scene_revision ?? thread.sceneRevision ?? null
+        }))
+        return deleteResult
+      } catch (error) {
+        console.error('Failed to delete scene object', error)
+        setSceneActionError(threadId, formatSceneActionError(error, 'Delete object'))
+        return null
+      } finally {
+        setThreadLoading(threadId, { scene: false })
+      }
+    },
+    [
+      backendMode,
+      fetchGltf,
+      refreshSceneManifest,
+      requireHeadlessRuntimeForAction,
+      setSceneActionError,
+      setThreadLoading,
+      settings.backendUrl,
+      updateThread
+    ]
+  )
+
+  const addPrimitiveForThread = useCallback(
+    async (
+      threadId: string,
+      payload: AddPrimitiveRequest
+    ): Promise<AddPrimitiveInfo | null> => {
+      if (backendMode !== 'headless') {
+        setSceneActionError(threadId, 'Add primitive is only available in headless mode.')
+        return null
+      }
+      if (!requireHeadlessRuntimeForAction(threadId, 'adding primitives')) {
+        return null
+      }
+
+      setThreadLoading(threadId, { scene: true })
+      setSceneActionError(threadId, null)
+      try {
+        const addResult = await addPrimitiveApi(settings.backendUrl, threadId, payload)
+        const refreshResults = await Promise.allSettled([
+          refreshSceneManifest(threadId),
+          fetchGltf(threadId)
+        ])
+        const refreshError = refreshResults.find(
+          (result): result is PromiseRejectedResult => result.status === 'rejected'
+        )?.reason
+        if (refreshError) {
+          console.error('Added primitive but failed to refresh scene state', refreshError)
+          setSceneActionError(threadId, formatSceneActionError(refreshError, 'Refresh scene after add'))
+          window.setTimeout(() => {
+            void Promise.allSettled([
+              refreshSceneManifest(threadId),
+              fetchGltf(threadId)
+            ])
+          }, 1200)
+        }
+        updateThread(threadId, (thread) => ({
+          ...thread,
+          sceneRevision: addResult.scene_revision ?? thread.sceneRevision ?? null
+        }))
+        return addResult
+      } catch (error) {
+        console.error('Failed to add primitive', error)
+        setSceneActionError(threadId, formatSceneActionError(error, 'Add primitive'))
+        return null
+      } finally {
+        setThreadLoading(threadId, { scene: false })
+      }
+    },
+    [
+      backendMode,
+      fetchGltf,
+      refreshSceneManifest,
+      requireHeadlessRuntimeForAction,
+      setSceneActionError,
+      setThreadLoading,
+      settings.backendUrl,
+      updateThread
+    ]
+  )
+
+  const transformSceneObjectForThread = useCallback(
+    async (
+      threadId: string,
+      transform: SceneObjectTransformUpdate
+    ): Promise<boolean> => {
+      if (backendMode !== 'headless') {
+        if (transform.commit) {
+          setSceneActionError(threadId, 'Object transform is only available in headless mode.')
+        }
+        return false
+      }
+      if (!requireHeadlessRuntimeForAction(threadId, 'transforming scene objects')) {
+        return false
+      }
+
+      if (transform.commit) {
+        setThreadLoading(threadId, { scene: true })
+        setSceneActionError(threadId, null)
+      }
+
+      try {
+        const transformResult = await transformSceneObjectApi(settings.backendUrl, threadId, {
+          backend_object_id: transform.backendObjectId,
+          backend_object_name: transform.backendObjectName ?? null,
+          world_matrix: transform.worldMatrix,
+          refresh_artifacts: transform.commit
+        })
+
+        if (transform.commit) {
+          await refreshSceneManifest(threadId)
+          updateThread(threadId, (thread) => ({
+            ...thread,
+            sceneRevision: transformResult.scene_revision ?? thread.sceneRevision ?? null
+          }))
+        }
+        return true
+      } catch (error) {
+        console.error('Failed to transform scene object', error)
+        if (transform.commit) {
+          setSceneActionError(threadId, formatSceneActionError(error, 'Transform object'))
+        }
+        return false
+      } finally {
+        if (transform.commit) {
+          setThreadLoading(threadId, { scene: false })
+        }
+      }
+    },
+    [
+      backendMode,
+      refreshSceneManifest,
+      requireHeadlessRuntimeForAction,
+      setSceneActionError,
+      setThreadLoading,
+      settings.backendUrl,
+      updateThread
+    ]
+  )
 
   const downloadBlend = useCallback(async () => {
     if (!activeThread) return
@@ -3048,7 +3836,6 @@ function App() {
   const downloadBlendFile = useCallback(
     async (relativePath: string, filename: string) => {
       if (!activeThread) return
-      if (!requireHeadlessRuntimeForAction(activeThread.id, 'downloading BLEND')) return
       setThreadLoading(activeThread.id, { download: true })
       setSceneActionError(activeThread.id, null)
       try {
@@ -3060,7 +3847,7 @@ function App() {
         setThreadLoading(activeThread.id, { download: false })
       }
     },
-    [activeThread, requireHeadlessRuntimeForAction, setSceneActionError, setThreadLoading, settings.backendUrl]
+    [activeThread, setSceneActionError, setThreadLoading, settings.backendUrl]
   )
 
   useEffect(() => {
@@ -3087,14 +3874,40 @@ function App() {
   const canRunSceneActions =
     Boolean(activeThread) &&
     (backendMode !== 'headless' || Boolean(activeThread?.occupyingResources))
+  const canDeleteHierarchy =
+    Boolean(activeThread) &&
+    backendMode === 'headless' &&
+    Boolean(activeThread?.occupyingResources)
+  const canTransformObjects = canDeleteHierarchy
   const runtimeClaimHint =
     backendMode === 'headless' && activeThread && !activeThread.occupyingResources
       ? 'Runtime and mcp tools will be claimed when you send the next message'
       : null
   const idleSceneActionHint =
     backendMode === 'headless' && activeThread && !activeThread.occupyingResources
-      ? 'Send a message first to claim runtime, then fetch scene/renders.'
+      ? 'Fetch scene/renders.'
       : null
+  const hierarchyDeleteHint =
+    backendMode === 'local-client'
+      ? 'Hierarchy delete is only available in headless mode.'
+      : backendMode === 'headless' && activeThread && !activeThread.occupyingResources
+        ? 'Delete scene objects.'
+        : null
+  const transformActionHint =
+    backendMode === 'local-client'
+      ? 'Object transform is only available in headless mode.'
+      : backendMode === 'headless' && activeThread && !activeThread.occupyingResources
+        ? 'Transform scene objects.'
+        : null
+  const activeSceneFetchCooldownUntil = activeThread
+    ? sceneFetchCooldownUntilByThread[activeThread.id] ?? null
+    : null
+  const sceneFetchCooldownHint =
+    activeSceneFetchCooldownUntil === Infinity
+      ? 'Finish moving the object before refreshing scene assets or renders.'
+      : typeof activeSceneFetchCooldownUntil === 'number' && activeSceneFetchCooldownUntil > Date.now()
+        ? 'Scene assets and renders refresh a few seconds after object transforms settle.'
+        : null
   const quotaHint =
     backendStatus === 'online' && backendMode === 'headless' && headlessQuotaInfo
       ? `Runtime slots in use: ${headlessQuotaInfo.inUse}/${headlessQuotaInfo.quota}`
@@ -3108,6 +3921,15 @@ function App() {
   return (
     <div className="app-shell">
       <aside className={`sidebar ${isSidebarCollapsed ? 'collapsed' : ''}`}>
+        <button
+          className="ghost-btn icon-btn sidebar-toggle-btn"
+          type="button"
+          onClick={() => setIsSidebarCollapsed((prev) => !prev)}
+          aria-label={isSidebarCollapsed ? 'Expand conversation history' : 'Collapse conversation history'}
+          title={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        >
+          {isSidebarCollapsed ? '›' : '‹'}
+        </button>
         <div className="sidebar-header">
           {!isSidebarCollapsed && (
             <div className="sidebar-brand">
@@ -3120,15 +3942,6 @@ function App() {
               </div>
             </div>
           )}
-          <button
-            className="ghost-btn icon-btn sidebar-toggle-btn"
-            type="button"
-            onClick={() => setIsSidebarCollapsed((prev) => !prev)}
-            aria-label={isSidebarCollapsed ? 'Expand conversation history' : 'Collapse conversation history'}
-            title={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          >
-            {isSidebarCollapsed ? '›' : '‹'}
-          </button>
         </div>
         {!isSidebarCollapsed && (
           <>
@@ -3144,11 +3957,17 @@ function App() {
               onNew={() => {
                 void createThread()
               }}
+              onClaimRuntime={
+                backendMode === 'headless'
+                  ? (threadId) => void claimRuntimeForThread(threadId)
+                  : undefined
+              }
               onReleaseRuntime={(threadId) => {
                 void releaseThreadRuntimeForThread(threadId)
               }}
               creating={creatingThread}
               createDisabled={creatingThread || releasingThreadId !== null}
+              claimingThreadId={claimingThreadId}
               releasingThreadId={releasingThreadId}
               createError={threadCreateError}
               createHint={threadCreateHint}
@@ -3218,6 +4037,61 @@ function App() {
           </div>
         )}
 
+        {continueTurnLimitDialog && (
+          <div className="settings-overlay" onClick={() => setContinueTurnLimitDialog(null)}>
+            <div
+              className="settings-card continue-turn-limit-card"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="settings-header">
+                <div className="panel-title">Continue Run</div>
+                <button className="text-btn" onClick={() => setContinueTurnLimitDialog(null)}>
+                  Close
+                </button>
+              </div>
+              <div className="panel continue-turn-limit-panel">
+                <div className="continue-turn-limit-copy">
+                  {typeof continueTurnLimitDialog.currentLimit === 'number' &&
+                  continueTurnLimitDialog.currentLimit > 0
+                    ? `This run stopped after reaching ${continueTurnLimitDialog.currentLimit} agent turns.`
+                    : 'This run stopped after reaching the current agent turn limit.'}
+                </div>
+                <label className="field">
+                  Max Agent Turns
+                  <input
+                    type="number"
+                    min={-1}
+                    step={1}
+                    value={continueTurnLimitDialog.proposedTurns}
+                    onChange={(event) =>
+                      setContinueTurnLimitDialog((current) =>
+                        current
+                          ? {
+                              ...current,
+                              proposedTurns: event.target.value,
+                              error: null
+                            }
+                          : current
+                      )
+                    }
+                  />
+                </label>
+                {continueTurnLimitDialog.error ? (
+                  <div className="continue-turn-limit-error">{continueTurnLimitDialog.error}</div>
+                ) : null}
+                <div className="continue-turn-limit-actions">
+                  <button className="ghost-btn" onClick={() => setContinueTurnLimitDialog(null)}>
+                    Cancel
+                  </button>
+                  <button className="primary-btn" onClick={() => void handleSaveAndContinueAfterTurnLimit()}>
+                    Save and Continue
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className={`workspace ${activeThread ? '' : 'is-empty'} ${isMinimalUi ? 'minimal-ui' : ''}`}>
           {activeThread ? (
             <>
@@ -3241,19 +4115,65 @@ function App() {
                   vlmProviders={vlmProviders}
                   vlmProvider={activeThread.vlmProvider ?? vlmDefaultProvider}
                   vlmModel={activeThread.vlmModel ?? vlmDefaultModel}
+                  providerThinking={
+                    typeof activeThread.providerThinking === 'boolean'
+                      ? activeThread.providerThinking
+                      : resolveProviderThinkingDefault(
+                          activeThread.vlmProvider ?? vlmDefaultProvider,
+                          settings
+                        )
+                  }
                   fastMode={activeThreadFastMode}
                   fastModeAvailable={fastModeAvailable}
                   vlmLoading={vlmLoadingThreadId === activeThread.id}
                   vlmError={vlmErrorByThread[activeThread.id] ?? null}
                   vlmLocked={Boolean(activeThread.vlmLocked)}
                   onVlmSelectionChange={handleVlmSelectionChange}
+                  onProviderThinkingToggle={handleProviderThinkingToggle}
                   onFastModeToggle={handleFastModeToggle}
+                  onBackToConsole={() => setActiveThreadId(null)}
                   graphEvents={activeThread.graphEvents ?? []}
                   todos={activeThread.todos ?? []}
+                  agentTurnLimitNotice={activeThreadAgentTurnLimitNotice}
+                  onContinueAfterAgentTurnLimit={openContinueTurnLimitDialog}
                   runtimeClaimHint={runtimeClaimHint}
+                  occupyingResources={Boolean(activeThread.occupyingResources)}
+                  claimingRuntime={claimingThreadId === activeThread.id}
+                  onClaimRuntime={
+                    backendMode === 'headless' && !activeThread.occupyingResources
+                      ? () => void claimRuntimeForThread(activeThread.id)
+                      : undefined
+                  }
+                  onReleaseRuntime={
+                    backendMode === 'headless' && activeThread.occupyingResources
+                      ? () => void releaseThreadRuntimeForThread(activeThread.id)
+                      : undefined
+                  }
                   minimalUi={isMinimalUi}
+                  pendingReferenceInsertion={
+                    pendingReferenceInsertion?.threadId === activeThread.id
+                      ? pendingReferenceInsertion.insertion
+                      : null
+                  }
+                  onPendingReferenceInsertionHandled={(key) => {
+                    setPendingReferenceInsertion((current) =>
+                      current?.insertion.key === key ? null : current
+                    )
+                  }}
                 />
               </section>
+              {activeThread && (claimingThreadId === activeThread.id || releasingThreadId === activeThread.id) && (
+                <div className="runtime-busy-overlay" aria-live="polite">
+                  <div className="runtime-busy-card">
+                    <svg className="runtime-busy-spinner" width="28" height="28" viewBox="0 0 28 28" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
+                      <path d="M25 14a11 11 0 1 1-2.75-7.3" />
+                    </svg>
+                    <span className="runtime-busy-label">
+                      {claimingThreadId === activeThread.id ? 'Claiming runtime...' : 'Releasing runtime...'}
+                    </span>
+                  </div>
+                </div>
+              )}
               <section className="workspace-scene">
                 <SceneTab
                   threadId={activeThread.id}
@@ -3284,6 +4204,18 @@ function App() {
                   }
                   onFetchRenders={(includeLocalWork) => void fetchRenders(undefined, includeLocalWork ?? false)}
                   onFetchGltf={() => void fetchGltf()}
+                  onDeleteSceneObject={(backendObjectId, backendObjectName) =>
+                    deleteSceneObjectForThread(activeThread.id, backendObjectId, backendObjectName)
+                  }
+                  onAddPrimitive={(payload) =>
+                    addPrimitiveForThread(activeThread.id, payload)
+                  }
+                  onTransformSceneObject={(transform) =>
+                    transformSceneObjectForThread(activeThread.id, transform)
+                  }
+                  onTransformDragChange={(dragging) =>
+                    handleTransformDragChange(activeThread.id, dragging)
+                  }
                   onDownloadGltf={() => void downloadGltf()}
                   onDownloadBlend={() => void downloadBlend()}
                   onDownloadBlendFile={(relativePath, filename) => void downloadBlendFile(relativePath, filename)}
@@ -3291,9 +4223,21 @@ function App() {
                   actionError={activeSceneActionError}
                   onClearActionError={() => setSceneActionError(activeThread.id, null)}
                   onHierarchyChange={handleSceneHierarchyChange}
+                  onRefInChat={(node) => handleRefSceneObjectInChat(activeThread.id, node)}
                   loading={activeThreadLoading}
                   canRunActions={canRunSceneActions}
+                  canDeleteHierarchy={canDeleteHierarchy}
+                  canTransformObjects={canTransformObjects}
+                  canDownloadPersistedGltf={Boolean(activeThread.sceneManifest?.gltf_url)}
+                  deleteActionHint={hierarchyDeleteHint}
+                  transformActionHint={transformActionHint}
                   idleActionHint={idleSceneActionHint}
+                  sceneFetchCooldownHint={sceneFetchCooldownHint}
+                  onClaimRuntime={
+                    backendMode === 'headless' && !activeThread.occupyingResources
+                      ? () => claimRuntimeForThread(activeThread.id)
+                      : undefined
+                  }
                   minimalUi={isMinimalUi}
                 />
               </section>
@@ -3301,39 +4245,66 @@ function App() {
           ) : (
             <section className="workspace-empty">
               <div className="workspace-empty-card">
+                <div className="workspace-empty-title">Vibe3DScene: Create Your 3D Scene With Words</div>
+                <div className="workspace-empty-meta">
+                  <div className="workspace-empty-badge">
+                    <span className="sparkle" aria-hidden="true">&#10022;</span>{' '}AI-Native 3D Creation
+                  </div>
+                  {/* <div className="workspace-empty-subtitle">
+                    Describe what you imagine — the 3D scene agent will build it for you.
+                  </div> */}
+                </div>
+
                 <div className="welcome-hero">
                   <img src="/demo.gif" alt="3D scene creation demo" loading="lazy" />
                 </div>
-                <div className="workspace-empty-badge">
-                  <span className="sparkle" aria-hidden="true">&#10022;</span>{' '}AI-Powered 3D Creation
-                </div>
-                <div className="workspace-empty-title">Bring Your 3D Vision to Life</div>
-                <div className="workspace-empty-subtitle">
-                  Describe what you imagine — the AI scene agent will build, refine, and render your 3D scene in real time.
-                </div>
-
-                {examplePrompts.length > 0 && (
-                  <div className="welcome-prompt-grid">
-                    {examplePrompts.slice(0, 4).map((prompt, index) => (
-                      <button
-                        key={`${index}-${prompt}`}
-                        type="button"
-                        className="welcome-prompt-card"
-                        disabled={creatingThread || releasingThreadId !== null}
-                        onClick={() => {
-                          setPendingWelcomePrompt(prompt)
-                          void createThread()
-                        }}
-                        title={prompt}
-                      >
-                        <span className="welcome-prompt-icon" aria-hidden="true">
-                          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M3 13l3-3m0 0l7-7m-7 7l-3-3m10 3l-7 7" />
-                          </svg>
-                        </span>
-                        <span className="welcome-prompt-text">{prompt}</span>
-                      </button>
-                    ))}
+                {consoleExamples.length > 0 && (
+                  <div className="welcome-section welcome-section-examples">
+                    <div className="welcome-section-header">
+                      <div className="welcome-section-title">Workflow Examples</div>
+                    </div>
+                    <div className="welcome-example-grid">
+                      {consoleExamples.map((example) => (
+                        <button
+                          key={example.id}
+                          type="button"
+                          className="welcome-example-card"
+                          disabled={creatingThread || releasingThreadId !== null}
+                          onClick={() => launchConsoleExample(example)}
+                          title={example.prompt}
+                        >
+                          <div className="welcome-example-media">
+                            {example.referenceImages[0]?.url ? (
+                              <img
+                                src={example.referenceImages[0].url}
+                                alt={example.title}
+                                loading="lazy"
+                              />
+                            ) : (
+                              <div className="welcome-example-fallback" aria-hidden="true">
+                                <svg viewBox="0 0 24 24">
+                                  <path d="M4 18.5V7.75A1.75 1.75 0 0 1 5.75 6h12.5A1.75 1.75 0 0 1 20 7.75V18.5M7 18.5l3.25-4 2.5 2.75L15.5 13l4.5 5.5M8.25 10.25h.01" />
+                                </svg>
+                              </div>
+                            )}
+                            <div className="welcome-example-tags">
+                              <span className={`welcome-example-pill ${example.fastMode ? 'is-fast' : 'is-standard'}`}>
+                                {example.fastMode ? 'Fast mode' : 'Standard mode'}
+                              </span>
+                              {example.referenceImages.length > 0 && (
+                                <span className="welcome-example-pill">
+                                  {example.referenceImages.length} ref image{example.referenceImages.length > 1 ? 's' : ''}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="welcome-example-body">
+                            <div className="welcome-example-title">{example.title}</div>
+                            <div className="welcome-example-text">{example.prompt}</div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 )}
 
@@ -3353,7 +4324,7 @@ function App() {
                   </span>
                   <span className="workspace-empty-feature">
                     <span className="workspace-empty-feature-icon" aria-hidden="true">&#9655;</span>
-                    Real-Time 3D
+                    3D Scene Agent
                   </span>
                   <span className="workspace-empty-feature">
                     <span className="workspace-empty-feature-icon" aria-hidden="true">&#128247;</span>

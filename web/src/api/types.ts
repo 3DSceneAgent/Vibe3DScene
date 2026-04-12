@@ -53,6 +53,12 @@ export type HistoryToolMedia = {
   value: string
 }
 
+export type HistoryReferencedObject = {
+  backend_object_id: string
+  display_name: string
+  object_type?: string | null
+}
+
 export type HistoryMessage = {
   id: string
   turn_id?: string | null
@@ -64,6 +70,7 @@ export type HistoryMessage = {
   tool_payload?: unknown
   tool_media?: HistoryToolMedia[]
   attached_images?: ImageAsset[]
+  referenced_objects?: HistoryReferencedObject[]
 }
 
 export type TelemetryMetrics = {
@@ -85,6 +92,7 @@ export type ThreadHistoryInfo = {
   scene_revision?: number | null
   messages: HistoryMessage[]
   todos: TodoItem[]
+  active_todo_id?: string | null
   thread_metrics?: TelemetryMetrics
   turn_metrics_by_turn_id?: Record<string, TelemetryMetrics>
 }
@@ -96,6 +104,63 @@ export type SceneArtifactManifestInfo = {
   generated_at_ms?: number | null
   gltf_url?: string | null
   renders: RenderImage[]
+}
+
+export type PrimitiveType = 'cube' | 'sphere' | 'cylinder' | 'plane' | 'cone' | 'torus' | 'icosphere'
+
+export type AddPrimitiveRequest = {
+  primitive_type: PrimitiveType
+  location?: [number, number, number]
+  size?: number
+}
+
+export type AddPrimitiveInfo = {
+  thread_id: string
+  primitive_type: string
+  object_name: string
+  backend_object_id: string
+  backend_object_name: string
+  scene_revision?: number | null
+  manifest_generated_at_ms?: number | null
+  has_persisted_blend: boolean
+}
+
+export type DeleteSceneObjectRequest = {
+  backend_object_id: string
+  backend_object_name?: string | null
+  mode?: 'cascade'
+}
+
+export type DeleteSceneObjectInfo = {
+  thread_id: string
+  backend_object_id: string
+  backend_object_name?: string | null
+  deleted_names: string[]
+  scene_revision?: number | null
+  manifest_generated_at_ms?: number | null
+  has_persisted_blend: boolean
+}
+
+export type SceneObjectTransformRequest = {
+  backend_object_id: string
+  backend_object_name?: string | null
+  world_matrix: number[][]
+  refresh_artifacts?: boolean
+}
+
+export type SceneObjectTransformInfo = {
+  thread_id: string
+  backend_object_id: string
+  backend_object_name?: string | null
+  object_name?: string | null
+  object_type?: string | null
+  world_location: number[]
+  world_rotation_quaternion: number[]
+  world_scale: number[]
+  scene_revision?: number | null
+  manifest_generated_at_ms?: number | null
+  has_persisted_blend: boolean
+  artifacts_refreshed: boolean
 }
 
 export type ThreadSummaryInfo = {
@@ -130,6 +195,7 @@ export type StreamProgress = {
   last_node?: string | null
   tool_events?: number
   assistant_chunks?: number
+  llm_call_count?: number
   todo_total?: number
   todo_completed?: number
   llm_input_tokens?: number | null

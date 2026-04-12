@@ -18,6 +18,10 @@ function truncate(text: string, max: number): string {
   return `${t.slice(0, Math.max(0, max - 1))}…`
 }
 
+function isOpenTodoStatus(status: TodoItem['status']): boolean {
+  return status === 'pending' || status === 'in_progress'
+}
+
 export function TodoPanel({ todos, activeTodoId = null, fastMode = false, isStreaming = false }: TodoPanelProps) {
   const panelId = useId()
   const [drawerOpen, setDrawerOpen] = useState(false)
@@ -47,10 +51,14 @@ export function TodoPanel({ todos, activeTodoId = null, fastMode = false, isStre
 
   const resolvedActiveTodoId = (() => {
     if (typeof activeTodoId === 'string' && activeTodoId.trim()) {
-      return activeTodoId.trim()
+      const candidate = activeTodoId.trim()
+      const matched = todos.find((todo) => todo.id === candidate)
+      if (matched && isOpenTodoStatus(matched.status)) {
+        return candidate
+      }
     }
-    const firstPending = todos.find((todo) => todo.status === 'pending')
-    return firstPending?.id ?? null
+    const firstOpen = todos.find((todo) => todo.status === 'in_progress' || todo.status === 'pending')
+    return firstOpen?.id ?? null
   })()
 
   const displayTodos: TodoDisplayItem[] = todos.map((todo) => {
@@ -62,15 +70,17 @@ export function TodoPanel({ todos, activeTodoId = null, fastMode = false, isStre
     return { ...todo, displayStatus }
   })
 
-  const completedCount = displayTodos.filter((todo) => todo.displayStatus === 'completed').length
+  const doneCount = displayTodos.filter(
+    (todo) => todo.displayStatus === 'completed' || todo.displayStatus === 'skipped'
+  ).length
   const inProgressTodo = displayTodos.find((todo) => todo.displayStatus === 'in_progress') ?? null
   const firstPendingTodo = displayTodos.find((todo) => todo.displayStatus === 'pending') ?? null
   const latestTodo = displayTodos[displayTodos.length - 1]
   const headlineTodo = inProgressTodo ?? firstPendingTodo ?? latestTodo
   const headline = headlineTodo ? truncate(headlineTodo.description, 72) : 'All clear'
-  const openLabel = `Todos (${completedCount}/${todos.length})`
+  const openLabel = `Todos (${doneCount}/${todos.length})`
 
-  const handleAriaLabel = `Todos, ${completedCount} of ${todos.length} done. ${headline}`
+  const handleAriaLabel = `Todos, ${doneCount} of ${todos.length} done. ${headline}`
 
   return (
     <div
@@ -91,8 +101,8 @@ export function TodoPanel({ todos, activeTodoId = null, fastMode = false, isStre
             <span className="todo-drawer-handle-title">{openLabel}</span>
           ) : (
             <>
-              <span className="todo-drawer-handle-badge" title={`${completedCount} of ${todos.length} completed`}>
-                {completedCount}/{todos.length}
+              <span className="todo-drawer-handle-badge" title={`${doneCount} of ${todos.length} done`}>
+                {doneCount}/{todos.length}
               </span>
               <span className="todo-drawer-handle-preview" title={headlineTodo?.description}>
                 {headline}
@@ -115,7 +125,15 @@ export function TodoPanel({ todos, activeTodoId = null, fastMode = false, isStre
               {displayTodos.map((todo) => (
                 <li key={todo.id} className={`todo-drawer-item status-${todo.displayStatus}`}>
                   <span className="todo-status-icon" aria-hidden="true" />
-                  <span className={todo.displayStatus === 'completed' ? 'todo-text-completed' : 'todo-text'}>
+                  <span
+                    className={
+                      todo.displayStatus === 'completed'
+                        ? 'todo-text-completed'
+                        : todo.displayStatus === 'skipped'
+                          ? 'todo-text-skipped'
+                          : 'todo-text'
+                    }
+                  >
                     {todo.description}
                   </span>
                 </li>
